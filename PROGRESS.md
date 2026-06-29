@@ -76,24 +76,30 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `<name>`/arg-count → usage; `Run` takes the `project-registry` lock (contended → lock_held) then maps
   `config.Add` outcomes (success → created+`wi sync` hint / `ErrDuplicateRepo` → already_exists / missing
   → not_found+`wi init` / malformed → usage). Registered as the 2-token key `"repo add"`. Guard
-  `CMD-REPO-ADD`. **The LAST MVP handler — `wi isolate rm` — is now IN PROGRESS, foundation-first:** its
-  first sub-unit, the `internal/git` EVIDENCE-POSITIVE reclamation primitives `RemoveWorktree` (`git
-  worktree remove`: deregisters the admin entry, NO `--force`/NO `git reset --hard`, refuses a dirty
-  worktree — DESIGN §7.1/§7.2) + `DeleteOwnedRef` (`update-ref -d` the marker, idempotent), has landed
-  (guard `GIT-RECLAIM`); the owned-ref READ/verify side already exists (`OwnedRefSHA`, guard
-  `GIT-OWNED-REF`). **Sub-unit (b) `internal/isolate.Remove` has now LANDED too** (guards `ISOLATE-REMOVE`
-  + `ISOLATE-REMOVE-TEARDOWN`, plus the `state.Delete` it needs): under the `isolate-state:<task>` lock it
-  walks the targeted repos (empty → all recorded = full teardown), evaluates the three evidence-positive
-  gates per repo (marker exists / clean / HEAD == marker-sha = not-ahead-of-base, decision #RM), reclaims
-  the verified ones (`RemoveWorktree` + `DeleteOwnedRef`) and drops them from the registry (deleting the
-  record + emptied task dir when the last repo goes), and HARD-BLOCKs any `orphan_unexplained` (never
-  auto-pruned/`--force`'d, left intact). What remains for MVP: (c) the thin `cmd_isolate_rm.go` handler
-  (a `Command` returning a `*Result`/`*CommandError` over this green core — never an envelope, never an
-  exit code — with a `BuildRegistry` factory binding its deps + validating its args: `<task>`
-  segment-checked → usage, optional `<repo>…` subset; maps `RemoveComplete` → `Result{Action: removed}`,
-  a `RemoveBlocked` run → the blocked repos onto `Blocked[]`/`repos[]`, `*lock.HeldError` → lock_held,
-  `state.ErrNoRecord` → not_found + `wi isolate new` hint); then `cmd/wi` main (build the real
-  registry + `clock.System`, call `Dispatch`, the single `os.Exit` via `exitcontract.Exit`); then CI +
+  `CMD-REPO-ADD`. **The LAST MVP handler — `wi isolate rm` — has now FULLY LANDED (all three sub-units):**
+  (a) the `internal/git` EVIDENCE-POSITIVE reclamation primitives `RemoveWorktree` (`git worktree remove`:
+  deregisters the admin entry, NO `--force`/NO `git reset --hard`, refuses a dirty worktree — DESIGN
+  §7.1/§7.2) + `DeleteOwnedRef` (`update-ref -d` the marker, idempotent), guard `GIT-RECLAIM` (the
+  owned-ref READ/verify side `OwnedRefSHA` pre-existed, guard `GIT-OWNED-REF`); (b) `internal/isolate.Remove`
+  (guards `ISOLATE-REMOVE` + `ISOLATE-REMOVE-TEARDOWN`, plus the `state.Delete` it needs): under the
+  `isolate-state:<task>` lock it walks the targeted repos (empty → all recorded = full teardown), evaluates
+  the three evidence-positive gates per repo (marker exists / clean / HEAD == marker-sha =
+  not-ahead-of-base, decision #RM), reclaims the verified ones (`RemoveWorktree` + `DeleteOwnedRef`) and
+  drops them from the registry (deleting the record + emptied task dir when the last repo goes), and
+  HARD-BLOCKs any `orphan_unexplained` (never auto-pruned/`--force`'d, left intact); and (c) the thin
+  `cmd_isolate_rm.go` handler over that green core (guard `CMD-ISOLATE-RM`, one line in `BuildRegistry`):
+  factory validates `<task>`→usage (bare task = full teardown is VALID) + binds the optional un-checked
+  `<repo>…` subset; `Run` maps `isolate.Remove`'s reclaimed/blocked tallies onto the return convention
+  (decision **#RD**) — all reclaimed→`removed`/exit 0, mixed→durable `(result, *CommandError{partial,
+  Action:removed})`/exit 2, nothing-reclaimed-with-orphan→full refusal `conflict`/exit 4,
+  nothing-reclaimed-all-non-members→not_found, `*lock.HeldError`→lock_held, `state.ErrNoRecord`→not_found
+  +`wi isolate new`; blocked repos ride in **repos[]** (per-repo `conflict`/`orphan_unexplained`), NOT
+  `Blocked[]`, because `envelopeFor` threads only `Repos/Warnings/Next` onto a failure envelope.
+  **ALL SIX MVP COMMANDS NOW LAND GREEN** (`init` · `repo add` · `sync` · `isolate new` · `resolve` ·
+  `isolate rm`) — the full `init→repo add→sync→isolate new→resolve→isolate rm` surface exists as handlers
+  plugged into the generic pipeline. What remains for MVP M0–M3: **`cmd/wi/main.go`** (build the real
+  registry + `clock.System`, resolve the layout via `layout.Resolve(cwd)`, call `Dispatch`, the single
+  `os.Exit` via `exitcontract.Exit` — the ONLY `main` package + the ONLY `os.Exit` in the tree); then CI +
   `.goreleaser.yaml` + Homebrew tap. Deferred
   enrichments pulled in when a command needs them: a `--` end-of-flags terminator + `did_you_mean` in
   dispatch, `isolate.New` resume (skip repos already `StageCreated`), per-repo base persisted in `state`
@@ -104,6 +110,33 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 - **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); in Wave B domain code (M2).
 
 ## Done
+
+- **M3 · `wi isolate rm <task> [<repo>…]` handler — the LAST MVP command** (`cmd_isolate_rm.go` +
+  `cmd_isolate_rm_test.go`, guard `CMD-ISOLATE-RM`; one line in `BuildRegistry`). The thin teardown seam
+  over the green `isolate.Remove` core (sub-unit c — completes the `isolate rm` triplet
+  GIT-RECLAIM → ISOLATE-REMOVE → CMD-ISOLATE-RM). Factory `newIsolateRmCommand` validates `<task>` via
+  `ValidateSegment` → usage (≥1 arg; bare task is VALID = full teardown, distinct from `isolate new`'s
+  ≥2), binds the optional `<repo>…` subset UN-segment-checked (a non-member is a per-repo domain
+  not_found, not usage). `Run` drives `isolate.Remove` and maps its outcome onto the return convention
+  (decision **#RD**): `*lock.HeldError`→lock_held; `state.ErrNoRecord`→not_found+`wi isolate new` hint;
+  then by reclaimed/blocked tallies — **all reclaimed**→`Result{Action: removed}` (exit 0); **mixed**
+  (≥1 reclaimed AND ≥1 not)→the DURABLE PARTIAL `(result, *CommandError{partial, Action: removed})`
+  (exit 2, resumable — re-running reclaims now-unblocked repos, #D); **nothing reclaimed, ≥1 orphan
+  hard-block**→a full refusal `*CommandError{conflict}` (exit 4); **nothing reclaimed, every non-removed
+  repo merely not a member**→`*CommandError{not_found}`. `projectRemoveOutcome` maps each
+  `isolate.RemoveOutcome`→`RepoResult`: reclaimed→`removed`; orphan hard-block (`Reason` set)→`noop` +
+  per-repo `Error{Kind: conflict, Code: "orphan_unexplained", Message: Reason}`; `ErrRepoNotInIsolate`→
+  per-repo not_found; other fault→internal. Blocked repos ride in **repos[]**, NOT `Blocked[]` — the
+  critical contract fact (decision #RD): `envelopeFor` threads only `Repos/Warnings/Next` onto a FAILURE
+  envelope, so a non-zero exit that put blocked repos in `Blocked[]` would silently drop them. Guards
+  (hermetic `testenv` + real git, materializing via the real `isolate new` handler): complete teardown
+  (both repos removed + record deleted), the durable partial (api removed / web ahead-of-base blocked as
+  a repos[] conflict coded orphan_unexplained / record retains only web), all-blocked → conflict with the
+  orphan still in repos[] + record intact, missing-record → not_found+`wi isolate new`, and factory
+  arg-validation (no task → usage, traversing task → usage, bare task → runnable). **This is the last of
+  the six MVP commands** (`init` · `repo add` · `sync` · `isolate new` · `resolve` · `isolate rm`). What
+  remains for MVP M0–M3: `cmd/wi/main.go` (the real registry + `clock.System` → `Dispatch` → the single
+  `os.Exit` via `exitcontract.Exit`), then CI + `.goreleaser.yaml` + Homebrew tap.
 
 - **M3 · `internal/isolate.Remove` — the evidence-positive reclamation domain core** (`isolate.go` +
   `isolate_test.go`, guards `ISOLATE-REMOVE` + `ISOLATE-REMOVE-TEARDOWN`; plus `state.Delete`). The SECOND
@@ -921,39 +954,21 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   (O_EXCL commit point); re-init → `already_exists` leaving the manifest byte-for-byte intact.
 - **DONE (prior iteration):** `resolve` (pure read) + the `Deps`/`BuildRegistry` seam — guard
   `CMD-RESOLVE`. The handler→`Result`/`CommandError` contract pattern is now established for the rest.
-- **NEXT — M3 · the remaining per-command handlers, one cohesive unit each** (`sync` →
-  `repo add` → `isolate rm`). Each is a `Command` (`Run(ctx) (*Result, error)`) doing its
-  domain work over the green M0–M2 core (config/state/git/mirror/isolate) and returning a typed
-  `*Result` (or `*CommandError`) — NEVER an envelope, never an exit code (the pipeline owns both) — plus
-  one line in `BuildRegistry` and a factory that parses+validates its args (→ `*CommandError{Kind:usage}`
-  → exit 64). Guard each with its own fitness test asserting ONLY the domain mapping (the generic
-  `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/exit wiring), following
-  `CMD-RESOLVE`/`CMD-INIT`/`CMD-ISOLATE-NEW`.
-  **In progress: `isolate rm <task> [<repo>…]` — the LAST MVP handler** (and the only remaining M3
-  command). It RECLAIMS an isolate's worktrees, and reclamation is EVIDENCE-POSITIVE (DESIGN §7.1, an
-  INV-RECLAIM-SAFE invariant): a worktree is removed ONLY when a marker ref `refs/wi/owned/<task>/<repo>`
-  proves wi created it; an unexplained orphan (a path with no owned-ref, or local commits/dirt beyond the
-  recorded tip) is a HARD BLOCK — refused, never auto-pruned — and `refs/wi/owned/*` / `refs/wi/backup/*`
-  are protected from gc. Decomposition (one sub-unit per firing):
-  **(a) DONE — the `internal/git` reclamation primitives** `RemoveWorktree` (`git worktree remove`, no
-  `--force`, no `git reset --hard`, deregisters the admin entry, refuses a dirty worktree) + `DeleteOwnedRef`
-  (`update-ref -d` the marker, idempotent). Guard `GIT-RECLAIM` (see Done). The owned-ref READ/verify side
-  already exists as `OwnedRefSHA` (guard `GIT-OWNED-REF`).
-  **(b) NEXT — `internal/isolate.Remove(ctx, l, g, task, repos…)`** under the `isolate-state:<task>` lock:
-  `state.Load` the record (missing → a not_found-class signal), determine the target repo set (none → all
-  recorded), and for EACH target verify the three evidence-positive gates — owned-ref present
-  (`OwnedRefSHA`), worktree clean (`IsClean`), not ahead of base (`DivergedCounts` ahead==0) — then reclaim
-  the verified ones (`RemoveWorktree` + `DeleteOwnedRef`) and drop them from the record; any repo that
-  fails a gate is an `orphan_unexplained` HARD BLOCK (reported as blocked, never auto-pruned, no `--force`
-  in MVP). Returns a typed `Result` (removed set + blocked set), NOT an envelope.
-  **(c) THEN the thin `cmd_isolate_rm.go` handler** (factory validates `<task>` segment → usage; maps
-  domain → `Result{Action: removed}` / a blocked-orphan → `Blocked[]` (exit-neutral, NOT a refusal) / held
-  lock → lock_held / missing record → not_found + `wi isolate new` hint). Guard `CMD-ISOLATE-RM`.
-  **Decision (recorded below): orphan handling = HARD BLOCK, `--force`-free for MVP** (DESIGN §7.1).
-- **Then** `cmd/wi/main.go` — the single process entry: discover the root → build `Deps` +
-  `clock.System`, `BuildRegistry`, call `cli.Dispatch`, and make the SOLE `os.Exit` via
-  `exitcontract.Exit(code)`. Then CI + `.goreleaser.yaml` + Homebrew tap. Completing this chain = full
-  MVP (M0–M3) green = a STOP condition.
+- **ALL SIX PER-COMMAND HANDLERS DONE** — `resolve` (`CMD-RESOLVE`), `init` (`CMD-INIT`), `isolate new`
+  (`CMD-ISOLATE-NEW`), `sync` (`CMD-SYNC`), `repo add` (`CMD-REPO-ADD`), and `isolate rm` (`CMD-ISOLATE-RM`)
+  all land green as `Command`s over the M0–M2 core, each plugged into the pipeline via one `BuildRegistry`
+  line. The `isolate rm` triplet completed this firing: (a) `internal/git` `RemoveWorktree`/`DeleteOwnedRef`
+  (`GIT-RECLAIM`), (b) `internal/isolate.Remove` (`ISOLATE-REMOVE`/`ISOLATE-REMOVE-TEARDOWN`), (c) the thin
+  `cmd_isolate_rm.go` handler (`CMD-ISOLATE-RM`, decision #RD).
+- **NEXT — `cmd/wi/main.go`** — the single process entry and the ONLY `main` package in the tree:
+  resolve the root via `layout.Resolve(cwd)` (decision #G), build `Deps{Layout, Git: git.New(gitexec…),
+  Clock: clock.System{}}` + `BuildRegistry(deps)`, call `cli.Dispatch(ctx, os.Stdout, clock.System{}, reg,
+  os.Args[1:])`, and make the SOLE `os.Exit` via `exitcontract.Exit(code)`. The whole pipeline beneath it
+  is already proven by `DISPATCH-ROUTES`/`RUN-PIPELINE` + the six `CMD-*` guards, so `main` itself is thin
+  wiring — its fitness is an end-to-end smoke (build the binary, run `wi init` in a temp dir, assert one
+  JSON envelope on stdout + exit 0), or a `func run(args, w) int` seam unit-tested without the real
+  `os.Exit`. Then CI + `.goreleaser.yaml` + Homebrew tap. Completing this chain = full MVP (M0–M3) green =
+  a STOP condition.
 - Deferred follow-ons (pull in when a command drives them): `isolate.New` **resume** (on re-run skip
   repos already `StageCreated`); per-repo **base persisted in `state`** (lets `resolve` populate
   `branch` instead of v0's empty); state **KV + `cas`** (`--expected __ABSENT__`).
@@ -1017,9 +1032,32 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | GIT-RECLAIM | replace `git worktree remove` with a bare `os.RemoveAll(worktreePath)` in `RemoveWorktree` → the dir vanishes but the SSOT's worktree admin entry survives as a stale prunable entry AND a dirty worktree is wrongly nuked → `TestRemoveWorktreeDeregisters` RED (`worktree list` still names the path, "prunable gitdir file points to non-existent location") + `TestRemoveWorktreeRefusesDirty` RED (removed a dirty worktree, want refusal) — pins the deregister + no-force/no-reset-hard safety (DESIGN §7.1/§7.2); for `DeleteOwnedRef` skip the `update-ref -d` (`if false {…}`) → the marker survives → `TestDeleteOwnedRefClearsMarker` RED (`OwnedRefSHA` still reports present) |
 | ISOLATE-REMOVE | drop the ahead-of-base gate in `reclaimRepo` (`if false && head != marker`) → a worktree carrying a local commit (clean tree, HEAD moved past the creation marker) is no longer a HARD BLOCK; its clean tree lets `git worktree remove` succeed, so the local work is wrongly reclaimed → `TestRemoveReclaimsCleanBlocksAheadOfBase` RED on every "web intact" assertion (outcome `Removed:true` not blocked, worktree dir gone, marker cleared, registry no longer retains web) — pins the evidence-positive "not ahead of base" gate (DESIGN §7.1, decision #RM); secondary: skip the marker-existence/clean gates likewise → an unowned or dirty orphan is reclaimed |
 | ISOLATE-REMOVE-TEARDOWN | in `isolate.Remove`'s `len(rec.Repos)==0` branch replace `state.Delete` with `state.Store(stateDir, rec)` (keep an empty-repos husk instead of deleting) → a fully-reclaimed isolate's record survives → `TestRemoveAllCleanDeletesRecord` RED (`state.Load` returns a record, want `state.ErrNoRecord`) — pins that full teardown removes the registry entry so a later `isolate rm` correctly reports not_found |
+| CMD-ISOLATE-RM | in `isolateRmCmd.Run`, on the mixed outcome (`removed > 0` with blocks) return `(result, nil)` instead of `(result, *CommandError{Kind:partial, Action:removed})` → a partial teardown is mis-reported as a clean success (no error, exit 0) → `TestIsolateRmDurablePartialBlocksOrphan` RED (`want *cli.CommandError, got <nil>`), while complete-teardown + all-blocked stay GREEN (isolates the mutant to the partial-mapping path); alternate: in `projectRemoveOutcome` map an orphan hard-block to `Kind:internal` (or drop the `Code:"orphan_unexplained"`) → same test RED on the repos[] `web.Error.Kind == conflict` / `Code == orphan_unexplained` assertions — pins the loud `orphan_unexplained` surface (DESIGN §7.1) riding in repos[] not Blocked[] (decision #RD) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
+- **#RD `isolate rm` outcome → envelope/exit mapping — RESOLVED 2026-06-30** (not a §7 ruling; DESIGN
+  defines the exit table + the `orphan_unexplained` sub-code but pins no per-outcome mapping for the rm
+  command, so the handler adopts one). Given `isolate.Remove`'s per-repo tallies (reclaimed vs blocked):
+  **(1) all reclaimed → `Result{Action: removed}`, nil error → exit 0.** **(2) mixed (≥1 reclaimed AND
+  ≥1 not) → the DURABLE PARTIAL `(result, *CommandError{Kind: partial, Action: removed})` → exit 2** —
+  durable forward progress was made and re-running reclaims any now-unblocked repos, so it is resumable,
+  the same #D shape `isolate new`/`sync` use. **(3) nothing reclaimed with ≥1 orphan hard-block → a full
+  refusal `*CommandError{Kind: conflict}` → exit 4** (NOT partial: no progress was made, it is a clean
+  "refused at exec" the agent must resolve; the worktree's on-disk state conflicts with what wi can prove
+  it owns). **(4) nothing reclaimed and every non-removed repo is merely not a member →
+  `*CommandError{Kind: not_found}`** ("you named repos that aren't in this isolate"). Plus the pre-loop
+  faults: `*lock.HeldError`→lock_held (exit 6); `state.ErrNoRecord`→not_found+`wi isolate new` hint (exit
+  3, the isolate does not exist). **Per-repo projection:** reclaimed→`removed`; orphan hard-block→`noop`
+  + `Error{Kind: conflict, Code: "orphan_unexplained", Message: Reason}` (the loud DESIGN §7.1 surface —
+  `orphan_unexplained` is a SUB-CODE on the per-repo error, not an `error.kind`; the kind is `conflict`
+  uniformly whether the block is unowned/dirty/ahead-of-base, since all three mean "on-disk state
+  conflicts with safe reclamation"); not-a-member→per-repo not_found; other fault→internal. **Critical
+  contract fact:** blocked repos ride in **repos[]**, NOT `Blocked[]`. `envelopeFor` threads only
+  `Repos/Warnings/Next` onto a FAILURE envelope (`Blocked[]` is the exit-NEUTRAL dry-run "would-block"
+  construct, threaded only on the SUCCESS path) — so a non-zero-exit refusal that put its blocked repos
+  in `Blocked[]` would silently drop them from the emitted envelope. Recorded in the `isolateRmCmd.Run`
+  doc comment; guard `CMD-ISOLATE-RM`'s mutant pins the partial-mapping + the orphan_unexplained surface.
 - **#RM "not ahead of base" realization for v0 reclamation — RESOLVED 2026-06-30** (not a §7 ruling;
   forced by `isolate.Remove` implementing DESIGN §7.1's "not ahead of base" gate against a `state.RepoRecord`
   that does NOT persist the per-repo base branch name). **A worktree is "not ahead of base" iff its HEAD sha
