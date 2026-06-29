@@ -9,8 +9,8 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** M1 in progress (git child-process layer). M0 building blocks complete (contract
-  spine + layout + opid + clock + testenv + lockfs + lock); `gitexec` runner+belt landed.
+- **Milestone:** M1 in progress (git verbs / SSOT posture). M0 complete; `gitexec` runner+belt and
+  `git.FastForwardBaseRef` (the SSOT keystone) landed.
 - **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); into Wave B domain code
 
 ## Done
@@ -200,19 +200,34 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   module-wide architecture test (git-child belt asserted across all offline command paths) lands later
   in `internal/invariants`.
 
+- **M1 · `internal/git` (SSOT keystone)** — `git.go` + `git_test.go`: deterministic typed git verbs
+  on `gitexec.Runner`, all local (offline `Run`, never dial). `ResolveRef(dir, ref)` reads a verified
+  commit SHA (`rev-parse --verify --end-of-options`). **`FastForwardBaseRef(dir, base, newRev)` is the
+  SOLE base-ref-mutation path (DESIGN §5):** reads current `refs/heads/<base>`, checks `merge-base
+  --is-ancestor <cur> <new>` (exit 1 ⇒ genuine non-ff ⇒ typed `*NonFastForwardError`, ref untouched;
+  other exits ⇒ real error), then `update-ref refs/heads/<base> <new> <cur>` — **no checkout, no
+  merge**, with the old value asserted so a concurrent change fails atomically rather than racing. Works
+  on the detached-HEAD SSOT; v0 sync + v1 land both reuse it. Guard `GIT-FF-ONLY` (two-sided, via a
+  `testenv` SSOT): a true fast-forward advances the ref; a divergent sibling commit is REFUSED with the
+  ref SHA unchanged (before==after). Mutant (drop the `--is-ancestor` precheck → unconditional
+  update-ref) confirmed `TestFastForwardRefusesNonFastForward` RED (divergent target advances, no
+  error). Reverted → GREEN. Remaining M1 verbs (`EnsureClone`, dirty/status checks) follow as their own
+  units; then `internal/mirror`.
+
 ## Next unit (pick this on the next firing)
 
-- **M1 · `internal/git` (typed verbs on gitexec) — start with the SSOT keystone.** Build the
-  deterministic typed git verbs on top of `gitexec.Runner` (DESIGN §4 line 171, §5). The keystone is
-  `FastForwardBaseRef` — the SOLE base-ref-mutation path (DESIGN §5): on the detached-HEAD SSOT clone,
-  `git merge-base --is-ancestor <cur> <new>` (ff-safety) then `git update-ref refs/heads/<base> <new>`
-  — **no checkout, no merge**, so it works on the bare/detached SSOT and both v0 `sync` and v1 `land`
-  reuse it with zero rework. Guard `GIT-FF-ONLY`: a true fast-forward advances the ref; a
-  **non-fast-forward** (divergent/older target) is REFUSED and the ref is unchanged (evidence: ref SHA
-  before == after); mutant = drop the `--is-ancestor` precheck (or use `update-ref` unconditionally) →
-  the non-ff case wrongly advances → RED. Use `testenv` to build a tiny SSOT with a base + a divergent
-  commit. Likely also a small `RevParse`/`ResolveRef` helper to read a ref SHA for the assertion. Other
-  verbs (`EnsureClone`, status/dirty checks) follow as their own units; `internal/mirror` after.
+- **M1 · `internal/git` · `EnsureClone` + working-tree status verbs.** Add the two verbs the SSOT
+  lifecycle needs next: (1) `EnsureClone(ctx, dir, originURL, base)` — lazily create an absent SSOT
+  clone **detached at the base tip** (DESIGN §5 line 203: `wi sync --repo r` clones on first use;
+  `repo add` stays a pure manifest edit), idempotent if `dir` already a valid clone. Cloning is the
+  ONE place network is allowed → must use `gitexec.RunNetwork` (everything else stays offline). Guard:
+  a fresh clone lands on a **detached HEAD** at `refs/heads/<base>`'s tip (assert `rev-parse
+  --symbolic-full-name HEAD` is detached / `HEAD` == base tip but no branch checked out); second call
+  is a noop (no re-clone). Mutant = clone without detaching (leave base checked out) → detached-HEAD
+  assertion RED. (2) A dirty/clean predicate (`IsClean`/`StatusPorcelain`) for the SSOT-pristine
+  invariant. Use `testenv.SeedOrigin` as the clone source (local `file://`, but clone is the network
+  verb so route via `RunNetwork`). After these, `internal/mirror` (cached freshness, never dials on
+  read paths).
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -238,6 +253,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | LOCK-MUTEX | treat a refused `TryLock` (`!ok`) as acquired → `TestAcquireRefusesOverlap` RED; or skip `h.Release()` rollback on refusal → `TestAcquireReleasesOnPartialFailure` RED |
 | GITEXEC-OFFLINE-BELT | drop `GIT_ALLOW_PROTOCOL=none` from `Run`'s overlay → an offline `ls-remote file://…` succeeds instead of being refused → `TestOfflineRefusesTransport` RED (unit-level half of INV-NO-NETWORK) |
 | GITEXEC-CAPTURE | make `run` swallow a non-zero exit (return `nil` instead of `*ExitError`) → `TestRunSurfacesExitError` RED |
+| GIT-FF-ONLY | drop the `merge-base --is-ancestor` precheck in `FastForwardBaseRef` (update-ref unconditionally) → a divergent target advances the base ref → `TestFastForwardRefusesNonFastForward` RED (missing error + moved ref) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
