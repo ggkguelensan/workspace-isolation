@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ggkguelensan/workspace-isolation/internal/git"
@@ -501,5 +502,147 @@ func TestOwnedRefMarksOwnershipUnderRefsWi(t *testing.T) {
 	branches := env.Git(t, ssot, "for-each-ref", "--format=%(refname)", "refs/heads/")
 	if want := "refs/heads/" + testenv.DefaultBranch; branches != want {
 		t.Errorf("refs/heads/ = %q, want only %q (marker must not leak a branch)", branches, want)
+	}
+}
+
+// Guard GIT-RECLAIM — evidence-positive worktree reclamation primitives (DESIGN §7.1, §7.2).
+//
+// `isolate rm` reclaims a worktree ONLY after proving wi owns it (the marker ref,
+// guard GIT-OWNED-REF) AND it is clean AND not ahead of base. The two git-level
+// operations it then composes are:
+//
+//	RemoveWorktree  — `git worktree remove <path>`: it deletes the worktree directory
+//	                  AND DEREGISTERS it from the SSOT's worktree admin
+//	                  (.git/worktrees/<id>), unlike a bare directory delete that would
+//	                  strand a stale admin entry. It uses NO --force and performs NO
+//	                  `git reset --hard` (DESIGN §7.2): a worktree carrying modified or
+//	                  untracked files is REFUSED and left intact — a second safety net
+//	                  beneath the isolate layer's own cleanliness gate.
+//	DeleteOwnedRef  — clears the ownership marker refs/wi/owned/<task>/<repo> with a
+//	                  single `update-ref -d`, once the worktree it vouched for is gone.
+//	                  Deleting an already-absent marker is a no-op success, so a re-run
+//	                  of reclamation stays idempotent.
+//
+// Non-vacuity (RemoveWorktree): replace `git worktree remove` with a bare
+// os.RemoveAll(worktreePath) → the directory vanishes but the SSOT's worktree admin
+// entry survives → TestRemoveWorktreeDeregisters RED (`git worktree list` still names
+// the removed path). A second mutant — add --force — reddens TestRemoveWorktreeRefusesDirty
+// by nuking a dirty worktree the no-force discipline must protect.
+// Non-vacuity (DeleteOwnedRef): make it a no-op → the marker survives →
+// TestDeleteOwnedRefClearsMarker RED on the absent-after assertion.
+
+// addCleanWorktree EnsureClone's an SSOT off a freshly seeded origin and adds one
+// detached worktree off the base tip, returning the ssot dir and the worktree path.
+func addCleanWorktree(t *testing.T, env *testenv.Env, g *git.Git, ctx context.Context) (ssot, wt string) {
+	t.Helper()
+	origin := env.SeedOrigin(t, "acme")
+	ssot = filepath.Join(env.Root, "ssot")
+	if err := g.EnsureClone(ctx, ssot, "file://"+origin, testenv.DefaultBranch); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+	wt = filepath.Join(env.Root, "isolas", "taskx", "acme")
+	if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
+		t.Fatalf("mkdir isolate dir: %v", err)
+	}
+	if err := g.AddWorktree(ctx, ssot, wt, "refs/heads/"+testenv.DefaultBranch); err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+	if list := env.Git(t, ssot, "worktree", "list", "--porcelain"); !strings.Contains(list, wt) {
+		t.Fatalf("precondition: worktree %s not registered:\n%s", wt, list)
+	}
+	return ssot, wt
+}
+
+func TestRemoveWorktreeDeregisters(t *testing.T) {
+	env := testenv.New(t)
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	ssot, wt := addCleanWorktree(t, env, g, ctx)
+
+	if err := g.RemoveWorktree(ctx, ssot, wt); err != nil {
+		t.Fatalf("RemoveWorktree (clean): %v", err)
+	}
+
+	// The worktree directory is gone from disk...
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Errorf("worktree dir still present after RemoveWorktree (stat err = %v)", err)
+	}
+	// ...AND the SSOT no longer registers it — proper deregistration, not a bare
+	// rm -rf that would strand a .git/worktrees admin entry.
+	if list := env.Git(t, ssot, "worktree", "list", "--porcelain"); strings.Contains(list, wt) {
+		t.Errorf("worktree %s still registered after RemoveWorktree:\n%s", wt, list)
+	}
+	// The SSOT working tree stays pristine throughout.
+	clean, err := g.IsClean(ctx, ssot)
+	if err != nil {
+		t.Fatalf("IsClean ssot: %v", err)
+	}
+	if !clean {
+		t.Errorf("SSOT dirty after worktree remove; it must stay pristine")
+	}
+}
+
+func TestRemoveWorktreeRefusesDirty(t *testing.T) {
+	env := testenv.New(t)
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	ssot, wt := addCleanWorktree(t, env, g, ctx)
+
+	// Dirty the worktree with an untracked file — the unclean state DESIGN §7.1
+	// forbids reclaiming. No --force, no reset --hard: the remove must REFUSE and
+	// leave the worktree intact.
+	if err := os.WriteFile(filepath.Join(wt, "scratch.txt"), []byte("wip"), 0o644); err != nil {
+		t.Fatalf("dirty worktree: %v", err)
+	}
+
+	if err := g.RemoveWorktree(ctx, ssot, wt); err == nil {
+		t.Fatalf("RemoveWorktree removed a dirty worktree; want a refusal error")
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Errorf("dirty worktree gone after a refused remove (stat err = %v); it must be left intact", err)
+	}
+	if list := env.Git(t, ssot, "worktree", "list", "--porcelain"); !strings.Contains(list, wt) {
+		t.Errorf("dirty worktree deregistered after a refused remove; it must stay registered:\n%s", list)
+	}
+}
+
+func TestDeleteOwnedRefClearsMarker(t *testing.T) {
+	env := testenv.New(t)
+	origin := env.SeedOrigin(t, "acme")
+	ssot := filepath.Join(env.Root, "ssot")
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	if err := g.EnsureClone(ctx, ssot, "file://"+origin, testenv.DefaultBranch); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+	baseTip := env.Git(t, ssot, "rev-parse", "refs/heads/"+testenv.DefaultBranch)
+	const task, repo = "taskx", "acme"
+
+	if err := g.CreateOwnedRef(ctx, ssot, task, repo, baseTip); err != nil {
+		t.Fatalf("CreateOwnedRef: %v", err)
+	}
+	if _, exists, err := g.OwnedRefSHA(ctx, ssot, task, repo); err != nil || !exists {
+		t.Fatalf("precondition: marker should exist, got (exists=%v, err=%v)", exists, err)
+	}
+
+	if err := g.DeleteOwnedRef(ctx, ssot, task, repo); err != nil {
+		t.Fatalf("DeleteOwnedRef: %v", err)
+	}
+	// The marker is gone — read back through the verb (absent, not an error).
+	if sha, exists, err := g.OwnedRefSHA(ctx, ssot, task, repo); err != nil || exists {
+		t.Errorf("OwnedRefSHA after delete = (%q, %v, %v), want (\"\", false, nil)", sha, exists, err)
+	}
+	// ...and confirmed with raw git: refs/wi/owned/ holds nothing for this pair.
+	if raw := env.Git(t, ssot, "for-each-ref", "--format=%(refname)", "refs/wi/owned/"+task+"/"+repo); raw != "" {
+		t.Errorf("refs/wi/owned/%s/%s still present after delete: %q", task, repo, raw)
+	}
+	// Idempotent: deleting an already-absent marker is a no-op success, so a re-run
+	// of reclamation does not error.
+	if err := g.DeleteOwnedRef(ctx, ssot, task, repo); err != nil {
+		t.Errorf("DeleteOwnedRef on an absent marker should be a no-op success, got %v", err)
 	}
 }

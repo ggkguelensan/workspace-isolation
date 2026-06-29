@@ -172,6 +172,37 @@ func (g *Git) OwnedRefSHA(ctx context.Context, ssotDir, task, repo string) (sha 
 	return strings.TrimSpace(res.Stdout), true, nil
 }
 
+// RemoveWorktree removes the linked worktree at worktreePath from the SSOT at
+// ssotDir with `git worktree remove`, which deletes the worktree directory AND
+// deregisters it from the SSOT's worktree admin (.git/worktrees/<id>) — unlike a
+// bare directory delete, which would strand a stale admin entry. It is the
+// reclamation verb `isolate rm` composes AFTER proving wi owns the worktree and it
+// is clean + not ahead of base (DESIGN §7.1). It passes NO --force and performs NO
+// `git reset --hard` (DESIGN §7.2): a worktree carrying modified or untracked files
+// is REFUSED and left intact, a second safety net beneath the isolate layer's own
+// cleanliness gate. It is a local operation (offline Run).
+func (g *Git) RemoveWorktree(ctx context.Context, ssotDir, worktreePath string) error {
+	if _, err := g.r.Run(ctx, ssotDir, "worktree", "remove", worktreePath); err != nil {
+		return fmt.Errorf("git: remove worktree %s in %s: %w", worktreePath, ssotDir, err)
+	}
+	return nil
+}
+
+// DeleteOwnedRef clears the ownership marker refs/wi/owned/<task>/<repo> with a
+// single `update-ref -d`, called once the worktree the marker vouched for has been
+// reclaimed (its evidence-positive job is done — DESIGN §7.1). It is a local
+// operation. Deleting an already-absent marker is a no-op success (git's update-ref
+// -d with no expected old value succeeds on a missing ref), so a re-run of
+// reclamation stays idempotent. task/repo are wi-internal and already segment-
+// validated by the caller, exactly as in CreateOwnedRef.
+func (g *Git) DeleteOwnedRef(ctx context.Context, ssotDir, task, repo string) error {
+	ref := ownedRef(task, repo)
+	if _, err := g.r.Run(ctx, ssotDir, "update-ref", "-d", ref); err != nil {
+		return fmt.Errorf("git: delete owned ref %s in %s: %w", ref, ssotDir, err)
+	}
+	return nil
+}
+
 // isRepo reports whether dir is an existing git repository. It guards the dir's
 // existence first so git is never spawned in a missing directory (which would
 // be an opaque start failure rather than a clean "not a repo").

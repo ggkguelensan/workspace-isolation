@@ -76,11 +76,18 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `<name>`/arg-count → usage; `Run` takes the `project-registry` lock (contended → lock_held) then maps
   `config.Add` outcomes (success → created+`wi sync` hint / `ErrDuplicateRepo` → already_exists / missing
   → not_found+`wi init` / malformed → usage). Registered as the 2-token key `"repo add"`. Guard
-  `CMD-REPO-ADD`. What remains for MVP: the LAST
-  per-command handler (`isolate rm`), a `Command` returning a
-  `*Result`/`*CommandError` over the green M0–M2 core (never an envelope, never an exit code) with a
-  `BuildRegistry` factory binding its deps + validating its args; then `cmd/wi` main (build the real registry + `clock.System`, call `Dispatch`, the
-  single `os.Exit` via `exitcontract.Exit`); then CI + `.goreleaser.yaml` + Homebrew tap. Deferred
+  `CMD-REPO-ADD`. **The LAST MVP handler — `wi isolate rm` — is now IN PROGRESS, foundation-first:** its
+  first sub-unit, the `internal/git` EVIDENCE-POSITIVE reclamation primitives `RemoveWorktree` (`git
+  worktree remove`: deregisters the admin entry, NO `--force`/NO `git reset --hard`, refuses a dirty
+  worktree — DESIGN §7.1/§7.2) + `DeleteOwnedRef` (`update-ref -d` the marker, idempotent), has landed
+  (guard `GIT-RECLAIM`); the owned-ref READ/verify side already exists (`OwnedRefSHA`, guard
+  `GIT-OWNED-REF`). What remains for MVP: (b) `internal/isolate.Remove` (walk the recorded repos under the
+  `isolate-state:<task>` lock, verify each repo's owned-ref + clean + not-ahead gates, reclaim the verified
+  ones, HARD-BLOCK any unexplained orphan); (c) the thin `cmd_isolate_rm.go` handler (a `Command` returning
+  a `*Result`/`*CommandError` over the green M0–M2 core — never an envelope, never an exit code — with a
+  `BuildRegistry` factory binding its deps + validating its args); then `cmd/wi` main (build the real
+  registry + `clock.System`, call `Dispatch`, the single `os.Exit` via `exitcontract.Exit`); then CI +
+  `.goreleaser.yaml` + Homebrew tap. Deferred
   enrichments pulled in when a command needs them: a `--` end-of-flags terminator + `did_you_mean` in
   dispatch, `isolate.New` resume (skip repos already `StageCreated`), per-repo base persisted in `state`
   (populates `resolve`'s `branch`), state KV + `cas`.
@@ -91,6 +98,30 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M3 · `internal/git` reclamation primitives — `RemoveWorktree` + `DeleteOwnedRef`** (`git.go` +
+  `git_test.go`, guard `GIT-RECLAIM`). The git-level foundation `isolate rm` composes for EVIDENCE-POSITIVE
+  reclamation (DESIGN §7.1/§7.2) — the FIRST sub-unit of the last MVP handler. `RemoveWorktree(ctx,
+  ssotDir, worktreePath)` wraps `git worktree remove`, which deletes the worktree directory AND
+  deregisters it from the SSOT's worktree admin (`.git/worktrees/<id>`) — unlike a bare `rm -rf` that
+  would strand a stale prunable admin entry. It passes **NO `--force`** and runs **NO `git reset --hard`**
+  (DESIGN §7.2): a worktree carrying modified OR untracked files is REFUSED and left intact (git exits
+  128), a second safety net beneath the isolate layer's own cleanliness gate. `DeleteOwnedRef(ctx, ssotDir,
+  task, repo)` clears the ownership marker `refs/wi/owned/<task>/<repo>` with a single `update-ref -d`,
+  called once the worktree it vouched for is reclaimed; deleting an already-absent marker is a no-op
+  success (verified empirically — git's `update-ref -d` with no expected old value succeeds on a missing
+  ref), so a re-run of reclamation stays idempotent. Both are local (offline `Run`). Guard `GIT-RECLAIM`
+  (`git_test.go`, hermetic `testenv` + real git): clean removal → the dir is gone, the SSOT no longer
+  registers the worktree (`worktree list --porcelain`), and the SSOT stays pristine; a dirty (untracked
+  file) worktree → remove REFUSES, the worktree is intact AND still registered; create→delete marker →
+  `OwnedRefSHA` reports absent + raw `for-each-ref` confirms gone + a second delete is a no-op success.
+  Mutants demonstrated RED-then-reverted: (1) replace `git worktree remove` with `os.RemoveAll(path)` →
+  the dir vanishes but the admin entry survives ("prunable gitdir file points to non-existent location")
+  AND a dirty worktree is wrongly nuked → `TestRemoveWorktreeDeregisters` + `TestRemoveWorktreeRefusesDirty`
+  RED; (2) skip the `update-ref -d` (`if false`) → the marker survives → `TestDeleteOwnedRefClearsMarker`
+  RED. Full `go build ./… && go vet ./… && go test ./…` GREEN (21 packages). NEXT sub-unit: `internal/
+  isolate.Remove` (walk the recorded repos under the `isolate-state:<task>` lock, verify each owned-ref +
+  clean + not-ahead-of-base, reclaim the verified ones via these primitives, HARD-BLOCK any unexplained
+  orphan), then the thin `cmd_isolate_rm.go` handler.
 - **M3 · `wi repo add <name> <url> [--base <branch>]` handler** (`cmd_repo_add.go` + `cmd_repo_add_test.go`).
   The fifth per-command handler — a THIN seam over `config.Add` (guard `CONFIG-ADD`). The factory parses
   the command-specific `--base`/`--base=` flag (Dispatch already stripped the globals) via
@@ -858,19 +889,27 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   → exit 64). Guard each with its own fitness test asserting ONLY the domain mapping (the generic
   `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/exit wiring), following
   `CMD-RESOLVE`/`CMD-INIT`/`CMD-ISOLATE-NEW`.
-  **Suggested next: `isolate rm <task> [<repo>…]` — the LAST MVP handler** (and the only remaining M3
+  **In progress: `isolate rm <task> [<repo>…]` — the LAST MVP handler** (and the only remaining M3
   command). It RECLAIMS an isolate's worktrees, and reclamation is EVIDENCE-POSITIVE (DESIGN §7.1, an
   INV-RECLAIM-SAFE invariant): a worktree is removed ONLY when a marker ref `refs/wi/owned/<task>/<repo>`
   proves wi created it; an unexplained orphan (a path with no owned-ref, or local commits/dirt beyond the
   recorded tip) is a HARD BLOCK — refused, never auto-pruned — and `refs/wi/owned/*` / `refs/wi/backup/*`
-  are protected from gc. Likely shape: a new `internal/git` primitive to read/verify the owned-ref + a
-  `git worktree remove` wrapper (NO `git reset --hard`), an `internal/isolate.Remove` (or reuse the state
-  registry) under the `isolate-state:<task>` lock that walks the recorded repos, verifies each owned-ref,
-  removes the verified worktrees + state record, and reports a blocked verdict for any orphan; then the
-  thin `cmd_isolate_rm.go` handler (factory validates `<task>` segment; maps domain → `Result{Action:
-  removed}` / a blocked-orphan → `Blocked[]` (exit-neutral, NOT a refusal) / held lock → lock_held).
-  Decide the orphan-handling open question per DESIGN §7.1 (HARD BLOCK + explicit `--force`-free posture
-  for MVP — no force flag yet) and record it. Guard `CMD-ISOLATE-RM` + the new git primitive's own guard.
+  are protected from gc. Decomposition (one sub-unit per firing):
+  **(a) DONE — the `internal/git` reclamation primitives** `RemoveWorktree` (`git worktree remove`, no
+  `--force`, no `git reset --hard`, deregisters the admin entry, refuses a dirty worktree) + `DeleteOwnedRef`
+  (`update-ref -d` the marker, idempotent). Guard `GIT-RECLAIM` (see Done). The owned-ref READ/verify side
+  already exists as `OwnedRefSHA` (guard `GIT-OWNED-REF`).
+  **(b) NEXT — `internal/isolate.Remove(ctx, l, g, task, repos…)`** under the `isolate-state:<task>` lock:
+  `state.Load` the record (missing → a not_found-class signal), determine the target repo set (none → all
+  recorded), and for EACH target verify the three evidence-positive gates — owned-ref present
+  (`OwnedRefSHA`), worktree clean (`IsClean`), not ahead of base (`DivergedCounts` ahead==0) — then reclaim
+  the verified ones (`RemoveWorktree` + `DeleteOwnedRef`) and drop them from the record; any repo that
+  fails a gate is an `orphan_unexplained` HARD BLOCK (reported as blocked, never auto-pruned, no `--force`
+  in MVP). Returns a typed `Result` (removed set + blocked set), NOT an envelope.
+  **(c) THEN the thin `cmd_isolate_rm.go` handler** (factory validates `<task>` segment → usage; maps
+  domain → `Result{Action: removed}` / a blocked-orphan → `Blocked[]` (exit-neutral, NOT a refusal) / held
+  lock → lock_held / missing record → not_found + `wi isolate new` hint). Guard `CMD-ISOLATE-RM`.
+  **Decision (recorded below): orphan handling = HARD BLOCK, `--force`-free for MVP** (DESIGN §7.1).
 - **Then** `cmd/wi/main.go` — the single process entry: discover the root → build `Deps` +
   `clock.System`, `BuildRegistry`, call `cli.Dispatch`, and make the SOLE `os.Exit` via
   `exitcontract.Exit(code)`. Then CI + `.goreleaser.yaml` + Homebrew tap. Completing this chain = full
@@ -935,6 +974,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CMD-SYNC | in `syncCmd.Run`, on `res.Status == syncpkg.StatusPartial` return `(result, nil)` instead of `(result, *CommandError{Kind:partial})` → a partial sync is mis-reported as a clean success (no error, exit 0) → `TestSyncHandlerDurablePartial` RED (`want *cli.CommandError, got <nil>`), while `TestSyncHandlerSyncsAllDeclaredRepos` stays GREEN (isolates the mutant to the partial-mapping path); alternate: drop the unknown-repo `!ok` not_found branch in `selectRepos` → `TestSyncHandlerUnknownRepoIsNotFound` RED (no error / wrong kind) |
 | CONFIG-ADD | after `os.ReadFile` in `config.Add`, strip comments before splicing (`data = stripJSONC(data)`) → the rewrite is still valid JSON containing every repo but the comments are gone → `TestAddAppendsPreservingComments` + `TestAddIntoEmptyArray` RED on the comment-survival assertions, while the repo-presence/re-parse assertions stay GREEN (isolates the mutant to the AST-preserving property — proving the edit is genuinely comment-preserving, not merely "produces valid JSON"); secondary: drop the `,` separator in the non-empty splice (`",\n"`→`"\n"`) → two adjacent objects with no separator → the post-rewrite Parse belt rejects it → `TestAddAppendsPreservingComments` RED (Add returns an error) |
 | CMD-REPO-ADD | in `repoAddCmd.Run` drop the registry lock by acquiring zero keys (`lock.Acquire(c.layout.LocksDir())`) → a busy registry is no longer refused → `TestRepoAddBusyRegistryIsLockHeld` RED (got a created Result, want `*cli.CommandError{lock_held}`), while the other 5 tests stay GREEN (isolates the mutant to "the handler actually takes the project-registry lock"); alternate: drop the `errors.Is(err, config.ErrDuplicateRepo)` → already_exists branch → a duplicate falls through to the usage default → `TestRepoAddDuplicateIsAlreadyExists` RED (wrong kind) |
+| GIT-RECLAIM | replace `git worktree remove` with a bare `os.RemoveAll(worktreePath)` in `RemoveWorktree` → the dir vanishes but the SSOT's worktree admin entry survives as a stale prunable entry AND a dirty worktree is wrongly nuked → `TestRemoveWorktreeDeregisters` RED (`worktree list` still names the path, "prunable gitdir file points to non-existent location") + `TestRemoveWorktreeRefusesDirty` RED (removed a dirty worktree, want refusal) — pins the deregister + no-force/no-reset-hard safety (DESIGN §7.1/§7.2); for `DeleteOwnedRef` skip the `update-ref -d` (`if false {…}`) → the marker survives → `TestDeleteOwnedRefClearsMarker` RED (`OwnedRefSHA` still reports present) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
