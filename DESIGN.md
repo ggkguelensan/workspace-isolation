@@ -229,11 +229,15 @@ lock happens **only** on a flock-trustworthy local filesystem with a proven-dead
 `chmod` to the caller's mode → `rename` (atomic on one fs) → `fsync` the parent dir. Eliminates the
 three-duplicate-writers smell.
 
-> **Decision #6 (Go libs, lockfs) — split ruling.** `WriteFileAtomic` is **hand-rolled** (no
-> `google/renameio`): owning the temp→rename boundary in-tree is what lets the `WI_FAULT`
-> fault-injection seam abort *exactly* in the crash window, which is how guard `HEAL-ATOMIC-WRITE`
-> proves crash-safety is non-vacuous — a library hides that seam. The advisory **flock** half adopts
-> `gofrs/flock` when `flock_unix.go` lands.
+> **Decision #6 (Go libs, lockfs) — RESOLVED: zero new deps, both halves hand-rolled.**
+> `WriteFileAtomic` is hand-rolled (no `google/renameio`): owning the temp→rename boundary in-tree is
+> what lets the `WI_FAULT` fault-injection seam abort *exactly* in the crash window, which is how
+> guard `HEAL-ATOMIC-WRITE` proves crash-safety is non-vacuous — a library hides that seam. The
+> advisory lock (`internal/lockfs.FileLock`, `flock_unix.go`, `//go:build unix`) is hand-rolled on
+> `syscall.Flock` rather than `gofrs/flock`: wi's lock path is unix-only, `LOCK_EX|LOCK_NB` is exactly
+> the BSD-flock primitive (pure stdlib, so INV-NO-LLM stays trivially green and no supply-chain
+> surface), and the PID/`boot_id` lock-content + §7.3 auto-break self-heal are hand-written regardless
+> — so a library would wrap only one syscall. Guard `FLOCK-EXCLUDES`.
 
 ### 6.3 Partial-success durability
 

@@ -122,6 +122,19 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   was rejected as vacuous (same-second SHA collision); the absolute golden is the real pin. `RunWI`
   deferred to M3 (needs the built binary).
 
+- **M0 · `internal/lockfs` flock half** — `flock_unix.go` (`//go:build unix`) + `flock_unix_test.go`:
+  `FileLock`, the advisory whole-file `flock(2)` lock that serializes concurrent `wi` processes
+  touching the same `.wi/` resource (DESIGN §6.1). `NewFileLock(path)` + `TryLock()` (non-blocking,
+  `(bool,err)`) / `Lock()` (blocking) / `Unlock()` (idempotent no-op when not held); double-lock of a
+  held handle is a usage error. Built on `syscall.Flock(LOCK_EX|LOCK_NB)` — **decision #6 flock leg
+  RESOLVED: hand-rolled on stdlib `syscall.Flock`, NOT `gofrs/flock`** (zero new deps, INV-NO-LLM
+  stays trivially green; PID/self-heal layer is hand-written regardless). Kernel releases the lock on
+  process exit, so a crashed holder never wedges it. Guard `FLOCK-EXCLUDES` exploits BSD flock's
+  per-open-file-description semantics to prove exclusion in-process (two independent handles contend):
+  TryLock refuses a second holder + frees on Unlock; blocking Lock waits then proceeds after release.
+  Mutant (`LOCK_EX`→`LOCK_SH`) confirmed `TestFlockExcludesSecondHolder` + `TestLockBlocksUntilReleased`
+  RED (shared locks coexist). Reverted → GREEN. Auto-lock-break self-heal (§7.3) is a separate M4 unit.
+
 - **M0 · `internal/layout` Bootstrap + Resolve** — `layout.go` + `bootstrap_test.go`: the two
   filesystem-aware constructors completing the layout package. `Resolve(root)` is the
   EvalSymlinks-normalized constructor the CLI uses at startup (DESIGN §4) — requires an existing
@@ -152,14 +165,15 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Next unit (pick this on the next firing)
 
-- **M0 · `internal/lockfs` flock half** (`flock_unix.go`) — advisory `flock(2)` to serialize
-  concurrent `wi` processes (PLAN §M0 line 166). Per decision #6 adopt `gofrs/flock` (cross-platform
-  advisory-lock wrapper): `go get` + `go mod tidy`, then **immediately verify INV-NO-LLM still GREEN
-  and that the dep adds no network behavior** (it's a thin `flock(2)` wrapper — local syscall only).
-  Expose acquire / try-acquire / release over a lock file under `LocksDir()`. Auto-lock-break is its
-  own later unit (DESIGN §7.3: flock-trustworthy local fs + proven-dead PID only) — do NOT bundle it.
-  Then `internal/lock` (closed lock-key namespace + total-order multi-acquire to prevent deadlock),
-  then M1 `gitexec`/`git`/`mirror`.
+- **M0 · `internal/lock`** — the closed lock-key namespace + total-order multi-acquire built on
+  `lockfs.FileLock`. Define a closed set of lock *kinds* (e.g. project / repo:<name> / task:<name>)
+  mapping to file paths under `LocksDir()`; acquiring multiple locks at once MUST sort the keys into a
+  total order before locking so two processes grabbing the same set can never deadlock (classic
+  lock-ordering). Guard: a multi-acquire requested in opposite orders by two callers still serializes
+  (no deadlock, no double-grant); mutant = drop the sort → reverse-order acquire can interleave. Key
+  derivation likely wants the `validSegment` discipline from `layout`. Auto-lock-break self-heal stays
+  deferred to M4. After `internal/lock`, **M0 is essentially complete** → proceed to M1
+  `gitexec`/`git`/`mirror`.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -179,6 +193,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | TESTENV-HERMETIC | drop the fixed `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` → seeded SHA ≠ `goldenBaseSHA` → `TestSeedOriginIsDeterministic` RED; drop `GIT_AUTHOR_NAME` injection → ambient username leaks → `TestHermeticIdentity` RED |
 | HEAL-ATOMIC-WRITE | replace `WriteFileAtomic`'s temp+rename with an in-place `O_TRUNC` write to the final path (still honoring `FaultBeforeRename`) → under the injected crash the target is torn to the new content → `TestAtomicReplaceIsCrashSafe` RED |
 | LAYOUT-BOOTSTRAP | skip the `WiSubdirs` loop in `Bootstrap` → a declared `.wi/` subdir is missing → `TestBootstrapCreatesSubtree` RED; drop `EvalSymlinks` in `Resolve` (`return New(root)`) → a symlinked root keeps its link component → `TestResolveNormalizesSymlinks` RED |
+| FLOCK-EXCLUDES | take the lock with `LOCK_SH` instead of `LOCK_EX` in `FileLock.TryLock`/`Lock` → two holders coexist → `TestFlockExcludesSecondHolder` + `TestLockBlocksUntilReleased` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
@@ -187,16 +202,20 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   v0 = closed `{hydrate_skipped, base_behind_ssot}` (`AllWarningCodes()`), MVP-wired + offline-knowable
   only; staleness stays structured in `mirror_freshness.stale`. Recorded in DESIGN §8 + PLAN §7.
 
-- **#6 Go libs sign-off (lockfs) — RESOLVED 2026-06-30, as a SPLIT ruling.** The §7 recommendation
-  was "adopt `gofrs/flock` + `google/renameio`." Enacted with a deliberate override on the atomic-write
-  half: **`WriteFileAtomic` is hand-rolled (zero new deps)**, not `google/renameio`. Decisive reason —
-  this unit's entire fitness is crash-safety, which is *proven* by injecting `WI_FAULT` exactly between
-  the temp write and the rename; a library hides that boundary, so the non-vacuity mutant could not be
-  expressed. DESIGN's own §M0 file-list note already specifies the manual recipe (`temp + fsync +
-  chmod + rename + parent-fsync`), and §7 lists hand-rolled as the explicit alternative — so this is
-  enacting the spec, not deviating from it. The **flock** half keeps the recommendation: adopt
-  `gofrs/flock` when `flock_unix.go` lands (deferred to that unit; verify no network / no LLM token at
-  `go get` time). Owner may override either leg. Recorded in DESIGN §6.2 + PLAN §7.
+- **#6 Go libs sign-off (lockfs) — RESOLVED 2026-06-30: zero new deps, BOTH halves hand-rolled.**
+  The §7 recommendation was "adopt `gofrs/flock` + `google/renameio`"; both legs were overridden to
+  zero-dep hand-rolls with concrete rationale (not reflexive NIH).
+  - **`WriteFileAtomic`** (not `google/renameio`): the unit's entire fitness is crash-safety, *proven*
+    by injecting `WI_FAULT` exactly between the temp write and the rename; a library hides that
+    boundary, so the non-vacuity mutant could not be expressed. DESIGN's §M0 file-list already
+    specifies the manual recipe and §7 lists hand-rolled as the explicit alternative.
+  - **`FileLock`** (not `gofrs/flock`): decided at `flock_unix.go` implementation time (the earlier
+    entry deferred this leg pending implementation — not a flip-flop). wi's lock path is unix-only,
+    `syscall.Flock(LOCK_EX|LOCK_NB)` is exactly the BSD-flock primitive (pure stdlib ⇒ INV-NO-LLM
+    trivially green, no supply-chain surface), and the PID/`boot_id` lock-content + §7.3 auto-break
+    self-heal are hand-written regardless, so a library would wrap only one syscall.
+  Net: `go.mod` gains no runtime dependency from M0. Owner may override either leg. Recorded in
+  DESIGN §6.2 + PLAN §7.
 
 - **#A op_id encoding specifics — RESOLVED 2026-06-29** (DESIGN §3.1 fixed the skeleton
   `op_<base36ts>_<base32rand>` + `.<n>`; these fill the unspecified gaps). Time unit = Unix
