@@ -10,13 +10,15 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 ## Current position
 
 - **Milestone:** **M2 in progress** (domain command core: `config`, `state`, `isolate`, `resolve`).
-  `internal/config` read+validate, `internal/state` per-isolate registry record, AND the two
-  `internal/git` isolate primitives — `AddWorktree` (worktree materialization) + `CreateOwnedRef`/
-  `OwnedRefSHA` (the `refs/wi/owned/<task>/<repo>` ownership marker, decision #2 RESOLVED) — landed and
-  green. **Next: the `internal/isolate` package itself** — the N-repo orchestration that drives
-  `AddWorktree` + `CreateOwnedRef` + `state.UpdateRepoStage` per repo (stop-on-first-fail, durable
-  partial success) — then `resolve` (path bundle). Likely state follow-ons (namespaced KV + `cas`)
-  remain, pulled in when a command needs them.
+  `internal/config` read+validate, `internal/state` per-isolate registry record, the two `internal/git`
+  isolate primitives (`AddWorktree` + `CreateOwnedRef`/`OwnedRefSHA`), AND now **`internal/isolate.New`**
+  — the N-repo orchestration that drives `AddWorktree` + `CreateOwnedRef` + `state.UpdateRepoStage` per
+  repo under the `isolate-state:<task>` lock, stop-on-first-fail with durable, not-rolled-back completed
+  repos (DESIGN §6.3) — all landed and green. **Next: `resolve`** (the path bundle that projects an
+  isolate's repo paths into the `resolve` envelope block) — which COMPLETES M2 and unlocks M3
+  (`cli`/`help`/`suggest` + `cmd/wi` → MVP end-to-end). A `isolate.New` resume refinement (skip repos
+  already `StageCreated` on re-run) and likely state follow-ons (namespaced KV + `cas`) remain, pulled in
+  when a command needs them.
   M0 + M1 complete: contract spine, layout, opid, clock, testenv, lockfs, lock, `gitexec` runner+belt,
   full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch / DivergedCounts), complete
   `internal/mirror`, and both DESIGN §2 architecture invariants (INV-NO-LLM + INV-NO-NETWORK).
@@ -394,35 +396,60 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   property. Reverted → full `go build/vet/test` GREEN. **Decision #2** (git ref over note/reflog AND over
   a `.wi/index` backref) recorded below + marked RESOLVED in PLAN §7.
 
+- **M2 · `internal/isolate` · `isolate.New` (the N-repo orchestration — durable partial success)** —
+  `isolate.go` + `isolate_test.go`: the domain core of `wi isolate new`, the partial-success-critical
+  command (DESIGN §6.3). `New(ctx, l, g, task, opID, specs)` acquires the `isolate-state:<task>` lock
+  (held → `*lock.HeldError` → exit 6), `mkdir`s `isolas/<task>/`, writes a `state.NewIsolateRecord` with
+  every repo `StagePending` **before any materialization** (the durable statement of intent that makes
+  the op resumable), then materializes repos in request order. Each repo, in the exact evidence-positive
+  order: `AddWorktree --detach` off `refs/heads/<base>` → `CreateOwnedRef` (marker BEFORE claiming
+  "created", so a crash leaves a wi-owned reclaimable worktree, never an unexplained orphan, §7.1) →
+  `state.UpdateRepoStage(…Created)`. **Stop-on-first-fail with durable, NOT-rolled-back completed repos:**
+  the first failing repo halts the run, repos before it stay on disk + in the registry, repos after it are
+  never attempted (stay `StagePending`); the result carries `StatusPartial` (→ exit 2) and the registry
+  reflects EXACTLY the completed set. A per-repo failure is recorded in the `Result` (not a Go error);
+  `New`'s error return is reserved for can't-run-at-all (held lock, unwritable initial record). Decoupled
+  from the manifest via `isolate.RepoSpec{Name, Base}` (the CLI maps `config.Repo`→`RepoSpec`). Never
+  moves a base ref / never dirties the SSOT (DESIGN §5). Guard `ISOLATE-NEW` (testenv SSOTs): (complete)
+  3 repos all materialize detached, each marker records the worktree tip, durable record all `created`,
+  SSOT base refs unmoved; (partial — the core) "web" has no SSOT clone so its add fails → "api" before it
+  stays `created` with a durable worktree + pristine SSOT, "db" after it stays `pending` with no worktree,
+  `Status==partial`, durable registry == exactly {api:created, web:pending, db:pending}; (lock) a
+  pre-held `isolate-state:feat` makes `New` return `*lock.HeldError`. **Two mutants demonstrated:** drop
+  the stop-on-first-fail `return` (→ `continue`) so the loop materializes "db" past the failed "web" →
+  reddens exactly the 3 "db not attempted" assertions (result stage, durable stage, on-disk worktree),
+  api/web/Status staying green — isolating the §6.3 stop-on-first-fail / "exactly the completed set"
+  property; skip the upfront all-pending `state.Store` → the first repo's `UpdateRepoStage` errors
+  `state: no isolate record` and there's no durable registry to resume from → reddens both the complete
+  and partial guards (proving the durable-intent write is load-bearing). Both reverted → full
+  `go build/vet/test` GREEN. **Deferred:** `isolate.New` resume (on re-run, skip repos already
+  `StageCreated` rather than re-adding and failing) is a small follow-on once `resolve`/CLI land.
+
 ## Next unit (pick this on the next firing) — M2 continues
 
 M2 (DESIGN §map: `config`, `state`, `isolate`, `resolve`) is the domain command core: committed
 manifest + runtime registry + isolate create/remove/repair + the resolve path bundle. Build order
-within M2: `config` ✅ → `state` ✅ → **`isolate`** → `resolve`.
+within M2: `config` ✅ → `state` ✅ → `isolate` ✅ → **`resolve`** (the last M2 unit).
 
-- **M2 · `internal/isolate` · isolate create (the partial-success-critical command core).**
-  `isolate new <task> [repos…]` materializes one worktree per declared repo off the SSOT base, recording
-  progress in `internal/state` as it goes. Build order within the unit, smallest cohesive first: (1) ✅
-  the single-repo worktree-add verb `git.AddWorktree` (done, guard `GIT-WORKTREE`). (2) ✅ **the
-  wi-owned marker ref** `refs/wi/owned/<task>/<repo>` — a `git` verb (likely `CreateOwnedRef(ctx, ssotDir,
-  task, repo, sha)` via `update-ref refs/wi/owned/<task>/<repo> <sha>`) recording evidence-positive
-  ownership for reclamation (decision #2, DESIGN §7.1); these refs live under `refs/wi/*` (NOT
-  `refs/heads/*`, so they are not "leaked branches" and are gc-protected). Smallest cohesive unit:
-  the create verb + a read/exists verb, guarded by a fitness that the ref exists under `refs/wi/owned/…`
-  at the recorded sha and is absent before. ✅ DONE — `git.CreateOwnedRef` + `git.OwnedRefSHA`, guard
-  `GIT-OWNED-REF`, decision #2 RESOLVED. **NEXT: (3) the N-repo orchestration** (the `internal/isolate`
-  package itself) that writes `state.NewIsolateRecord` (all pending) BEFORE adding any worktree and calls
-  `state.UpdateRepoStage(…, StageCreated)` **after each** add+marker. The orchestration is
-  **stop-on-first-fail with durable, not-rolled-back completed repos** (DESIGN §6.3 durable partial
-  success, exit 2, resumable) — `state` already proves the registry stays durable across a crash mid-flip;
-  isolate just drives it in the right order under the `isolate-state:<task>` lock. Honor SSOT invariants:
-  worktree adds come off `refs/heads/<base>` but NEVER move it (only `git.FastForwardBaseRef` advances a
-  base ref); no checkout/dirt in `repos/`. Fitness ideas for (3): a partial-success guard (inject a
-  `WI_FAULT` crash on the 2nd repo's add → registry shows repo 1 `StageCreated`, repos 2..N
-  `StagePending`, exit 2). Likely state follow-ons (namespaced KV + `cas` with the `--expected __ABSENT__`
-  sentinel, DESIGN §line 321) get pulled in when isolate/land needs them.
-- Then **`resolve`** (path bundle — projects an isolate's repo paths into the `resolve` envelope block).
-  M2 completing unlocks M3 (`cli`/`help`/`suggest` + `cmd/wi` → MVP end-to-end).
+- **M2 · `internal/resolve` · resolve path bundle (the last M2 unit, then M2 is COMPLETE).**
+  `wi resolve <task>` (and the data behind `isolate new`'s own response) projects an existing isolate's
+  per-repo worktree paths into the envelope's additive `resolve` block (`contract.ResolveBlock` /
+  `ResolveRepo`, already declared in `envelope.go`). Smallest cohesive unit: a pure projector that, given
+  a `layout.Layout` + a loaded `state.IsolateRecord` (via `state.Load`, so a never-created task →
+  `ErrNoRecord` → the CLI maps to a not-found error/`suggest`), emits each repo's resolved
+  `isolas/<task>/<repo>` absolute path + its recorded stage, WITHOUT dialing git or mutating anything
+  (read-only, offline — like `mirror`'s read path). Decide whether the worktree-existence check (stat the
+  path) belongs here or stays a CLI concern; lean toward: resolve reports what the registry says + the
+  computed path, and flags a repo whose path is missing on disk (registry says `created` but worktree
+  gone) so the agent sees drift. Fitness ideas: a `RESOLVE-PROJECTS` guard (a 2-repo created isolate →
+  block lists both with the exact `layout.Isolate` paths + stages; mutant = emit the SSOT `repos/<repo>`
+  path instead of the `isolas/<task>/<repo>` worktree path, or drop a repo). Honor: read-only, no network,
+  paths come only from `layout` (never hand-assembled). **M2 completing unlocks M3** (`cli`/`help`/
+  `suggest` + `cmd/wi` → MVP end-to-end).
+- Deferred isolate follow-on: `isolate.New` **resume** — on a re-run after a partial, skip repos already
+  `StageCreated` in the loaded record (Load-or-create the record instead of always Store-ing fresh)
+  rather than re-adding a worktree that already exists and failing. Small, pull in once `resolve`/CLI
+  exist to drive it end-to-end.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -463,6 +490,7 @@ within M2: `config` ✅ → `state` ✅ → **`isolate`** → `resolve`.
 | CONFIG-PARSE | make `stripJSONC` a no-op (`return src`) → the golden manifest's comments become JSON syntax errors → `TestParseAcceptsGolden` RED; drop `dec.DisallowUnknownFields()` → the 3 unknown-key cases parse cleanly → `TestParseRejectsInvalid` RED |
 | STATE-PERSIST | make `Store` divert the write (`p+".mutant"`) so `Load` can't find it → `TestRecordRoundTrips` RED; or make `UpdateRepoStage` skip its unknown-repo error (`found := true`) so flipping a non-existent repo wrongly succeeds → `TestUpdateRepoStageFlipsOneRepo` RED |
 | STATE-DURABLE | replace `lockfs.WriteFileAtomic` with `os.WriteFile` in `Store` (keep `lockfs` referenced so the assertion, not the compiler, reddens) → the injected `WI_FAULT=lockfs.before_rename` no longer aborts so the interrupted flip lands → `TestDurablePartialSuccess` RED |
+| ISOLATE-NEW | drop the stop-on-first-fail `return` in `isolate.New` (turn it into `continue`) → the loop materializes the repo AFTER the failed one → `TestNewStopsOnFirstFailWithDurablePartialSuccess` RED on the 3 "db not attempted" assertions (result stage, durable stage, on-disk worktree); or skip the upfront all-pending `state.Store` → the first repo's `UpdateRepoStage` finds no record (`state: no isolate record`) and no durable registry exists to resume from → both `TestNewMaterializesAllReposComplete` + `TestNewStopsOnFirstFail…` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
