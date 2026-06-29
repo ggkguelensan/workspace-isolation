@@ -88,6 +88,9 @@ func Render(w io.Writer, env contract.Envelope, format Format) error {
 // reports it on stderr. A domain failure is NOT a returned error — it is carried inside
 // the emitted envelope with its mapped non-zero exit code.
 func Execute(ctx context.Context, w io.Writer, m Meta, format Format, cmd Command) (contract.ExitCode, error) {
+	// Thread the minted op_id down to the Command so a handler records the SAME
+	// correlation id in durable state that the envelope reports (CTX-OPID).
+	ctx = WithOpID(ctx, m.OpID)
 	r, err := cmd.Run(ctx)
 	env := envelopeFor(m, r, err)
 	if werr := Render(w, env, format); werr != nil {
