@@ -33,6 +33,7 @@ package isolate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -147,6 +148,201 @@ func New(ctx context.Context, l layout.Layout, g *git.Git, task, opID string, sp
 		res.Repos = append(res.Repos, oc)
 	}
 	return res, nil
+}
+
+// RemoveStatus is the overall outcome of a Remove run.
+type RemoveStatus string
+
+const (
+	// RemoveComplete: every targeted repo passed the evidence-positive gates and was
+	// reclaimed.
+	RemoveComplete RemoveStatus = "complete"
+	// RemoveBlocked: at least one targeted repo was a HARD BLOCK (an unexplained
+	// orphan, DESIGN §7.1) or hit a per-repo error, so it was NOT reclaimed.
+	RemoveBlocked RemoveStatus = "blocked"
+)
+
+// ErrRepoNotInIsolate reports that a repo named on a Remove targeted the isolate but
+// is absent from its registry record — wi has no recorded materialization for it, so
+// there is nothing it can prove it owns to reclaim.
+var ErrRepoNotInIsolate = errors.New("isolate: repo not in isolate record")
+
+// RemoveOutcome is one targeted repo's result within a Remove run. Exactly one of
+// three states holds: Removed (reclaimed — worktree + marker gone, dropped from the
+// registry); a HARD BLOCK (Removed=false, Reason set, Err=nil — an unexplained
+// orphan surfaced loudly per DESIGN §7.1, never auto-pruned, kept on disk and in the
+// registry); or a per-repo error (Removed=false, Err set — a git/IO fault or a repo
+// not in the record).
+type RemoveOutcome struct {
+	Repo    string
+	Removed bool
+	Reason  string // orphan_unexplained sub-reason when blocked (Err==nil)
+	Err     error  // a hard per-repo failure (Reason=="")
+}
+
+// RemoveResult is the outcome of a Remove run: the task identity, the overall
+// Status, and a per-repo outcome in target order. The CLI projects this onto the
+// envelope's repos[]/blocked[] and the exit code.
+type RemoveResult struct {
+	Task   string
+	Status RemoveStatus
+	Repos  []RemoveOutcome
+}
+
+// Remove reclaims an isolate's materialized worktrees under the isolate-state:<task>
+// lock, honoring the evidence-positive reclamation contract (DESIGN §7.1): a repo's
+// worktree is reclaimed ONLY if all three gates pass —
+//
+//	1. wi can PROVE it owns the worktree: the marker ref refs/wi/owned/<task>/<repo>
+//	   exists (a missing marker is an unexplained orphan — wi never created it, or
+//	   lost the evidence);
+//	2. the worktree is CLEAN (no modified/untracked files);
+//	3. it is NOT ahead of base — realized in v0 as: the worktree HEAD still equals the
+//	   marker's recorded sha (the base tip captured at creation). The per-repo base
+//	   branch is not persisted in state.RepoRecord, so the MARKER is the base evidence;
+//	   a HEAD that moved past it carries local work and is "ahead of base".
+//
+// Any repo that fails a gate is a HARD BLOCK reported as an unexplained orphan
+// (Reason set) — never auto-pruned, never --force'd (no --force in MVP, DESIGN §7.2),
+// left intact on disk and in the registry. Verified repos are reclaimed
+// (RemoveWorktree, which itself refuses a dirty tree and passes no --force, then
+// DeleteOwnedRef) and dropped from the registry; when the LAST recorded repo is
+// reclaimed the record is deleted and the (now-empty) task dir removed best-effort.
+//
+// If repos is empty, every repo in the record is targeted (full teardown); otherwise
+// exactly the named repos are. A held lock returns *lock.HeldError (exit 6); a task
+// with no record returns state.ErrNoRecord (the isolate does not exist). A per-repo
+// gate failure is NOT a Go error — it is recorded in the result; Remove's error
+// return is reserved for failures that prevent the op from running at all.
+func Remove(ctx context.Context, l layout.Layout, g *git.Git, task string, repos []string) (RemoveResult, error) {
+	key, err := lock.IsolateState(task)
+	if err != nil {
+		return RemoveResult{}, err
+	}
+	held, err := lock.Acquire(l.LocksDir(), key)
+	if err != nil {
+		return RemoveResult{}, err // *lock.HeldError → exit 6 (DESIGN §6.1)
+	}
+	defer func() { _ = held.Release() }()
+
+	stateDir := l.StateDir()
+	rec, err := state.Load(stateDir, task)
+	if err != nil {
+		return RemoveResult{}, err // state.ErrNoRecord → not_found; else a read fault
+	}
+
+	recorded := make(map[string]bool, len(rec.Repos))
+	for _, rr := range rec.Repos {
+		recorded[rr.Repo] = true
+	}
+	// Empty target set means "every recorded repo" (full teardown), in record order.
+	targets := repos
+	if len(targets) == 0 {
+		targets = make([]string, len(rec.Repos))
+		for i, rr := range rec.Repos {
+			targets[i] = rr.Repo
+		}
+	}
+
+	res := RemoveResult{Task: task, Status: RemoveComplete, Repos: make([]RemoveOutcome, 0, len(targets))}
+	removed := make(map[string]bool, len(targets))
+	for _, name := range targets {
+		oc := reclaimRepo(ctx, g, l, task, name, recorded[name])
+		if oc.Removed {
+			removed[name] = true
+		} else {
+			res.Status = RemoveBlocked
+		}
+		res.Repos = append(res.Repos, oc)
+	}
+
+	// Drop the reclaimed repos from the registry. When none remain, the isolate no
+	// longer exists: delete the record and best-effort remove the empty task dir.
+	if len(removed) > 0 {
+		kept := rec.Repos[:0]
+		for _, rr := range rec.Repos {
+			if !removed[rr.Repo] {
+				kept = append(kept, rr)
+			}
+		}
+		rec.Repos = kept
+		if len(rec.Repos) == 0 {
+			if err := state.Delete(stateDir, task); err != nil {
+				return res, fmt.Errorf("isolate: delete record for %q after full reclaim: %w", task, err)
+			}
+			if taskDir, derr := l.TaskDir(task); derr == nil {
+				_ = os.Remove(taskDir) // best-effort: succeeds only if now empty
+			}
+		} else if err := state.Store(stateDir, rec); err != nil {
+			return res, fmt.Errorf("isolate: update record for %q after reclaim: %w", task, err)
+		}
+	}
+	return res, nil
+}
+
+// reclaimRepo evaluates the three evidence-positive gates for one repo and reclaims
+// it iff all pass (DESIGN §7.1). It never moves a base ref and never dirties the SSOT.
+func reclaimRepo(ctx context.Context, g *git.Git, l layout.Layout, task, repo string, recorded bool) RemoveOutcome {
+	oc := RemoveOutcome{Repo: repo}
+	if !recorded {
+		oc.Err = ErrRepoNotInIsolate
+		return oc
+	}
+	ssot, err := l.Repo(repo)
+	if err != nil {
+		oc.Err = err
+		return oc
+	}
+	wt, err := l.Isolate(task, repo)
+	if err != nil {
+		oc.Err = err
+		return oc
+	}
+
+	// Gate 1 — ownership: wi must be able to prove it created this worktree.
+	marker, exists, err := g.OwnedRefSHA(ctx, ssot, task, repo)
+	if err != nil {
+		oc.Err = err
+		return oc
+	}
+	if !exists {
+		oc.Reason = "orphan_unexplained: no wi ownership marker refs/wi/owned/" + task + "/" + repo
+		return oc
+	}
+	// Gate 2 — clean: a dirty worktree carries uncommitted work.
+	clean, err := g.IsClean(ctx, wt)
+	if err != nil {
+		oc.Err = err
+		return oc
+	}
+	if !clean {
+		oc.Reason = "orphan_unexplained: worktree has uncommitted changes"
+		return oc
+	}
+	// Gate 3 — not ahead of base: the marker IS the base evidence (v0), so a HEAD
+	// past it carries local commits.
+	head, err := g.ResolveRef(ctx, wt, "HEAD")
+	if err != nil {
+		oc.Err = err
+		return oc
+	}
+	if head != marker {
+		oc.Reason = "orphan_unexplained: worktree is ahead of base (HEAD moved past the creation marker)"
+		return oc
+	}
+
+	// All gates pass — reclaim. RemoveWorktree is a second cleanliness net (no
+	// --force, no reset --hard); DeleteOwnedRef clears the now-spent marker.
+	if err := g.RemoveWorktree(ctx, ssot, wt); err != nil {
+		oc.Err = err
+		return oc
+	}
+	if err := g.DeleteOwnedRef(ctx, ssot, task, repo); err != nil {
+		oc.Err = err
+		return oc
+	}
+	oc.Removed = true
+	return oc
 }
 
 // materializeRepo runs the three-step per-repo materialization in the order the

@@ -186,3 +186,172 @@ func TestNewRefusesWhenIsolateStateHeld(t *testing.T) {
 		t.Fatalf("New under a held isolate-state lock: err = %v (%T), want *lock.HeldError", err, err)
 	}
 }
+
+// outcomeFor returns the RemoveOutcome for repo, failing the test if absent.
+func outcomeFor(t *testing.T, res isolate.RemoveResult, repo string) isolate.RemoveOutcome {
+	t.Helper()
+	for _, oc := range res.Repos {
+		if oc.Repo == repo {
+			return oc
+		}
+	}
+	t.Fatalf("no RemoveOutcome for %q in %+v", repo, res.Repos)
+	return isolate.RemoveOutcome{}
+}
+
+// Guard ISOLATE-REMOVE (evidence-positive reclamation, DESIGN §7.1): Remove reclaims
+// a repo ONLY when wi can prove it owns it AND it is clean AND not ahead of base. A
+// clean, unmoved worktree is reclaimed (worktree + marker gone, dropped from the
+// registry); a worktree whose HEAD moved past the creation marker is "ahead of base"
+// → a HARD BLOCK surfaced as an unexplained orphan, left intact on disk, in the
+// marker store, and in the registry. A repo not in the record is a per-repo error.
+//
+// Non-vacuity mutant (registered): dropping the `head != marker` gate in reclaimRepo
+// lets the ahead-of-base "web" pass straight to RemoveWorktree — its tree is clean,
+// so git removes it — wrongly reclaiming local work. That reddens every "web intact"
+// assertion below (outcome, on-disk worktree, marker, retained registry entry).
+func TestRemoveReclaimsCleanBlocksAheadOfBase(t *testing.T) {
+	env, l, g, ctx := setup(t)
+	cloneSSOT(t, env, l, g, ctx, "api")
+	cloneSSOT(t, env, l, g, ctx, "web")
+
+	if _, err := isolate.New(ctx, l, g, "feat", "op_test_dddd", specs("api", "web")); err != nil {
+		t.Fatalf("isolate.New: %v", err)
+	}
+	// Move "web" ahead of base with a local commit: tree stays CLEAN, HEAD moves
+	// past the creation marker — exactly the "ahead of base" orphan.
+	webWT, _ := l.Isolate("feat", "web")
+	env.Git(t, webWT, "commit", "--allow-empty", "-m", "local work")
+
+	res, err := isolate.Remove(ctx, l, g, "feat", []string{"api", "web", "ghost"})
+	if err != nil {
+		t.Fatalf("isolate.Remove: %v", err)
+	}
+	if res.Status != isolate.RemoveBlocked {
+		t.Fatalf("Status = %q, want %q (web is ahead of base)", res.Status, isolate.RemoveBlocked)
+	}
+
+	// api: clean and unmoved → reclaimed; worktree dir and marker both gone.
+	api := outcomeFor(t, res, "api")
+	if !api.Removed || api.Err != nil || api.Reason != "" {
+		t.Errorf("api outcome = %+v, want removed/no-err/no-reason", api)
+	}
+	apiWT, _ := l.Isolate("feat", "api")
+	if _, err := os.Stat(apiWT); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("api worktree still present after reclaim (stat err = %v)", err)
+	}
+	apiSSOT, _ := l.Repo("api")
+	if _, exists, _ := g.OwnedRefSHA(ctx, apiSSOT, "feat", "api"); exists {
+		t.Errorf("api marker ref survived reclaim, want cleared")
+	}
+
+	// web: ahead of base → HARD BLOCK; NOT removed, intact on disk, marker intact.
+	web := outcomeFor(t, res, "web")
+	if web.Removed || web.Err != nil || web.Reason == "" {
+		t.Errorf("web outcome = %+v, want blocked (reason set, not removed, no err)", web)
+	}
+	if _, err := os.Stat(webWT); err != nil {
+		t.Errorf("web worktree missing after a HARD BLOCK (must never be auto-pruned): %v", err)
+	}
+	webSSOT, _ := l.Repo("web")
+	if _, exists, _ := g.OwnedRefSHA(ctx, webSSOT, "feat", "web"); !exists {
+		t.Errorf("web marker ref cleared on a HARD BLOCK, want preserved")
+	}
+
+	// ghost: never materialized → per-repo error, not a block.
+	ghost := outcomeFor(t, res, "ghost")
+	if ghost.Removed || !errors.Is(ghost.Err, isolate.ErrRepoNotInIsolate) {
+		t.Errorf("ghost outcome = %+v, want ErrRepoNotInIsolate", ghost)
+	}
+
+	// Registry: api dropped (reclaimed), web retained (blocked), record still exists.
+	rec, err := state.Load(l.StateDir(), "feat")
+	if err != nil {
+		t.Fatalf("state.Load after partial reclaim: %v", err)
+	}
+	if len(rec.Repos) != 1 || rec.Repos[0].Repo != "web" {
+		t.Errorf("registry repos = %+v, want exactly [web]", rec.Repos)
+	}
+}
+
+// Guard ISOLATE-REMOVE-TEARDOWN: when Remove reclaims the LAST repo of an isolate,
+// the registry record is deleted (the isolate no longer exists) so a later isolate
+// rm reports ErrNoRecord, and the emptied task dir is removed. An empty target set
+// means "every recorded repo".
+//
+// Non-vacuity mutant (registered): replacing state.Delete with state.Store (keeping
+// an empty-repos husk) in the len==0 branch leaves a record behind, reddening the
+// state.Load == ErrNoRecord assertion below.
+func TestRemoveAllCleanDeletesRecord(t *testing.T) {
+	env, l, g, ctx := setup(t)
+	cloneSSOT(t, env, l, g, ctx, "api")
+	cloneSSOT(t, env, l, g, ctx, "web")
+
+	if _, err := isolate.New(ctx, l, g, "feat", "op_test_eeee", specs("api", "web")); err != nil {
+		t.Fatalf("isolate.New: %v", err)
+	}
+
+	res, err := isolate.Remove(ctx, l, g, "feat", nil) // nil → all recorded repos
+	if err != nil {
+		t.Fatalf("isolate.Remove: %v", err)
+	}
+	if res.Status != isolate.RemoveComplete {
+		t.Fatalf("Status = %q, want %q", res.Status, isolate.RemoveComplete)
+	}
+	for _, n := range []string{"api", "web"} {
+		oc := outcomeFor(t, res, n)
+		if !oc.Removed || oc.Err != nil {
+			t.Errorf("%s outcome = %+v, want removed/no-err", n, oc)
+		}
+		wt, _ := l.Isolate("feat", n)
+		if _, err := os.Stat(wt); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s worktree still present after full reclaim (stat err = %v)", n, err)
+		}
+	}
+
+	// The isolate no longer exists: its record is gone, and the task dir with it.
+	if _, err := state.Load(l.StateDir(), "feat"); !errors.Is(err, state.ErrNoRecord) {
+		t.Errorf("state.Load after full teardown: err = %v, want ErrNoRecord", err)
+	}
+	taskDir, _ := l.TaskDir("feat")
+	if _, err := os.Stat(taskDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("task dir still present after full teardown (stat err = %v)", err)
+	}
+}
+
+// Guard ISOLATE-REMOVE (lock): Remove runs under the isolate-state:<task> lock, so a
+// concurrent holder makes it refuse with *lock.HeldError (→ exit 6) rather than
+// racing a reclamation against another op on the same task (DESIGN §6.1).
+func TestRemoveRefusesWhenIsolateStateHeld(t *testing.T) {
+	env, l, g, ctx := setup(t)
+	cloneSSOT(t, env, l, g, ctx, "api")
+	if _, err := isolate.New(ctx, l, g, "feat", "op_test_ffff", specs("api")); err != nil {
+		t.Fatalf("isolate.New: %v", err)
+	}
+
+	key, err := lock.IsolateState("feat")
+	if err != nil {
+		t.Fatalf("lock.IsolateState: %v", err)
+	}
+	held, err := lock.Acquire(l.LocksDir(), key)
+	if err != nil {
+		t.Fatalf("pre-acquire isolate-state lock: %v", err)
+	}
+	defer func() { _ = held.Release() }()
+
+	_, err = isolate.Remove(ctx, l, g, "feat", nil)
+	var he *lock.HeldError
+	if !errors.As(err, &he) {
+		t.Fatalf("Remove under a held isolate-state lock: err = %v (%T), want *lock.HeldError", err, err)
+	}
+}
+
+// Guard ISOLATE-REMOVE (missing record): Remove on a task that was never created
+// returns state.ErrNoRecord so the CLI can map it to not_found.
+func TestRemoveMissingRecordIsErrNoRecord(t *testing.T) {
+	_, l, g, ctx := setup(t)
+	_, err := isolate.Remove(ctx, l, g, "ghost-task", nil)
+	if !errors.Is(err, state.ErrNoRecord) {
+		t.Fatalf("Remove on a never-created task: err = %v, want state.ErrNoRecord", err)
+	}
+}

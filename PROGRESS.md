@@ -81,11 +81,18 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   worktree remove`: deregisters the admin entry, NO `--force`/NO `git reset --hard`, refuses a dirty
   worktree — DESIGN §7.1/§7.2) + `DeleteOwnedRef` (`update-ref -d` the marker, idempotent), has landed
   (guard `GIT-RECLAIM`); the owned-ref READ/verify side already exists (`OwnedRefSHA`, guard
-  `GIT-OWNED-REF`). What remains for MVP: (b) `internal/isolate.Remove` (walk the recorded repos under the
-  `isolate-state:<task>` lock, verify each repo's owned-ref + clean + not-ahead gates, reclaim the verified
-  ones, HARD-BLOCK any unexplained orphan); (c) the thin `cmd_isolate_rm.go` handler (a `Command` returning
-  a `*Result`/`*CommandError` over the green M0–M2 core — never an envelope, never an exit code — with a
-  `BuildRegistry` factory binding its deps + validating its args); then `cmd/wi` main (build the real
+  `GIT-OWNED-REF`). **Sub-unit (b) `internal/isolate.Remove` has now LANDED too** (guards `ISOLATE-REMOVE`
+  + `ISOLATE-REMOVE-TEARDOWN`, plus the `state.Delete` it needs): under the `isolate-state:<task>` lock it
+  walks the targeted repos (empty → all recorded = full teardown), evaluates the three evidence-positive
+  gates per repo (marker exists / clean / HEAD == marker-sha = not-ahead-of-base, decision #RM), reclaims
+  the verified ones (`RemoveWorktree` + `DeleteOwnedRef`) and drops them from the registry (deleting the
+  record + emptied task dir when the last repo goes), and HARD-BLOCKs any `orphan_unexplained` (never
+  auto-pruned/`--force`'d, left intact). What remains for MVP: (c) the thin `cmd_isolate_rm.go` handler
+  (a `Command` returning a `*Result`/`*CommandError` over this green core — never an envelope, never an
+  exit code — with a `BuildRegistry` factory binding its deps + validating its args: `<task>`
+  segment-checked → usage, optional `<repo>…` subset; maps `RemoveComplete` → `Result{Action: removed}`,
+  a `RemoveBlocked` run → the blocked repos onto `Blocked[]`/`repos[]`, `*lock.HeldError` → lock_held,
+  `state.ErrNoRecord` → not_found + `wi isolate new` hint); then `cmd/wi` main (build the real
   registry + `clock.System`, call `Dispatch`, the single `os.Exit` via `exitcontract.Exit`); then CI +
   `.goreleaser.yaml` + Homebrew tap. Deferred
   enrichments pulled in when a command needs them: a `--` end-of-flags terminator + `did_you_mean` in
@@ -98,6 +105,39 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M3 · `internal/isolate.Remove` — the evidence-positive reclamation domain core** (`isolate.go` +
+  `isolate_test.go`, guards `ISOLATE-REMOVE` + `ISOLATE-REMOVE-TEARDOWN`; plus `state.Delete`). The SECOND
+  sub-unit of the last MVP handler — the domain logic `cmd_isolate_rm` will project onto the envelope.
+  `Remove(ctx, l, g, task, repos) (RemoveResult, error)` reclaims an isolate's worktrees UNDER the
+  `isolate-state:<task>` lock (held → `*lock.HeldError`/exit 6; a missing record → `state.ErrNoRecord` so
+  the handler maps not_found). An empty `repos` targets every recorded repo (full teardown); else exactly
+  the named ones (a name not in the record → a per-repo `ErrRepoNotInIsolate`). For EACH target,
+  `reclaimRepo` evaluates the three evidence-positive gates IN ORDER (DESIGN §7.1): (1) **ownership** — the
+  marker `refs/wi/owned/<task>/<repo>` must exist (`OwnedRefSHA`), a missing marker is `orphan_unexplained`;
+  (2) **clean** — `IsClean` on the worktree, a dirty tree is `orphan_unexplained`; (3) **not ahead of
+  base** — the worktree HEAD (`ResolveRef(wt,"HEAD")`) must still equal the marker's recorded sha (decision
+  **#RM**: the per-repo base name is NOT persisted in `state.RepoRecord`, so the MARKER is the base
+  evidence — a HEAD past it carries local commits = ahead of base). Only when all three pass is the repo
+  reclaimed (`RemoveWorktree`, itself a no-force/no-reset-hard cleanliness net, then `DeleteOwnedRef`). A
+  gate failure is a **HARD BLOCK** (`RemoveOutcome.Reason` set, `Removed:false`, never `--force`'d, left
+  intact on disk + in the marker store + in the registry), NOT a Go error — exactly the
+  `orphan_unexplained` contract (never auto-pruned, DESIGN §7.1/§7.2). After the loop the reclaimed repos
+  are dropped from the registry; when the LAST recorded repo is reclaimed the record is `state.Delete`d (the
+  isolate no longer exists) and the emptied task dir removed best-effort. `RemoveResult.Status` =
+  `RemoveComplete` iff every target was reclaimed, else `RemoveBlocked`. Added `state.Delete(stateDir,
+  task)` (idempotent record delete — a missing record is a no-op success; exercised end-to-end by the
+  teardown test). Guards (hermetic `testenv` + real git, materializing via `isolate.New`):
+  `TestRemoveReclaimsCleanBlocksAheadOfBase` — a clean unmoved "api" is reclaimed (worktree + marker gone),
+  a "web" given a local commit (clean tree, HEAD ahead) is a HARD BLOCK (intact, marker preserved, retained
+  in the registry), a "ghost" not in the record is `ErrRepoNotInIsolate`, overall `RemoveBlocked`;
+  `TestRemoveAllCleanDeletesRecord` — empty target reclaims all, record deleted (`ErrNoRecord`) + task dir
+  gone; `TestRemoveRefusesWhenIsolateStateHeld` — a pre-held lock → `*lock.HeldError`;
+  `TestRemoveMissingRecordIsErrNoRecord` — a never-created task → `state.ErrNoRecord`. Both mutants
+  demonstrated RED-then-reverted: (1) drop the ahead-of-base gate (`if false && head != marker`) → web
+  wrongly reclaimed → the primary test RED on every "web intact" assertion; (2) `state.Store` an empty husk
+  instead of `state.Delete` → the teardown test RED (`state.Load` finds a record, want `ErrNoRecord`).
+  Full `go build ./… && go vet ./… && go test ./…` GREEN (21 packages). NEXT (final MVP code unit): the
+  thin `cmd_isolate_rm.go` handler over this core, then `cmd/wi/main.go`.
 - **M3 · `internal/git` reclamation primitives — `RemoveWorktree` + `DeleteOwnedRef`** (`git.go` +
   `git_test.go`, guard `GIT-RECLAIM`). The git-level foundation `isolate rm` composes for EVIDENCE-POSITIVE
   reclamation (DESIGN §7.1/§7.2) — the FIRST sub-unit of the last MVP handler. `RemoveWorktree(ctx,
@@ -975,9 +1015,26 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CONFIG-ADD | after `os.ReadFile` in `config.Add`, strip comments before splicing (`data = stripJSONC(data)`) → the rewrite is still valid JSON containing every repo but the comments are gone → `TestAddAppendsPreservingComments` + `TestAddIntoEmptyArray` RED on the comment-survival assertions, while the repo-presence/re-parse assertions stay GREEN (isolates the mutant to the AST-preserving property — proving the edit is genuinely comment-preserving, not merely "produces valid JSON"); secondary: drop the `,` separator in the non-empty splice (`",\n"`→`"\n"`) → two adjacent objects with no separator → the post-rewrite Parse belt rejects it → `TestAddAppendsPreservingComments` RED (Add returns an error) |
 | CMD-REPO-ADD | in `repoAddCmd.Run` drop the registry lock by acquiring zero keys (`lock.Acquire(c.layout.LocksDir())`) → a busy registry is no longer refused → `TestRepoAddBusyRegistryIsLockHeld` RED (got a created Result, want `*cli.CommandError{lock_held}`), while the other 5 tests stay GREEN (isolates the mutant to "the handler actually takes the project-registry lock"); alternate: drop the `errors.Is(err, config.ErrDuplicateRepo)` → already_exists branch → a duplicate falls through to the usage default → `TestRepoAddDuplicateIsAlreadyExists` RED (wrong kind) |
 | GIT-RECLAIM | replace `git worktree remove` with a bare `os.RemoveAll(worktreePath)` in `RemoveWorktree` → the dir vanishes but the SSOT's worktree admin entry survives as a stale prunable entry AND a dirty worktree is wrongly nuked → `TestRemoveWorktreeDeregisters` RED (`worktree list` still names the path, "prunable gitdir file points to non-existent location") + `TestRemoveWorktreeRefusesDirty` RED (removed a dirty worktree, want refusal) — pins the deregister + no-force/no-reset-hard safety (DESIGN §7.1/§7.2); for `DeleteOwnedRef` skip the `update-ref -d` (`if false {…}`) → the marker survives → `TestDeleteOwnedRefClearsMarker` RED (`OwnedRefSHA` still reports present) |
+| ISOLATE-REMOVE | drop the ahead-of-base gate in `reclaimRepo` (`if false && head != marker`) → a worktree carrying a local commit (clean tree, HEAD moved past the creation marker) is no longer a HARD BLOCK; its clean tree lets `git worktree remove` succeed, so the local work is wrongly reclaimed → `TestRemoveReclaimsCleanBlocksAheadOfBase` RED on every "web intact" assertion (outcome `Removed:true` not blocked, worktree dir gone, marker cleared, registry no longer retains web) — pins the evidence-positive "not ahead of base" gate (DESIGN §7.1, decision #RM); secondary: skip the marker-existence/clean gates likewise → an unowned or dirty orphan is reclaimed |
+| ISOLATE-REMOVE-TEARDOWN | in `isolate.Remove`'s `len(rec.Repos)==0` branch replace `state.Delete` with `state.Store(stateDir, rec)` (keep an empty-repos husk instead of deleting) → a fully-reclaimed isolate's record survives → `TestRemoveAllCleanDeletesRecord` RED (`state.Load` returns a record, want `state.ErrNoRecord`) — pins that full teardown removes the registry entry so a later `isolate rm` correctly reports not_found |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
+- **#RM "not ahead of base" realization for v0 reclamation — RESOLVED 2026-06-30** (not a §7 ruling;
+  forced by `isolate.Remove` implementing DESIGN §7.1's "not ahead of base" gate against a `state.RepoRecord`
+  that does NOT persist the per-repo base branch name). **A worktree is "not ahead of base" iff its HEAD sha
+  still equals the ownership marker `refs/wi/owned/<task>/<repo>`'s recorded sha** (the base tip captured at
+  creation). The marker IS the base evidence — it was written to the exact base tip the worktree detached
+  at — so a HEAD that moved past it necessarily carries local commit(s) = ahead of base = an
+  `orphan_unexplained` HARD BLOCK. Rationale: this is evidence-POSITIVE and self-contained (the proof lives
+  in wi's own marker, not in re-deriving the base branch name); it is STRICTLY STRONGER than a
+  `DivergedCounts(HEAD, baseRef) ahead==0` check would be (which needs the base branch name absent from
+  state, and would miss a worktree that committed then the base fast-forwarded to elsewhere); and it needs
+  zero new persisted state. **Deferred (additive):** once a per-repo base IS persisted in `state.RepoRecord`
+  (the same deferred enrichment `resolve`'s `branch` field awaits), `Remove` MAY additionally consult
+  `DivergedCounts` to distinguish "ahead" from "the base itself advanced" for a richer block reason — but
+  the marker-equality gate remains the safety floor. Recorded in the `isolate.Remove`/`reclaimRepo` doc
+  comments; guard `ISOLATE-REMOVE`'s mutant pins it.
 - **#G root discovery — RESOLVED 2026-06-30** (not one of the 7 §7 rulings; DESIGN pins no
   root-discovery mechanism, and `wi init` forces it because it DEFINES the root). **Root = the current
   working directory.** `cmd/wi` resolves the layout once at startup via `layout.Resolve(cwd)` and hands

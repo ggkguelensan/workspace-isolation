@@ -125,6 +125,23 @@ func Store(stateDir string, rec IsolateRecord) error {
 	return nil
 }
 
+// Delete removes task's registry record. A missing record is a no-op success, so
+// teardown stays idempotent under a re-run (DESIGN §7.1: reclamation is replayable).
+// isolate.Remove calls this once every repo in an isolate has been reclaimed — the
+// isolate no longer exists, so its registry entry must go (a subsequent isolate rm
+// then correctly reports ErrNoRecord rather than finding an empty-repos husk). The
+// caller holds the isolate-state:<task> lock. It is a pure local delete (no network).
+func Delete(stateDir, task string) error {
+	p, err := recordPath(stateDir, task)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("state: delete record %s: %w", p, err)
+	}
+	return nil
+}
+
 // UpdateRepoStage sets repo's stage in task's record and atomically re-stores it.
 // DESIGN §6.3 calls this after each worktree add, so the write goes through the
 // atomic writer: an interrupted flip leaves the prior durable record intact rather
