@@ -19,23 +19,34 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   Guard `SHAPE-ENUM-DOUBLE-ENTRY` (`enums_test.go`): independent literal copies; drift /
   duplicate / subset checks; inline non-vacuity proof. Real-source mutant (added `"timeout"`
   to `AllErrorKinds`) confirmed RED, then reverted → GREEN.
+- **M0/A · Envelope wire type** — `internal/contract/envelope.go`: the `Envelope` struct with
+  locked field declaration order + custom `MarshalJSON` enforcing `error:null` (never omitted)
+  and `repos`/`capabilities`/`warnings`/`next` always-`[]` (never null). Nested wire types
+  `RepoResult`, `MirrorFreshness`, `Warning`, `Error`, `ResolveBlock`, `ResolveRepo`, `PlanItem`,
+  `BlockItem` (additive blocks `resolve`/`planned`/`blocked` are omitempty per DESIGN §3.1).
+  Guard `SHAPE-ENVELOPE-INVARIANTS` (`envelope_test.go`): golden success/error bytes,
+  error-always-present, repos-always-array, frozen 11-key top-level order + a non-vacuous
+  order-extractor proof. Mutant (added `,omitempty` to `Error`) confirmed RED on
+  `TestEnvelopeGoldenSuccess`/`TestEnvelopeErrorAlwaysPresent`, then reverted → GREEN.
 
 ## Next unit (pick this on the next firing)
 
-- **M0/A · Envelope wire type** — `internal/contract/envelope.go`: the `Envelope` struct with
-  locked field order + custom `MarshalJSON` enforcing `error:null` (never omitted) and
-  `repos:[]` (always an array, never null). Plus nested `RepoResult`, `Error`. Test: marshal
-  golden bytes for success/error/partial/dry-run shapes; assert field order + the two
-  MarshalJSON invariants. Mutant: drop the `error` field / let `repos` marshal as `null`.
-- Then: `schema/envelope.schema.json` (draft 2020-12, additionalProperties:false) as SSOT +
-  `SHAPE-SCHEMA` validation guard (needs `santhosh-tekuri/jsonschema` v6); then
-  `SHAPE-FINGERPRINT` (sha256 schema↔struct tripwire) + `testdata/contract.lock.json`.
+- **M0/A · Envelope JSON Schema SSOT** — `schema/envelope.schema.json` (draft 2020-12,
+  `additionalProperties:false`) as the published shape SSOT + `SHAPE-SCHEMA` validation guard
+  (validate the golden success/error envelopes against the schema; needs
+  `santhosh-tekuri/jsonschema` v6 — first external dep). The schema must mirror the locked
+  field set and `required` must list all 11 top-level keys incl. `error`.
+- Then: `SHAPE-FINGERPRINT` (sha256 schema↔struct tripwire so neither side drifts silently)
+  + `testdata/contract.lock.json`.
+- Before the schema locks: settle open decision #1 (warning-code vocabulary starter set), since
+  `Warning.Code` needs a closed enum to validate against. Adopt the documented recommendation.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
 | guard | mutant |
 |-------|--------|
 | SHAPE-ENUM-DOUBLE-ENTRY | add/reorder a value in any `All*()` without editing the `want*()` literal copy |
+| SHAPE-ENVELOPE-INVARIANTS | add `,omitempty` to `Envelope.Error`, or drop the nil→`[]` coercion for repos/capabilities/warnings/next in `MarshalJSON` |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
