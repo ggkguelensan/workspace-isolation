@@ -14,16 +14,19 @@
 //	  .wi/                   machine runtime state (gitignored)
 //	    locks/ state/ log/ mirrors/ land/ ports/ trust/
 //
-// Symlink normalization of the root (DESIGN §4 "EvalSymlinks-normalized") and
-// the filesystem-touching Bootstrap of the .wi/ subtree are layered on at the
-// CLI boundary in a later unit (they require an existing on-disk root); New here
-// is the pure, deterministic path core and requires an already-absolute root.
+// New is the pure, deterministic path core and requires an already-absolute root.
+// Resolve adds DESIGN §4 symlink normalization (it requires an existing root), and
+// Bootstrap materializes the .wi/ runtime subtree on disk — both filesystem-aware
+// constructors the CLI uses at startup.
 package layout
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ggkguelensan/workspace-isolation/internal/lockfs"
 )
 
 // Layout resolves wi paths beneath a single absolute project root.
@@ -43,8 +46,52 @@ func New(root string) (Layout, error) {
 	return Layout{root: filepath.Clean(root)}, nil
 }
 
+// Resolve returns a Layout rooted at root with every symlink in the path resolved
+// (DESIGN §4): the canonical root all later paths derive from, so equality checks
+// against it are reliable — notably on macOS, where temp and working directories
+// live under /var, a symlink to /private/var. root must already exist and be
+// absolute; use New for the existence-agnostic path core.
+func Resolve(root string) (Layout, error) {
+	if !filepath.IsAbs(root) {
+		return Layout{}, fmt.Errorf("layout: root %q is not absolute", root)
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return Layout{}, fmt.Errorf("layout: resolve root %q: %w", root, err)
+	}
+	return New(resolved)
+}
+
 // Root returns the absolute project root.
 func (l Layout) Root() string { return l.root }
+
+// wiGitignore is the content of .wi/.gitignore: a single "*" so the entire
+// runtime subtree is self-ignored regardless of the project's root .gitignore,
+// guaranteeing machine state is never committed (DESIGN §1) without wi having to
+// touch the user's own ignore files.
+const wiGitignore = "*\n"
+
+// Bootstrap materializes the .wi/ runtime subtree — WiDir plus every WiSubdirs
+// entry — and writes the self-ignoring .wi/.gitignore. It is idempotent (safe to
+// re-run on an initialized project) and is the first consumer of the single
+// atomic .wi/ writer (DESIGN §6.2). It does NOT create repos/ or isolas/; those
+// appear as repos are cloned and isolates created.
+func (l Layout) Bootstrap() error {
+	if err := os.MkdirAll(l.WiDir(), 0o755); err != nil {
+		return fmt.Errorf("layout: bootstrap %s: %w", l.WiDir(), err)
+	}
+	for _, sub := range WiSubdirs() {
+		d := filepath.Join(l.WiDir(), sub)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return fmt.Errorf("layout: bootstrap %s: %w", d, err)
+		}
+	}
+	gi := filepath.Join(l.WiDir(), ".gitignore")
+	if err := lockfs.WriteFileAtomic(gi, []byte(wiGitignore), 0o644); err != nil {
+		return fmt.Errorf("layout: bootstrap %s: %w", gi, err)
+	}
+	return nil
+}
 
 // Config returns the path to the committed manifest, <root>/wi.config.jsonc.
 func (l Layout) Config() string { return filepath.Join(l.root, "wi.config.jsonc") }
@@ -59,8 +106,8 @@ func (l Layout) IsolasDir() string { return filepath.Join(l.root, "isolas") }
 func (l Layout) WiDir() string { return filepath.Join(l.root, ".wi") }
 
 // The .wi/ runtime-state subdirectories (DESIGN §1). WiSubdirs is the single
-// source of truth for the subtree a future Bootstrap will create; the per-dir
-// accessors below derive from the same names.
+// source of truth for the subtree Bootstrap creates; the per-dir accessors below
+// derive from the same names.
 const (
 	subLocks   = "locks"
 	subState   = "state"
@@ -72,7 +119,7 @@ const (
 )
 
 // WiSubdirs returns the names of every .wi/ runtime subdirectory, in a stable
-// order. Bootstrap (later unit) creates exactly these.
+// order. Bootstrap creates exactly these.
 func WiSubdirs() []string {
 	return []string{subLocks, subState, subLog, subMirrors, subLand, subPorts, subTrust}
 }

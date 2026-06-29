@@ -122,6 +122,21 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   was rejected as vacuous (same-second SHA collision); the absolute golden is the real pin. `RunWI`
   deferred to M3 (needs the built binary).
 
+- **M0 · `internal/layout` Bootstrap + Resolve** — `layout.go` + `bootstrap_test.go`: the two
+  filesystem-aware constructors completing the layout package. `Resolve(root)` is the
+  EvalSymlinks-normalized constructor the CLI uses at startup (DESIGN §4) — requires an existing
+  absolute root, resolves every symlink so the canonical root is a fixed point (matters on macOS:
+  /var → /private/var). `(l Layout) Bootstrap()` materializes the `.wi/` runtime subtree (WiDir + all
+  7 `WiSubdirs`) and writes a self-ignoring `.wi/.gitignore` (`*\n`) so runtime state can never be
+  committed (DESIGN §1) without wi touching the user's ignore files; idempotent. **First real consumer
+  of `lockfs.WriteFileAtomic`** — dogfoods the §6.2 single-writer invariant. Guard `LAYOUT-BOOTSTRAP`:
+  symlinked-root resolution + fixed-point, relative/missing-root rejection, subtree+gitignore creation,
+  idempotency. Mutants confirmed: skip the WiSubdirs loop → `TestBootstrapCreatesSubtree` RED
+  (`.wi/locks` missing); drop EvalSymlinks (`return New(root)`) → `TestResolveNormalizesSymlinks` RED
+  (link unresolved) **and** the missing-root reject RED (proving the existence guard comes from
+  EvalSymlinks). Reverted → GREEN. **`internal/layout` is now complete** (path core + Bootstrap +
+  Resolve).
+
 - **M0 · `internal/lockfs` atomic writer** — `atomic.go` + `atomic_test.go`: `WriteFileAtomic(path,
   data, perm)`, the SINGLE atomic writer every `.wi/` state writer reuses (DESIGN §6.2). Recipe:
   `os.CreateTemp` in the SAME dir (rename stays intra-fs ⇒ atomic) → write → fsync → chmod to the
@@ -139,12 +154,12 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 - **M0 · `internal/lockfs` flock half** (`flock_unix.go`) — advisory `flock(2)` to serialize
   concurrent `wi` processes (PLAN §M0 line 166). Per decision #6 adopt `gofrs/flock` (cross-platform
-  advisory-lock wrapper); verify it adds no network behavior and no INV-NO-LLM token before
-  `go get`. Auto-lock-break is its own later unit (DESIGN §7.3: flock-trustworthy local fs + proven-
-  dead PID only) — do NOT bundle it. **Alternatively** take layout `Bootstrap`+EvalSymlinks first
-  (now unblocked by `testenv`; pure-stdlib, mkdir the `.wi/` subtree) if preferring zero new deps this
-  iteration. Then `internal/lock` (closed lock-key namespace + total-order multi-acquire), then M1
-  `gitexec`/`git`/`mirror`.
+  advisory-lock wrapper): `go get` + `go mod tidy`, then **immediately verify INV-NO-LLM still GREEN
+  and that the dep adds no network behavior** (it's a thin `flock(2)` wrapper — local syscall only).
+  Expose acquire / try-acquire / release over a lock file under `LocksDir()`. Auto-lock-break is its
+  own later unit (DESIGN §7.3: flock-trustworthy local fs + proven-dead PID only) — do NOT bundle it.
+  Then `internal/lock` (closed lock-key namespace + total-order multi-acquire to prevent deadlock),
+  then M1 `gitexec`/`git`/`mirror`.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -163,6 +178,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | CLOCK-DETERMINISM | make `Fake.Rand` return `crypto/rand.Reader` → `TestFakeReproducible` RED; make `NewFake` ignore its seed → `TestFakeSeedSensitive` RED |
 | TESTENV-HERMETIC | drop the fixed `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` → seeded SHA ≠ `goldenBaseSHA` → `TestSeedOriginIsDeterministic` RED; drop `GIT_AUTHOR_NAME` injection → ambient username leaks → `TestHermeticIdentity` RED |
 | HEAL-ATOMIC-WRITE | replace `WriteFileAtomic`'s temp+rename with an in-place `O_TRUNC` write to the final path (still honoring `FaultBeforeRename`) → under the injected crash the target is torn to the new content → `TestAtomicReplaceIsCrashSafe` RED |
+| LAYOUT-BOOTSTRAP | skip the `WiSubdirs` loop in `Bootstrap` → a declared `.wi/` subdir is missing → `TestBootstrapCreatesSubtree` RED; drop `EvalSymlinks` in `Resolve` (`return New(root)`) → a symlinked root keeps its link component → `TestResolveNormalizesSymlinks` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
