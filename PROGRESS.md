@@ -15,10 +15,13 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   stop-on-first-fail with durable not-rolled-back completed repos DESIGN §6.3, `internal/resolve.Bundle`
   the pure zero-I/O path-bundle projector behind `wi resolve`; the two `internal/git` isolate primitives
   `AddWorktree` + `CreateOwnedRef`/`OwnedRefSHA` underpin isolate). **M3 (the CLI surface → MVP) has
-  begun:** `internal/exitcontract` landed — the single exit chokepoint owning the compiled
-  `error.kind → exit-code` table (`ExitCodeFor`, guard `SHAPE-FAIL-MATRIX`) and the sole `os.Exit`
-  wrapper (`Exit`). **Next M3 units (bottom-up):** the one-envelope emitter/assembler
-  (`SHAPE-ONE-ENVELOPE`), the `--format text` lossless projection (`SHAPE-TEXT-PROJECTION`), the
+  begun:** `internal/exitcontract` landed (the single exit chokepoint owning the compiled
+  `error.kind → exit-code` table `ExitCodeFor`, guard `SHAPE-FAIL-MATRIX`, + the sole `os.Exit` wrapper
+  `Exit`), and `internal/cli.Emit` landed — the serialization chokepoint that writes EXACTLY ONE
+  schema-valid envelope as a single compact line + newline, through the same `json.Marshal` path the
+  contract goldens are frozen against (guard `SHAPE-ONE-ENVELOPE`). **Next M3 units (bottom-up):** the
+  `--format text` lossless projection (`SHAPE-TEXT-PROJECTION`), the envelope ASSEMBLER (build a
+  `contract.Envelope` from a command result + op_id + capabilities, the piece feeding `Emit`), the
   parse→dispatch tree + central error→envelope→exit wiring, per-command handlers
   (`init`/`repo add`/`sync`/`isolate new`/`resolve`/`isolate rm`), `cmd/wi`, then CI + `.goreleaser.yaml`
   + Homebrew tap. Open decision to rule at the dispatch unit: cobra (PLAN text) vs hand-rolled stdlib
@@ -32,6 +35,19 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M3/B · `internal/cli.Emit` — the one-envelope serialization chokepoint** (`emit.go` +
+  `emit_test.go`). `Emit(io.Writer, contract.Envelope) error` writes EXACTLY ONE envelope: a single
+  compact JSON line + one trailing newline, and nothing else (DESIGN §3.1). It serializes through
+  `contract.Envelope`'s own `json.Marshal` path — the SAME bytes the contract goldens and the published
+  schema are frozen against — so emitted output can never drift from the contractual wire shape (no
+  alternate Encoder, no HTML-escaping divergence); `MarshalJSON` already guarantees the always-present
+  `error` + always-array `repos`/`capabilities`/`warnings`/`next`. First file of the `internal/cli`
+  uniform-pipeline package. Resolves decision **#E** (emit output convention). Guard `SHAPE-ONE-ENVELOPE`
+  (`emit_test.go`): decode the stream → exactly one top-level value then `io.EOF`; the four list fields
+  decode as arrays + `error` key present; emitted bytes validate against the embedded schema (success +
+  error); single-trailing-newline + single-compact-line; and the payload byte-equals `json.Marshal(env)`.
+  Both mutants demonstrated RED-then-reverted: emit-twice → the EOF assertion RED; drop-the-newline → the
+  newline assertion RED. Full `go build/vet/test ./…` GREEN (18 packages).
 - **M3/A+B · `internal/exitcontract` — the exit chokepoint + failure matrix** (`exitcontract.go` +
   `exitcontract_test.go`). The single authority between a command's typed outcome and the process exit
   code (DESIGN §3.2, PLAN Wave A). `ExitCodeFor(contract.ErrorKind) contract.ExitCode` is the compiled
@@ -550,6 +566,7 @@ CLI first, bottom-up, smallest cohesive unit each firing.
 | STATE-DURABLE | replace `lockfs.WriteFileAtomic` with `os.WriteFile` in `Store` (keep `lockfs` referenced so the assertion, not the compiler, reddens) → the injected `WI_FAULT=lockfs.before_rename` no longer aborts so the interrupted flip lands → `TestDurablePartialSuccess` RED |
 | ISOLATE-NEW | drop the stop-on-first-fail `return` in `isolate.New` (turn it into `continue`) → the loop materializes the repo AFTER the failed one → `TestNewStopsOnFirstFailWithDurablePartialSuccess` RED on the 3 "db not attempted" assertions (result stage, durable stage, on-disk worktree); or skip the upfront all-pending `state.Store` → the first repo's `UpdateRepoStage` finds no record (`state: no isolate record`) and no durable registry exists to resume from → both `TestNewMaterializesAllReposComplete` + `TestNewStopsOnFirstFail…` RED |
 | RESOLVE-BUNDLE | wire per-repo `mirror` to the worktree path (`mirror := worktree`) instead of `layout.Repo` in `resolve.Bundle` → the SSOT mirror equals the worktree, reddening both repos' `Mirror` assertions in `TestBundleProjectsRecordPaths` (proves Bundle distinguishes the `isolas/<task>/<repo>` worktree from the `repos/<repo>` SSOT clone); or `continue` on one repo (drop it from the loop) → the projected `Repos` count/second-repo assertions RED (proves every recorded repo is projected, in order) |
+| SHAPE-ONE-ENVELOPE | make `cli.Emit` write the envelope TWICE (a second `w.Write(b)`) → the stream carries two top-level JSON values → `TestEmitWritesExactlyOneEnvelope` RED (second `Decode` returns a document, not `io.EOF`); or drop the trailing `'\n'` (`w.Write` without `append(b,'\n')`) → `TestEmitTerminatesWithSingleNewline` RED |
 | SHAPE-FAIL-MATRIX | perturb one pairing in `exitcontract.exitByKind` (e.g. `KindLockHeld`→`ExitRefused`/4 instead of `ExitLocked`/6) → `TestExitCodeForMatchesFailureMatrix` RED on that kind's row vs the independent §3.2 literal copy; or drop a kind whose code collides with the defensive default (e.g. remove `KindInternal`, code 70 == `ExitCodeFor`'s unmapped default) → the value test stays GREEN but `TestExitCodeForIsTotalOverAllKinds` RED (MappedKinds no longer covers `AllErrorKinds`), proving the totality check is non-redundant with the value check |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
@@ -615,6 +632,21 @@ CLI first, bottom-up, smallest cohesive unit each firing.
   additive change). `ExitCodeFor` additionally fails-safe to 70 for any *unmapped* kind, so an
   unforeseen future kind degrades to the same general-failure bucket rather than crashing. Recorded in
   the `internal/exitcontract` package doc + guard `SHAPE-FAIL-MATRIX`.
+
+- **#E `--format json` emit output convention — RESOLVED 2026-06-30** (not one of the 7 §7 rulings;
+  DESIGN §3.1 pins the envelope SHAPE but not its byte formatting). `cli.Emit` writes **compact,
+  single-line** JSON via `contract.Envelope`'s own `json.Marshal` path, then **one trailing newline**.
+  Two sub-rulings: (1) **same marshaller as the goldens** — Emit reuses `json.Marshal` (which invokes
+  `Envelope.MarshalJSON`) rather than a `json.Encoder` with `SetEscapeHTML(false)` or `SetIndent`, so the
+  emitted bytes are byte-identical to the frozen contract goldens + the schema SSOT (a divergent
+  serializer would create two inconsistent wire forms of the same envelope and could drift past
+  `SHAPE-FINGERPRINT`). Consequence: default Go HTML-escaping (`<`→`<`) is retained — acceptable
+  since agents JSON-decode (escaping is transparent) and it keeps one canonical encoding. (2)
+  **single-line + trailing newline** — compact (not pretty-printed) so the stream is line-oriented (one
+  envelope per line, greppable, log-friendly) and "exactly one envelope" is a decode-then-EOF check; the
+  newline is a terminator for line readers, not part of the JSON value. Pretty-printing, if ever wanted
+  for human reading, is a `--format text`/pretty concern layered on top, never the machine default.
+  Recorded in the `internal/cli` package doc + guard `SHAPE-ONE-ENVELOPE`.
 
 - **#N INV-NO-NETWORK egress allowlist — RESOLVED 2026-06-30** (not one of the 7 §7 rulings; the
   enforcement form of DESIGN §2 #3). The architecture guard permits `os/exec` import + `GIT_ALLOW_PROTOCOL`
