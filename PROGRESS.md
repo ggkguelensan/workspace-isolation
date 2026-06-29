@@ -70,9 +70,14 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   encoding/json (which the read path's `stripJSONC` proves would drop comments); validates name via
   `ValidateSegment` + non-empty url BEFORE any read, refuses a duplicate with the new `ErrDuplicateRepo`
   sentinel, omits the base field when `base==""` (inherit `defaults.base`), re-Parses its own output as a
-  belt before the atomic `lockfs.WriteFileAtomic`. Guard `CONFIG-ADD`. This unblocks `wi repo add`, whose
-  thin handler is the next unit. What remains for MVP: the last two
-  per-command handlers (`repo add`/`isolate rm`), each a `Command` returning a
+  belt before the atomic `lockfs.WriteFileAtomic`. Guard `CONFIG-ADD`. **The fifth handler — `wi repo add
+  <name> <url> [--base <branch>]` — has now landed too** (`cmd_repo_add.go`), a thin seam over
+  `config.Add`: the factory parses `--base`/`--base=` (globals already stripped by Dispatch) + validates
+  `<name>`/arg-count → usage; `Run` takes the `project-registry` lock (contended → lock_held) then maps
+  `config.Add` outcomes (success → created+`wi sync` hint / `ErrDuplicateRepo` → already_exists / missing
+  → not_found+`wi init` / malformed → usage). Registered as the 2-token key `"repo add"`. Guard
+  `CMD-REPO-ADD`. What remains for MVP: the LAST
+  per-command handler (`isolate rm`), a `Command` returning a
   `*Result`/`*CommandError` over the green M0–M2 core (never an envelope, never an exit code) with a
   `BuildRegistry` factory binding its deps + validating its args; then `cmd/wi` main (build the real registry + `clock.System`, call `Dispatch`, the
   single `os.Exit` via `exitcontract.Exit`); then CI + `.goreleaser.yaml` + Homebrew tap. Deferred
@@ -86,6 +91,21 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M3 · `wi repo add <name> <url> [--base <branch>]` handler** (`cmd_repo_add.go` + `cmd_repo_add_test.go`).
+  The fifth per-command handler — a THIN seam over `config.Add` (guard `CONFIG-ADD`). The factory parses
+  the command-specific `--base`/`--base=` flag (Dispatch already stripped the globals) via
+  `extractBaseFlag`, requires EXACTLY `<name> <url>` after the flag (wrong count → usage), and validates
+  `<name>` through `layout.ValidateSegment` at parse time (an unsafe name → usage, before any I/O — mirrors
+  how `isolate new` validates its `<task>`). `Run` owns only the seam responsibilities `config.Add` does
+  not: it takes the **`project-registry` lock** for the whole edit (registry mutation; a contended lock →
+  `lock_held`/exit 6, never a corrupting concurrent rewrite), then maps `config.Add`'s outcomes —
+  success → `Result{Action:created}` (no network, no `repos[]`, a `wi sync <name>` next-hint);
+  `ErrDuplicateRepo` → `already_exists`; `fs.ErrNotExist` → not_found+`wi init`; any other (malformed
+  manifest) → usage. Registered in `BuildRegistry` as the 2-token key `"repo add"` (longest-match beats a
+  bare `repo`). Guard `CMD-REPO-ADD` (clean append re-parses with the repo + preserves the comment;
+  inherited-base omission; duplicate → already_exists byte-stable; busy registry → lock_held byte-stable;
+  missing manifest → not_found; factory arg/`name` validation → usage). Mutant demonstrated: acquire zero
+  lock keys → only the lock_held test reddens.
 - **M3 · `internal/config.Add` — the AST-preserving manifest EDIT path** (`edit.go` + `edit_test.go`).
   The deferred WRITE half of `internal/config` (companion to the `CONFIG-PARSE` read path), and the
   primitive `wi repo add` is built on. `Add(path, name, url, base) error` appends a repo declaration by
@@ -838,19 +858,19 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   → exit 64). Guard each with its own fitness test asserting ONLY the domain mapping (the generic
   `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/exit wiring), following
   `CMD-RESOLVE`/`CMD-INIT`/`CMD-ISOLATE-NEW`.
-  **Suggested next: the `cmd_repo_add.go` handler** (`wi repo add <name> <url> [--base <branch>]`). The
-  AST-preserving config edit path it needs — `config.Add(path, name, url, base)` — **has now landed**
-  (guard `CONFIG-ADD`; textual splice into the `repos` array, comment-preserving, `ErrDuplicateRepo`,
-  base-omitted-when-empty, atomic write + re-parse belt), so this unit is now a THIN handler over it.
-  Plan: take the `project-registry` lock for the duration (registry mutation, serializes concurrent
-  `repo add`s); call `config.Add`; map `ErrDuplicateRepo` → `already_exists`, `fs.ErrNotExist` →
-  not_found+`wi init`, any other Parse error → usage. The factory validates `<name>` through
-  `layout.ValidateSegment` (a path segment) at parse time and requires exactly `<name> <url>` (+ optional
-  `--base`). Project onto `Result{Action:created, …}` (no network, no repos[]). Guard `CMD-REPO-ADD`
-  asserts: a clean add returns `created` and the manifest now re-parses with the repo; a duplicate name →
-  `already_exists` leaving the file intact; an unsafe name → usage. Then
-  `isolate rm` (evidence-positive reclamation via `refs/wi/owned/<task>/<repo>` — HARD BLOCK on an
-  unexplained orphan, never auto-prune; DESIGN §7.1).
+  **Suggested next: `isolate rm <task> [<repo>…]` — the LAST MVP handler** (and the only remaining M3
+  command). It RECLAIMS an isolate's worktrees, and reclamation is EVIDENCE-POSITIVE (DESIGN §7.1, an
+  INV-RECLAIM-SAFE invariant): a worktree is removed ONLY when a marker ref `refs/wi/owned/<task>/<repo>`
+  proves wi created it; an unexplained orphan (a path with no owned-ref, or local commits/dirt beyond the
+  recorded tip) is a HARD BLOCK — refused, never auto-pruned — and `refs/wi/owned/*` / `refs/wi/backup/*`
+  are protected from gc. Likely shape: a new `internal/git` primitive to read/verify the owned-ref + a
+  `git worktree remove` wrapper (NO `git reset --hard`), an `internal/isolate.Remove` (or reuse the state
+  registry) under the `isolate-state:<task>` lock that walks the recorded repos, verifies each owned-ref,
+  removes the verified worktrees + state record, and reports a blocked verdict for any orphan; then the
+  thin `cmd_isolate_rm.go` handler (factory validates `<task>` segment; maps domain → `Result{Action:
+  removed}` / a blocked-orphan → `Blocked[]` (exit-neutral, NOT a refusal) / held lock → lock_held).
+  Decide the orphan-handling open question per DESIGN §7.1 (HARD BLOCK + explicit `--force`-free posture
+  for MVP — no force flag yet) and record it. Guard `CMD-ISOLATE-RM` + the new git primitive's own guard.
 - **Then** `cmd/wi/main.go` — the single process entry: discover the root → build `Deps` +
   `clock.System`, `BuildRegistry`, call `cli.Dispatch`, and make the SOLE `os.Exit` via
   `exitcontract.Exit(code)`. Then CI + `.goreleaser.yaml` + Homebrew tap. Completing this chain = full
@@ -914,6 +934,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | SYNC-RUN | drop the `g.FastForwardBaseRef` call in `syncOne` (`if false {…}`, keep the snapshot built from `originSHA`) → after the origin advances the on-disk base ref is never moved → `TestSyncFastForwardsToNewOriginTip` RED (on-disk base frozen at the seed tip, not the new origin tip), while the fresh-materialize + continue-on-fail tests stay GREEN (isolates the mutant to the advance path); secondary: turn the per-repo loop's continue-on-fail into break/return-on-first-error → `TestSyncContinuesOnFailureAndReportsPartial` RED (the reachable repo after the failed one is never synced) |
 | CMD-SYNC | in `syncCmd.Run`, on `res.Status == syncpkg.StatusPartial` return `(result, nil)` instead of `(result, *CommandError{Kind:partial})` → a partial sync is mis-reported as a clean success (no error, exit 0) → `TestSyncHandlerDurablePartial` RED (`want *cli.CommandError, got <nil>`), while `TestSyncHandlerSyncsAllDeclaredRepos` stays GREEN (isolates the mutant to the partial-mapping path); alternate: drop the unknown-repo `!ok` not_found branch in `selectRepos` → `TestSyncHandlerUnknownRepoIsNotFound` RED (no error / wrong kind) |
 | CONFIG-ADD | after `os.ReadFile` in `config.Add`, strip comments before splicing (`data = stripJSONC(data)`) → the rewrite is still valid JSON containing every repo but the comments are gone → `TestAddAppendsPreservingComments` + `TestAddIntoEmptyArray` RED on the comment-survival assertions, while the repo-presence/re-parse assertions stay GREEN (isolates the mutant to the AST-preserving property — proving the edit is genuinely comment-preserving, not merely "produces valid JSON"); secondary: drop the `,` separator in the non-empty splice (`",\n"`→`"\n"`) → two adjacent objects with no separator → the post-rewrite Parse belt rejects it → `TestAddAppendsPreservingComments` RED (Add returns an error) |
+| CMD-REPO-ADD | in `repoAddCmd.Run` drop the registry lock by acquiring zero keys (`lock.Acquire(c.layout.LocksDir())`) → a busy registry is no longer refused → `TestRepoAddBusyRegistryIsLockHeld` RED (got a created Result, want `*cli.CommandError{lock_held}`), while the other 5 tests stay GREEN (isolates the mutant to "the handler actually takes the project-registry lock"); alternate: drop the `errors.Is(err, config.ErrDuplicateRepo)` → already_exists branch → a duplicate falls through to the usage default → `TestRepoAddDuplicateIsAlreadyExists` RED (wrong kind) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
