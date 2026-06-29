@@ -9,9 +9,10 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** M1 in progress (git verbs / SSOT posture). M0 complete; `gitexec` runner+belt and
-  `git.FastForwardBaseRef` (the SSOT keystone) landed. `internal/git` now complete (resolve / ff /
-  EnsureClone / IsClean); next is `internal/mirror`.
+- **Milestone:** M1 in progress (git verbs / SSOT posture). M0 complete; `gitexec` runner+belt,
+  full `internal/git` (resolve / ff / EnsureClone / IsClean), and `internal/mirror` (cached freshness
+  snapshot + offline read/classify) landed. Remaining M1: the `internal/mirror` **fetch** path
+  (the one dialing path) + the module-wide `INV-NO-NETWORK` arch test.
 - **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); into Wave B domain code
 
 ## Done
@@ -229,17 +230,35 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `TestIsCleanReflectsWorkingTree` RED on the dirtied case. Reverted → GREEN. **`internal/git` is now
   complete** (ResolveRef / FastForwardBaseRef / EnsureClone / StatusPorcelain / IsClean).
 
+- **M1 · `internal/mirror` (cached freshness — read/classify)** — `mirror.go` + `mirror_test.go`: the
+  cached SSOT-freshness layer that feeds `mirror_freshness` in the envelope (DESIGN §5). `Snapshot`
+  (comparable, all-scalar) records what the last fetch observed — `repo`/`base`/`fetched_at`/
+  `local_base_sha`/`origin_base_sha`/`behind_origin_as_of_fetch` — persisted to
+  `<root>/.wi/mirrors/<repo>.json` via the single atomic writer (`lockfs.WriteFileAtomic`, DESIGN §6.2)
+  and read back by `Load` with **zero** network (the package imports no git/gitexec and takes no Runner,
+  so a read structurally cannot dial). `Snapshot.Freshness()` projects onto `contract.MirrorFreshness`
+  purely (no I/O): **`stale = behind_origin_as_of_fetch > 0`** (decision #M below). A never-fetched repo
+  → `ErrNoSnapshot` so callers omit the block (≠ stale). Repo name (→ filename) routes through the
+  shared `layout.ValidateSegment` chokepoint, mirroring `lock`'s `<key>.lock`-in-LocksDir pattern.
+  Guards: `MIRROR-FRESHNESS` (two-sided: behind>0 stale, behind==0 fresh, carrying count + fetched_at)
+  + `MIRROR-PERSIST` (Store→Load round-trip, missing→`ErrNoSnapshot`, traversing name rejected).
+  Mutants confirmed: `Stale:false` hardcode → `TestFreshnessClassifiesStaleByBehindCount` RED; Store
+  diverts the write (`p+".mutant"`, import kept used) → `TestSnapshotRoundTrips` RED (Load can't find
+  it). Reverted → GREEN.
+
 ## Next unit (pick this on the next firing)
 
-- **M1 · `internal/mirror` (cached freshness, never dials on read paths).** With `internal/git`
-  complete, build the mirror/freshness layer that feeds `mirror_freshness` in the envelope (DESIGN §5):
-  a fetch path (the ONLY dialing path — `gitexec.RunNetwork`) that records a cached freshness snapshot
-  (`behind_origin_as_of_fetch`, fetch timestamp, base SHA) to `.wi/mirrors/<repo>` via
-  `lockfs.WriteFileAtomic`, and READ paths that classify `main_state`/freshness purely from that cached
-  state + the LOCAL clone, performing ZERO network dials (the no-hidden-network invariant on read).
-  Start with the cached-snapshot value type + its (offline) read/classify path and a guard that read
-  never dials (drive it through the offline `Run` belt so any accidental dial is physically refused);
-  the fetch/update-snapshot path follows as its own unit. Test-first with a `testenv` origin + clone.
+- **M1 · `internal/mirror` · the fetch path (the one dialing path).** With the snapshot value type +
+  offline read/classify landed, add `Fetch` (or `Refresh`): given a repo's SSOT clone dir + origin, run
+  `git fetch` via **`gitexec.RunNetwork`** (the ONLY permitted dial), then recompute
+  `behind_origin_as_of_fetch` from LOCAL refs (`rev-list --count refs/heads/<base>..<origin-base>`,
+  offline) and `Store` a fresh `Snapshot`. Guard: after a fetch against an origin that advanced, the
+  stored snapshot's behind count > 0 and `Freshness().Stale` is true; the SSOT working tree stays
+  pristine (`git.IsClean`) — fetch must NOT advance the base ref (that is `FastForwardBaseRef`'s job on
+  the sync path). Use a `testenv` origin + `git.EnsureClone`d mirror; push a new commit to origin, then
+  fetch. Mutant: skip the fetch (recompute against stale remote refs) → behind stays 0 → stale RED.
+  After this, the module-wide **`INV-NO-NETWORK`** arch test in `internal/invariants` (git-child belt
+  asserted across all offline command paths) closes M1.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -268,8 +287,18 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | GIT-FF-ONLY | drop the `merge-base --is-ancestor` precheck in `FastForwardBaseRef` (update-ref unconditionally) → a divergent target advances the base ref → `TestFastForwardRefusesNonFastForward` RED (missing error + moved ref) |
 | GIT-CLONE-DETACHED | skip the `switch --detach` in `EnsureClone` (leave `<base>` checked out) → HEAD abbrev-ref is the branch name, not `"HEAD"` → `TestEnsureCloneDetachesAtBaseTip` RED |
 | GIT-CLEAN | make `IsClean` ignore `StatusPorcelain` and always return `true` → an untracked file no longer reads as drift → `TestIsCleanReflectsWorkingTree` RED |
+| MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
+| MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
+
+- **#M `mirror_freshness.stale` predicate — RESOLVED 2026-06-30** (not one of the 7 §7 rulings; §7 #1
+  only fixed that staleness lives in the structured field, not a warning). `stale = true` **iff
+  `behind_origin_as_of_fetch > 0`** — the most current offline-knowable signal, since wi never
+  auto-fetches. Rejected a time-based TTL (would need a clock policy or a dial; no TTL exists anywhere
+  in the spec). The `stale` bool and the count are non-redundant — the count is `,omitempty` (absent at
+  0), so `stale` is the stable field agents branch on. Never-fetched repo → `mirror.ErrNoSnapshot` →
+  the `mirror_freshness` block is omitted entirely (≠ "fresh"). Recorded in DESIGN §5.
 
 - **#1 `capabilities[]` + warning-code token sets — RESOLVED 2026-06-29.** Capabilities v0 =
   `{help-json, resolve-block, dry-run, partial-success}` (pinned in `Capabilities()`). Warning-code

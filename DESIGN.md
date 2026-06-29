@@ -205,6 +205,13 @@ HEAD stays detached after an op battery).
 `refs/heads/<base>`; behind-origin is surfaced separately as the **cached**
 `mirror_freshness.behind_origin_as_of_fetch` (read paths never dial the network).
 
+`mirror_freshness.stale` is `true` **exactly when `behind_origin_as_of_fetch > 0`** — the most
+current offline-knowable freshness signal, since wi never auto-fetches (RESOLVED 2026-06-30; no
+time-based TTL, which would require either a clock policy or a dial). The `stale` bool and the count
+are non-redundant: the count is `,omitempty` (absent at 0), so `stale` is the stable field agents
+branch on. A repo that has **never been fetched** has no cached snapshot (`internal/mirror`'s
+`ErrNoSnapshot`) and emits **no** `mirror_freshness` block at all — distinct from "fresh".
+
 ---
 
 ## 6. Concurrency & durability
