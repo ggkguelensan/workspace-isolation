@@ -63,17 +63,28 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   cwd-walk-up `moduleRoot`. `TestNoLLMScannerIsNonVacuous` exercises the same detector on a synthetic
   `go-openai` line. Real-source mutant (appended a `// ...go-openai` comment to `go.mod`) confirmed
   `TestNoLLMDependencies` RED (flagged `[openai go-openai]`), reverted via `git checkout` → GREEN.
+- **M0/A · WI_FAULT harness + META-VACUITY** — `internal/fault`: the deterministic fault-injection
+  seam (`fault.Active(id)` reading the `WI_FAULT` env, exact per-entry match; inert when unset) that
+  future HEAL/crash guards consult so their mutant is "set `WI_FAULT=<id>`" rather than a source edit
+  — the harness IMPLEMENTATION_PLAN §2 lists as a Wave-A deliverable. `META-VACUITY`
+  (`meta_vacuity_test.go`) re-execs the test binary to run a reference guard twice: under
+  `WI_FAULT=meta.reference` it MUST fail (a fault can redden a guard), with no fault it MUST pass.
+  Unit test `TestActiveIn` pins exact (non-substring) matching. Real-source mutant (made `refSubject`
+  ignore the fault) confirmed `TestMetaVacuity` RED ("harness is vacuous"), reverted → GREEN.
+- **Wave A is COMPLETE** (modulo `NORM-CORRECT`, intentionally deferred to Wave B): contract spine
+  (enums/envelope/schema/fingerprint-lock), INV-NO-LLM, and the WI_FAULT/META-VACUITY methodology
+  harness are all in and green. M0 now proceeds to its non-contract packages.
 
 ## Next unit (pick this on the next firing)
 
-- **M0/A · META-VACUITY** — a meta-guard that mechanically asserts the (guard→mutant) registry is
-  honest: for each registered pair, applying the mutant must turn its guard RED. Likely realized as a
-  build-tag/`WI_FAULT` harness the test toggles, or a documented-and-checked registry table. Closes
-  the last methodology guard of Wave A. (`NORM-CORRECT`, the path-scoped golden normalizer, stays
-  deferred to Wave B when there is path-bearing CLI output to normalize.)
-- Then the first non-contract M0 package: `internal/layout` (all paths: `repos/`, `isolas/<task>/<repo>/`,
-  `.wi/` subtree + bootstrap) — needs a unit test pinning the path scheme. After that `internal/lockfs`
-  (atomic writes — needs open decision #6), `internal/lock`, `cli/opid`.
+- **M0 · `internal/layout`** (open decision #2 territory is later; this is just paths) — the sole
+  owner of every wi path + `.wi/` bootstrap (DESIGN §1, §8 "path/.wi ownership"). A pure,
+  filesystem-free path calculator: given a project root + task + repo, derive `repos/<repo>`,
+  `isolas/<task>/<repo>`, the `.wi/` state subtree, log path, etc. Unit test pins the exact scheme
+  (golden path strings) + rejects unsafe inputs (path traversal `..`, absolute, empty task/repo).
+  Mutant: change a join/segment so a derived path drifts from the pinned golden → RED.
+- Then `internal/lockfs` (atomic writes — **needs open decision #6**: adopt `gofrs/flock` +
+  `google/renameio` per the documented recommendation), `internal/lock`, `cli/opid`.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -84,6 +95,8 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | SHAPE-SCHEMA | set top-level `additionalProperties:true` (or drop `error` from `required`, or widen a closed enum) in `schema/envelope.schema.json` → `TestSchemaRejectsInvalid` RED |
 | SHAPE-FINGERPRINT | rename/retype/reorder any `Envelope` (or nested) field, or edit the schema bytes, without regenerating `contract.lock.json` → `TestContractFrozen` RED |
 | INV-NO-LLM | introduce a denylisted LLM/agent-SDK module into `go.mod`/`go.sum` (or empty `llmDenylist`) → `TestNoLLMDependencies` / `TestNoLLMScannerIsNonVacuous` RED |
+| META-VACUITY | make `refSubject` ignore the fault (e.g. `if false && Active(refFaultID)`, or always return 42) so the under-fault subprocess passes → `TestMetaVacuity` RED ("harness is vacuous") |
+| (fault seam unit) | replace exact `strings.TrimSpace(f) == id` with `strings.Contains` in `activeIn` → the `{"foobar","foo"}` case of `TestActiveIn` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
