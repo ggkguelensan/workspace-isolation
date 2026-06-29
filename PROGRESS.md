@@ -33,17 +33,22 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `internal`) + `Format`/`Render` (json→`Emit` / text→`RenderText`) + `Execute` (run → `envelopeFor`
   (Success/Failure + threads every additive block; a partial carries `repos[]` onto the top-level
   `error.kind=partial`) → `Render` → `ExitFor`), the SOLE assembler+serializer+exit-deriver so every
-  command emits one envelope and exits identically; guard `RUN-PIPELINE`. **The pure contract spine of the
-  CLI (assemble → serialize json|text → exit) AND the outcome→envelope→exit Runner core are now complete
-  and green** — what remains is the dispatch front-end that feeds them. **Next M3 units (top of the
-  pipeline, then commands):** the DISPATCH layer — argv → (command-string, global flags `--format`/
-  `--dry-run`, command args) → look up a `Command` in a registry → mint `op_id` (`opid.New` via the clock)
-  → build `Meta` → `Execute`; then per-command handlers (`init`/`repo add`/`sync`/`isolate new`/`resolve`/
-  `isolate rm`), each returning a `*Result`/`*CommandError` over the green M0–M2 core; then `cmd/wi` main
-  (single `os.Exit` via `exitcontract.Exit`); then CI + `.goreleaser.yaml` + Homebrew tap. Open decision to
-  rule at the dispatch unit (call it **#F**): cobra (PLAN text) vs hand-rolled stdlib `flag` — lean stdlib
-  given the zero-dep posture (#6, #C), record then. Deferred enrichments pulled in when a command needs
-  them: `isolate.New` resume (skip repos already `StageCreated`), per-repo base persisted in `state`
+  command emits one envelope and exits identically; guard `RUN-PIPELINE`. And the DISPATCH layer landed —
+  `Registry` (a `map[string]func(args)→(Command,error)` of dep-bound factories) + `Dispatch(ctx, w, clk,
+  reg, args)` which parses globals (`--dry-run`/`--format`, recognized anywhere), resolves the subcommand
+  by longest match (2-token `"isolate new"` beats 1-token `"isolate"`), mints `op_id` (`opid.New` via the
+  clock — on EVERY path, incl. errors), builds `Meta`, and hands off to `Execute`; a parse error /
+  unknown command / factory arg-rejection all collapse to ONE `usage` envelope (kind=usage → exit 64).
+  Guard `DISPATCH-ROUTES`; resolves decision **#F** (hand-rolled stdlib parser, NOT cobra — zero-dep
+  posture #6/#C, fixed small command surface). **The ENTIRE generic CLI pipeline — argv → dispatch →
+  outcome → one envelope (json|text) → mapped exit — is now complete and green.** What remains for MVP:
+  the per-command handlers that plug real domain work into the pipeline (`init`/`repo add`/`sync`/`isolate
+  new`/`resolve`/`isolate rm`), each a `Command` returning a `*Result`/`*CommandError` over the green
+  M0–M2 core (never an envelope, never an exit code) with a real `Registry` factory binding its deps +
+  validating its args; then `cmd/wi` main (build the real registry + `clock.System`, call `Dispatch`, the
+  single `os.Exit` via `exitcontract.Exit`); then CI + `.goreleaser.yaml` + Homebrew tap. Deferred
+  enrichments pulled in when a command needs them: a `--` end-of-flags terminator + `did_you_mean` in
+  dispatch, `isolate.New` resume (skip repos already `StageCreated`), per-repo base persisted in `state`
   (populates `resolve`'s `branch`), state KV + `cas`.
   M0 + M1 complete: contract spine, layout, opid, clock, testenv, lockfs, lock, `gitexec` runner+belt,
   full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch / DivergedCounts), complete
@@ -52,6 +57,36 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M3/B · `internal/cli` DISPATCH layer — `Registry` + `Dispatch` (argv → Command + Meta → Execute)**
+  (`dispatch.go` + `dispatch_test.go`). The front half of the Runner, sitting on top of the green
+  `Execute` core (DESIGN §3, §4). `Registry` = `map[string]func(args []string) (Command, error)`: a
+  factory per canonical command string (`"init"`, `"isolate new"`), each closing over the command's
+  deps (layout/clock/git/…) so `Dispatch` stays dependency-agnostic and a factory carries only the
+  parsed args; a factory rejecting its args → a `usage` envelope. `Dispatch(ctx, w, clk, reg, args)
+  (contract.ExitCode, error)`: mint `op_id` FIRST (`opid.New(clk.Now(), clk.Rand())` — every path,
+  incl. errors, carries a correlation id; a crypto/rand failure is surfaced as `kind=internal`), parse
+  globals, build `Meta{OpID, Command, DryRun}`, resolve the subcommand by LONGEST match (2-token
+  `"isolate new"` beats 1-token `"isolate"`), then `reg[name](rest)` → `Execute`. A parse error, an
+  unknown command, or a factory arg-rejection ALL become one `usage` envelope (`kind=usage` → exit 64)
+  via `emit` (= the same `Render`+`ExitFor` wiring `Execute` uses), so every dispatch path — including
+  the ones that never reach a `Command` — still emits EXACTLY ONE envelope. `parseGlobals` is a forgiving
+  single pass: `--dry-run`, `--format <v>`, `--format=<v>` recognized ANYWHERE (v0 command args are
+  plain names/URLs that never start with `--`), everything else positional; an absent/invalid `--format`
+  value is a usage error; format defaults to `json`. A returned Go error is reserved for an
+  infrastructure write failure (propagated from `emit`/`Execute`). Resolves decision **#F** (hand-rolled
+  stdlib parser, NOT cobra). Guard `DISPATCH-ROUTES` (`dispatch_test.go`, fake `Registry` of recording
+  factories + the `fakeCommand`/`decodeOne` helpers reused from `run_test.go`): a known 1-token command
+  routes + threads its `Result` (exit 0, `command` stamped); a 2-token command resolves AND forwards the
+  trailing args; an unknown command → `kind=usage` exit 64 naming the command, with NO factory run; a
+  factory arg-rejection → `kind=usage` exit 64; `--dry-run` threads to `env.DryRun` without leaking into
+  command args; `--format text` reaches `RenderText` (non-JSON, shows `init`+`OK`); `--format yaml` is a
+  usage error; `op_id` is `opid.Valid` on BOTH the success and the unknown-command paths. Mutant
+  demonstrated RED-then-reverted: `resolveCommand` ignores the parsed name and always returns a fixed
+  real command (`return "init", positional, true`) → `TestDispatchRoutesUnknownToUsage` RED (an unknown
+  name wrongly runs a real command, exit 0 not 64) AND `TestDispatchRoutesTwoTokenCommand` RED (command
+  stamped `"init"`, args not forwarded). Reverted → full `go build ./… && go vet ./… && go test ./…`
+  GREEN (19 packages). **Deferred enrichments** (pull in when a command needs them): a `--` end-of-flags
+  terminator + `did_you_mean` suggestions on the unknown-command path.
 - **M3/B · `internal/cli` Runner execute-core — `Result`/`Command`/`CommandError` + `Format`/`Render` +
   `Execute`** (`run.go` + `run_test.go`). The single wiring point that turns a command's typed outcome
   into exactly one envelope + a process exit code (DESIGN §3, §4). `Result` is the typed domain outcome a
@@ -584,33 +619,31 @@ CLI first, bottom-up, smallest cohesive unit each firing.
 Done so far in M3 (bottom-up): `exitcontract` (the `error.kind→exit-code` matrix `ExitCodeFor` + the
 sole `os.Exit` wrapper, `SHAPE-FAIL-MATRIX`), `cli.Emit` (one-envelope serialization, `SHAPE-ONE-ENVELOPE`),
 the `cli` ASSEMBLER (`Meta` + `Success`/`Failure` + `ExitFor`, `SHAPE-ASSEMBLE`/`SHAPE-DRYRUN-EXIT0`),
-`cli.RenderText` (the `--format text` lossless projection, `SHAPE-TEXT-PROJECTION`), and the Runner
+`cli.RenderText` (the `--format text` lossless projection, `SHAPE-TEXT-PROJECTION`), the Runner
 EXECUTE-CORE (`Result`/`Command`/`CommandError` + `Format`/`Render` + `Execute`→`envelopeFor`→`ExitFor`,
-`RUN-PIPELINE`). **The pure contract spine AND the outcome→envelope→exit Runner core are now complete and
-green** — what remains is the dispatch front-end that feeds `Execute`, then the real commands.
+`RUN-PIPELINE`), and now the DISPATCH layer (`Registry` + `Dispatch`: argv → globals + longest-match
+command → `op_id` mint → `Meta` → `Execute`, `DISPATCH-ROUTES`, decision #F = hand-rolled stdlib not
+cobra). **The entire generic CLI pipeline — argv → dispatch → outcome → one envelope (json|text) →
+mapped exit — is now complete and green.** What remains for MVP is the per-command handlers that plug
+real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 
-- **NEXT — M3 · the DISPATCH layer (argv → chosen Command + Meta → Execute).** The front half of the
-  Runner, sitting on top of the green `Execute` core. Shape: parse `argv` into `(command-string, global
-  flags `--format`/`--dry-run`, command args)`, look up the named subcommand in a registry (a constructor
-  per command that binds parsed args + deps and returns a `Command`), mint the `op_id` (`opid.New` via the
-  clock), build `Meta{OpID, Command, DryRun}`, and call `Execute`. Likely a `Main(args []string, stdout
-  io.Writer, clk clock.Clock, …) contract.ExitCode` (the entry `cmd/wi` calls before the single
-  `exitcontract.Exit`). Build the smallest cohesive slice first: dispatch + flag parsing guarded with a
-  fake registry / fake `Command`, so the argv→Meta→Execute path is proven before any real command exists.
-  Likely guard `DISPATCH-ROUTES`: a known subcommand routes to its `Command` and produces the expected
-  envelope+exit; an UNKNOWN subcommand → a `usage` envelope (`error.kind=usage`) → exit 64 (with a
-  `did_you_mean` suggestion if cheap); `--format text` reaches `RenderText`; `--dry-run` threads into
-  `Meta.DryRun`; a minted `op_id` satisfies `opid.Valid`. Mutant: route every name to one command (ignore
-  the parsed name) → the wrong-command / unknown-name assertion RED; or skip `op_id` minting (empty) → the
-  `opid.Valid` assertion RED. **Open architectural decision to rule HERE (record as #F):** cobra (named in
-  the PLAN Wave-B text) vs hand-rolled stdlib `flag` — given the established zero-dep posture (decisions
-  #6, #C) and wi's small, fixed command surface, lean stdlib `flag` + a tiny hand-rolled subcommand switch
-  unless a concrete need for cobra emerges; record the ruling when this unit lands.
-- **Then** the per-command handlers, one cohesive unit each (`init` → `repo add` → `sync` → `isolate new`
-  → `resolve` → `isolate rm`), every one a `Command` returning a `*Result` (or a `*CommandError`) over the
-  green M0–M2 core (config/state/git/mirror/isolate/resolve), never an envelope. Then `cmd/wi` main (the
-  single `os.Exit`, via `exitcontract.Exit`, calling the dispatch entry). Then CI + `.goreleaser.yaml` +
-  Homebrew tap. Completing this chain = full MVP (M0–M3) green = a STOP condition.
+- **NEXT — M3 · the per-command handlers, one cohesive unit each** (`init` → `repo add` → `sync` →
+  `isolate new` → `resolve` → `isolate rm`). Each is a `Command` (`Run(ctx) (*Result, error)`) that does
+  its domain work over the green M0–M2 core (config/state/git/mirror/isolate/resolve) and returns a typed
+  `*Result` (or a `*CommandError`) — NEVER an envelope, never an exit code (the pipeline owns both). Each
+  ships with a real `Registry` factory binding its deps (layout/clock/git) and parsing/validating its
+  positional args (arg-count/shape errors → `*CommandError{Kind:usage}` or a factory error, both → exit
+  64 via `Dispatch`). Suggested order/scope: start with `init` (smallest — `layout.Bootstrap` + write a
+  starter `wi.config.jsonc`, `ActionCreated`) or `resolve` (pure: `state.Load`→`ErrNoRecord`-to-
+  `not_found`, then `resolve.Bundle`, `ActionRead`), since both exercise the handler→Result→envelope
+  contract with minimal new surface; then the heavier `isolate new` (drive `isolate.New`, map its
+  `StatusPartial`→a durable `*CommandError{Kind:partial}` carrying `repos[]`) and `sync`/`repo add`/
+  `isolate rm`. Guard each handler with its own fitness test (the typed `Result`/`CommandError` it
+  returns for the success + each refusal class) — the generic pipeline (`RUN-PIPELINE`/`DISPATCH-ROUTES`)
+  already proves the envelope/exit wiring, so a handler test asserts only the DOMAIN mapping.
+- **Then** `cmd/wi/main.go` — the single process entry: build the real `Registry` + `clock.System`,
+  call `cli.Dispatch`, and make the SOLE `os.Exit` via `exitcontract.Exit(code)`. Then CI +
+  `.goreleaser.yaml` + Homebrew tap. Completing this chain = full MVP (M0–M3) green = a STOP condition.
 - Deferred follow-ons (pull in when a command drives them): `isolate.New` **resume** (on re-run skip
   repos already `StageCreated`); per-repo **base persisted in `state`** (lets `resolve` populate
   `branch` instead of v0's empty); state **KV + `cas`** (`--expected __ABSENT__`).
@@ -661,9 +694,26 @@ green** — what remains is the dispatch front-end that feeds `Execute`, then th
 | SHAPE-ASSEMBLE | in `cli.Success` set `e.OK=false` (break the ok ⟺ error==nil coupling) → `TestSuccessEnvelopeCoupling` RED; or have the shared `spine` omit `Capabilities`/`SchemaVersion` (leave them zero) → `assertCommonFields` reddens in BOTH `TestSuccessEnvelopeCoupling` + `TestFailureEnvelopeCoupling` |
 | SHAPE-DRYRUN-EXIT0 | make `cli.ExitFor` return a refusal code when `len(env.Blocked)>0` (treat a would-block verdict as a refusal) → `TestExitForBlockedVerdictsAreExitNeutral` RED (blocked must be exit-neutral); the companion assertion that a genuine usage error on a `--dry-run` still maps to 64 guards against the over-correction (a blanket `if env.DryRun { return ExitOK }` would wrongly swallow it) |
 | SHAPE-TEXT-PROJECTION | drop ANY field from `cli.RenderText`/its helpers (e.g. comment out the `worktree` line in `renderRepo`) → that field's unique sentinel leaf is absent from the render → `TestRenderTextIsLossless` RED, naming the exact dropped fact (the independent `collectStringLeaves` reflection walk enumerates every envelope string leaf; the hand-written renderer can't silently omit one). Non-vacuity is inline: ≥25 leaves must be found and a never-present sentinel must NOT match |
+| DISPATCH-ROUTES | in `cli.resolveCommand` ignore the parsed name and always return a fixed real command (`return "init", positional, true`) → an unknown name wrongly runs a real command (exit 0 not 64) → `TestDispatchRoutesUnknownToUsage` RED, and the 2-token name is mis-stamped with its args dropped → `TestDispatchRoutesTwoTokenCommand` RED; or skip the `op_id` mint (leave `Meta.OpID` empty) → `TestDispatchMintsOpID` RED (`opid.Valid("")` fails on both the success and usage paths) |
 | RUN-PIPELINE | in `cli.envelopeFor` drop the durable-partial result-merge (`if false && r != nil { env.Repos = r.Repos … }`) → a partial no longer carries its per-repo detail → `TestExecutePartialCarriesReposAndExitsTwo` RED ("got 0 repos"); or make `Execute` ignore `ExitFor` and `return contract.ExitOK` → every non-zero-exit assertion (CommandError→3, partial→2, internal→70) RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
+
+- **#F CLI arg-parsing library — RESOLVED 2026-06-30** (an open architectural decision from the PLAN
+  stack/Wave-B text, which named `cobra` as a candidate and listed it among the `go.mod` pins; recorded
+  as a new resolved item in PLAN §7). **Hand-rolled stdlib parser, NOT cobra** (no new dependency). `internal/cli.Dispatch` does its own parsing: a forgiving single-pass global-flag
+  extractor (`parseGlobals` — `--dry-run`, `--format <v>`/`--format=<v>` recognized anywhere, the rest
+  positional) + a longest-match command lookup against a `Registry` map (2-token `"isolate new"` beats
+  1-token `"isolate"`). Rationale: consistent with the established zero-dep posture (decisions **#6**
+  zero new deps, **#C** hand-rolled JSONC) which keeps `INV-NO-LLM` trivially green and the supply-chain
+  surface empty; and wi's command surface is small and FIXED (`init`/`repo add`/`sync`/`isolate
+  new`/`resolve`/`isolate rm`), so cobra's generation/help/completion machinery would be weight without
+  payoff — wi's help + JSON-envelope output are bespoke anyway (the `help-json` capability), not cobra's.
+  Agent-friendliness also favors the hand-roll: globals are accepted in ANY position and every malformed
+  invocation produces the SAME one-envelope `kind=usage`/exit-64 shape as every other error, rather than
+  cobra's free-text stderr. Rejected cobra (and `urfave/cli`, `kong`) for v0; revisit only if the command
+  surface grows enough that subcommand/flag wiring becomes a real maintenance cost. Recorded here + PLAN
+  §7 (#F struck through) + the `Dispatch` doc comment. Guard `DISPATCH-ROUTES`.
 
 - **#M `mirror_freshness.stale` predicate — RESOLVED 2026-06-30** (not one of the 7 §7 rulings; §7 #1
   only fixed that staleness lives in the structured field, not a warning). `stale = true` **iff

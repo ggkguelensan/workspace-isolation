@@ -152,7 +152,7 @@ starts. Only `wi version` is wired (a stub proving the pipeline shape compiles).
 
 **Files:**
 
-- `go.mod` (pin hujson, levenshtein, goldie/v2, cobra, x/sys, go-cmp)
+- `go.mod` (pin hujson, levenshtein, goldie/v2, ~~cobra~~ [dropped — decision #F, hand-rolled stdlib], x/sys, go-cmp)
 - `internal/contract/envelope.go` — Envelope + nested structs, locked field order, `MarshalJSON`
   enforcing `error:null` + always-array `repos`
 - `internal/contract/enums.go` — ErrorKind (11), ExitCode, Action, Stage, MainState, LandState,
@@ -219,3 +219,14 @@ starts. Only `wi version` is wired (a stub proving the pipeline shape compiles).
    anyway. See DESIGN §6.2 + PROGRESS #6.
 7. **Supported git version window** — floor/ceiling, include next-rc cell? Determines the
    portability matrix and the doctor git-version-floor warning predicate.
+8. **CLI arg-parsing library (cobra vs hand-rolled stdlib)** — **RESOLVED 2026-06-30: hand-rolled
+   stdlib, NOT cobra** (decision #F). `internal/cli.Dispatch` parses argv itself — a forgiving
+   single-pass global-flag extractor (`--dry-run`, `--format <v>`/`--format=<v>`, recognized anywhere) +
+   a longest-match command lookup against a `Registry` map (2-token `"isolate new"` beats 1-token
+   `"isolate"`). Consistent with the zero-dep posture (#6, #C → INV-NO-LLM stays trivially green, no
+   supply-chain surface) and wi's small FIXED command surface; cobra's generation/help/completion
+   machinery would be weight without payoff since wi's help + JSON-envelope output are bespoke
+   (`help-json` capability), and a hand-roll lets every malformed invocation produce the SAME
+   one-envelope `kind=usage`/exit-64 shape (agent-friendly) rather than cobra's free-text stderr.
+   Guard `DISPATCH-ROUTES`. **Consequence:** the speculative `cobra` pin below is dropped — `go.mod`
+   gains no arg-parsing dependency. See PROGRESS #F. *Blocked: M3 (CLI surface) — now unblocked.*
