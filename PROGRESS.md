@@ -108,17 +108,30 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `NewFake` ignores seed → seed-sensitive RED. Reverted → GREEN. (Compile-time `var _ Clock` for both
   impls.)
 
+- **M0 · `internal/testenv` (hermetic real-git harness)** — `testenv.go` + `testenv_test.go`: the
+  sandbox every FS/git unit test runs inside (PLAN §M0). `New(t)` → an `Env` with an
+  EvalSymlinks-normalized `t.TempDir` root + a fully isolated git environment; `Git(t,dir,args…)`
+  runs git under it (fails on non-zero, returns trimmed stdout); `SeedOrigin(t,name)` makes a bare
+  origin with one deterministic commit on `main` (local `clone --bare`, no network). Isolation:
+  `GIT_CONFIG_GLOBAL`/`SYSTEM`=`/dev/null` + `GIT_CONFIG_NOSYSTEM=1`, fixed identity + fixed
+  author/committer **dates** (reproducible SHAs), `LC_ALL=C` (stable git English), no prompt/no net.
+  Guard `TESTENV-HERMETIC`: pins an **absolute golden base SHA** (`48f4258c…`, sha1) — fully
+  determined by identity+dates+content+message — plus injected author identity + symlink-normalized
+  root. Mutants confirmed: drop fixed dates → SHA ≠ golden RED; drop `GIT_AUTHOR_NAME` → ambient
+  username (`admin`) leaks → identity RED. **Note:** a relative "two runs agree" determinism check
+  was rejected as vacuous (same-second SHA collision); the absolute golden is the real pin. `RunWI`
+  deferred to M3 (needs the built binary).
+
 ## Next unit (pick this on the next firing)
 
-- **M0 · `internal/testenv`** (real-git tmpdir harness, PLAN §M0 file list) — `t.TempDir` project
-  roots with seeded git origins (a default branch + an initial commit), hermetic git-config
-  isolation (`GIT_CONFIG_GLOBAL=/dev/null`, deterministic author/committer ident + dates), an
-  EvalSymlinks-normalized root, and a `RunWI` helper. This is the gate for every FS/git unit that
-  follows. Pure-Go but shells out to real `git` (M1 territory begins here). Mutant: harness that
-  leaks the ambient `$HOME` git config → a determinism/isolation assertion RED.
-- Then it unblocks: `internal/layout` Bootstrap+EvalSymlinks → `internal/lockfs` (atomic writes —
-  **open decision #6**: adopt `gofrs/flock` + `google/renameio`) → `internal/lock` → M1 `gitexec`/
-  `git`/`mirror`.
+- **M0 · `internal/lockfs` atomic writer** (`WriteFileAtomic`) — **open decision #6: RESOLVED →
+  adopt `google/renameio` for atomic replace + `gofrs/flock` for advisory locks** (record on first
+  use). Start with the atomic-write half (temp-in-same-dir + fsync + rename + parent-dir fsync) since
+  it's the SOLE `.wi/` writer (DESIGN §6.2) every state writer reuses; flock self-heal is a separate
+  follow-up unit. Guard via `testenv`: write a file, assert content + that no temp/partial siblings
+  remain; mutant (a fault-injected crash between temp-write and rename, via the `WI_FAULT` seam)
+  must leave NO torn file. Then layout `Bootstrap`+EvalSymlinks, `internal/lock`, then M1
+  `gitexec`/`git`/`mirror`.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -135,6 +148,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | LAYOUT-SAFE | make `validSegment` always-nil → reject cases of `TestSegmentSafety` RED; always-error → the `ok-name_1` accept floor RED |
 | OPID-FORMAT | change the time unit (`UnixMilli`→`Unix`), `randLen` (5→4), the `op_` prefix, or drop `strings.ToLower` → `TestNewFormat`/`TestValid` RED |
 | CLOCK-DETERMINISM | make `Fake.Rand` return `crypto/rand.Reader` → `TestFakeReproducible` RED; make `NewFake` ignore its seed → `TestFakeSeedSensitive` RED |
+| TESTENV-HERMETIC | drop the fixed `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` → seeded SHA ≠ `goldenBaseSHA` → `TestSeedOriginIsDeterministic` RED; drop `GIT_AUTHOR_NAME` injection → ambient username leaks → `TestHermeticIdentity` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
