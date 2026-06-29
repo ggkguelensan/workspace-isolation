@@ -9,7 +9,17 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** **M2 COMPLETE; M3 NEARLY COMPLETE — the `wi` binary runs end-to-end.** All six MVP
+- **Milestone:** **✅ MVP M0–M3 COMPLETE AND GREEN (2026-06-30) — STOP condition reached.** All six MVP
+  commands run end-to-end through the uniform pipeline, plus full release scaffolding: CI gate
+  (gofmt/build/vet/test on ubuntu+macos) + `goreleaser check` + `.goreleaser.yaml` (cross-compile, 4
+  targets) + Homebrew cask + tag-push `v*` `release.yml`. Verified this firing: gofmt clean, go
+  build/vet/test green, goreleaser check PASS, both workflows parse, binary smoke (init→0, resolve
+  ghost→3, reinit→4, bogus→64). Owner follow-ups before first release: set `HOMEBREW_TAP_GITHUB_TOKEN`
+  PAT secret; add a LICENSE; (optional) a `wi version` unit to enable `-X` version stamping. M4/M5
+  remain unstarted by design (additive on the frozen M0 contract; await owner go-ahead). _Prior
+  milestone history retained below._
+
+- **Milestone (prior):** **M2 COMPLETE; M3 NEARLY COMPLETE — the `wi` binary runs end-to-end.** All six MVP
   commands plus `cmd/wi/main.go` now land green; the entire `init→repo add→sync→isolate new→resolve→
   isolate rm` surface is reachable through a runnable, smoke-verified binary. **Release scaffolding
   sub-units (a) CI gate + (b) `.goreleaser.yaml` have now landed** (a: gofmt+build+vet+test on
@@ -118,6 +128,26 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 - **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); in Wave B domain code (M2).
 
 ## Done
+
+- **M3 · Homebrew cask + tag-push release workflow — sub-unit (c); COMPLETES MVP M0–M3** (`brews:`→
+  `homebrew_casks:` in `.goreleaser.yaml` + `.github/workflows/release.yml`; decision **#HC**).
+  goreleaser **hard-deprecated `brews` INSIDE the `~> v2` range we pin** (v2.16), so PLAN §6's
+  mitigation ("pin the major to dodge the deprecation, cask rejected") does NOT hold — `goreleaser
+  check`, our fitness, FAILS on `brews` (exit non-zero, "uses deprecated properties"). Trusting the
+  build over the doc, migrated to `homebrew_casks` (goreleaser's steer for prebuilt-binary Homebrew
+  distribution): cask `wi` → tap repo `ggkguelensan/homebrew-tap` (dir `Casks`), `skip_upload: auto`,
+  `goreleaserbot` author; the generated cask carries BOTH `on_macos` and `on_linux` URL stanzas (so it
+  references the Linux tarballs too, Linux cask support being Homebrew-dependent). No `license` (no
+  LICENSE file yet — owner legal decision) and no `test do` (casks don't support it). `release.yml`:
+  on push tag `v*` → `goreleaser release --clean` (checkout `fetch-depth: 0` for the changelog, Go
+  pinned from go.mod, `goreleaser-action@v6` `~> v2`), `permissions: contents: write`; the cross-repo
+  cask push is wired to a `HOMEBREW_TAP_GITHUB_TOKEN` PAT secret (default `GITHUB_TOKEN` can't write
+  another repo). **Process artifact** (config DATA + a workflow), no Go guard/mutant; fitness =
+  `goreleaser check`. **Validated with goreleaser v2.16.0**: `check` clean (zero deprecations) AND
+  `goreleaser release --snapshot --skip=publish` generated a valid `dist/homebrew/Casks/wi.rb`. **Full
+  MVP verification (this firing):** gofmt clean · `go build`/`go vet`/`go test` green · `goreleaser
+  check` PASS · both workflows parse · end-to-end binary smoke (`init`→0, `resolve ghost`→3, reinit→4,
+  `bogus`→64, one envelope each). **MVP M0–M3 is GREEN — STOP condition reached.**
 
 - **M3 · `.goreleaser.yaml` + `goreleaser check` CI wiring — sub-unit (b) of release scaffolding**
   (`.goreleaser.yaml` + a `goreleaser-config` job in `ci.yml`; decision **#GR**). Schema **v2**, pinned
@@ -965,7 +995,19 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   v0 `branch` empty because worktrees are detached) recorded below. **M2 is now COMPLETE** (config +
   state + isolate + resolve); next is M3 — the CLI surface.
 
-## Next unit (pick this on the next firing) — M3 BEGINS (the CLI surface → MVP)
+## Next unit (pick this on the next firing) — ✅ MVP COMPLETE; M4 GATED ON OWNER GO-AHEAD
+
+> **STOP state (2026-06-30).** Every M0–M3 unit below is DONE and the tree is green (gofmt · build ·
+> vet · test · `goreleaser check` all pass; both workflows parse). The locked build loop's stop
+> condition — "if the full MVP (M0–M3) is green … say so plainly and stop making changes" — is reached.
+> Do NOT start M4 (land / landstate / gc) or M5 (step / ports / hooks / discovery) on the next firing
+> without explicit owner confirmation: they are additive on the now-frozen M0 contract and represent a
+> scope expansion past the MVP, not a continuation of it. Three owner follow-ups gate a real release:
+> (1) set the `HOMEBREW_TAP_GITHUB_TOKEN` PAT secret before the first `v*` tag (the default Actions
+> `GITHUB_TOKEN` cannot push the cask cross-repo to ggkguelensan/homebrew-tap); (2) add a LICENSE file
+> and set the cask `license`; (3) add a `wi version` unit (declaring version/commit/date vars) before
+> goreleaser `-X` version stamping can be turned on. None of these are code the loop should write
+> unprompted — (1) and (2) are owner decisions, (3) is post-MVP scope.
 
 M3 (DESIGN §3, IMPLEMENTATION_PLAN §M3 + Wave B) wires the green domain core through the uniform
 pipeline into the runnable `wi` binary: `internal/cli` (parse → dispatch → **one** envelope out →
@@ -1036,18 +1078,20 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 - **DONE (this firing) — release scaffolding sub-unit (b): `.goreleaser.yaml` + CI `goreleaser check`**
   (decision #GR; see Done). v2 config, cross-compiles cmd/wi for darwin/linux×amd64/arm64, proven by
   `goreleaser check` (clean) + a four-target snapshot build on goreleaser v2.16.0; wired into CI.
-- **NEXT (and the LAST MVP unit) — release scaffolding sub-unit (c): Homebrew tap + release workflow.**
-  Two coupled pieces, both config DATA (fitness = `goreleaser check`, NOT a Go test): **(1)** add a
-  `brews:` block to `.goreleaser.yaml` — `repository: {owner: ggkguelensan, name: homebrew-tap}`, a
-  `homepage`/`description`/`license` (NB no LICENSE file yet — pick a placeholder or add the license
-  first), `commit_author`, and `test do`/`bin` stanza fields so `brew install ggkguelensan/tap/wi`
-  works; **(2)** add `.github/workflows/release.yml` triggered on tag-push `v*` running `goreleaser
-  release` with `goreleaser-action@v6` (`version: ~> v2`), `permissions: contents: write` (+ a
-  `HOMEBREW_TAP_GITHUB_TOKEN`/PAT secret note for pushing the formula to the separate tap repo — the
-  default `GITHUB_TOKEN` can't push cross-repo, so flag this as the one piece needing an owner-provided
-  secret). Re-run `goreleaser check` after adding `brews:`. **Completing (c) green = full MVP (M0–M3) =
-  a STOP condition** — say so plainly and stop. Caveats to surface at STOP: the version-stamping `-X`
-  deferral (needs a `wi version` unit) and the cross-repo tap PAT secret are the two owner follow-ups.
+- **DONE (this firing) — release scaffolding sub-unit (c): Homebrew cask + tag-push release workflow**
+  (decisions #GR/#HC; the LAST MVP unit). Both config DATA (fitness = `goreleaser check`, NOT a Go
+  test): **(1)** a `homebrew_casks:` block in `.goreleaser.yaml` — NOT `brews:`, which goreleaser
+  HARD-deprecated inside the `~> v2` range we pin, so `goreleaser check` (our fitness) FAILS on it; this
+  overrides PLAN §6's "pin the major to dodge it, cask rejected" mitigation (recorded as decision #HC).
+  Pushes the generated cask to the separate repo ggkguelensan/homebrew-tap (`directory: Casks`,
+  `skip_upload: auto`, token from `{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}`); `license` left unset until a
+  LICENSE lands. **(2)** `.github/workflows/release.yml` on tag-push `v*` → `goreleaser release --clean`
+  via `goreleaser-action@v6` (`version: ~> v2`), `permissions: contents: write`, `fetch-depth: 0` (no
+  shallow clone), passing both `GITHUB_TOKEN` (in-repo upload) and the owner-provided
+  `HOMEBREW_TAP_GITHUB_TOKEN` PAT (cross-repo cask push). `goreleaser check` re-run → PASS; a snapshot
+  release generated a valid `dist/homebrew/Casks/wi.rb` (on_macos + on_linux stanzas).
+  **→ This completes M3, and with it the full MVP (M0–M3). STOP condition reached — see the banner
+  under "Next unit" above for the three owner follow-ups and the M4/M5 gate.**
 - Deferred follow-ons (pull in when a command drives them): `isolate.New` **resume** (on re-run skip
   repos already `StageCreated`); per-repo **base persisted in `state`** (lets `resolve` populate
   `branch` instead of v0's empty); state **KV + `cas`** (`--expected __ABSENT__`).
@@ -1115,6 +1159,21 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CMD-MAIN | in `run` (cmd/wi) `_ = code; return contract.ExitOK` instead of `return code` → run swallows Dispatch's computed exit and always exits 0 → `TestRunUnknownCommandExitsUsage` RED (got 0, want 64), while `TestRunInitScaffoldsWorkspace` stays GREEN (init already exits 0) — isolates the mutant to exit-code propagation; alternate: hand `cli.Dispatch` an empty `Registry{}` instead of `BuildRegistry(deps)` → every command is unknown → `TestRunInitScaffoldsWorkspace` RED (no `.wi/` scaffolded, ok:false/usage not created) — pins that the REAL registry over a cwd-resolved root is wired |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
+
+- **#HC Homebrew cask over formula — RESOLVED 2026-06-30** (overrides PLAN §6's "cask rejected" risk
+  note; not a §7 ruling). goreleaser **hard-deprecated `brews` (formula) within the `~> v2` range** we
+  pin (observed on v2.16.0): `goreleaser check` returns non-zero with "configuration is valid, but uses
+  deprecated properties." Since `goreleaser check` IS our fitness gate (decision #GR) and the locked
+  build rule is "trust the build over the doc," `brews` is unusable — PLAN §6's mitigation (pin the
+  major to dodge the deprecation, keep a formula, reject casks) was predicated on the deprecation NOT
+  landing inside `~> v2`, which proved false. Adopted `homebrew_casks` (goreleaser's blessed path for
+  prebuilt-binary Homebrew distribution): cask `wi` → `ggkguelensan/homebrew-tap`, `skip_upload: auto`,
+  no `license` (no LICENSE file yet), no `test` (casks lack `test do`). The generated cask includes
+  `on_linux` stanzas referencing the Linux tarballs, though official Homebrew cask support is
+  macOS-centric — Linux users can also take the release archives / `go install`. Two OWNER follow-ups
+  flagged: (1) set the `HOMEBREW_TAP_GITHUB_TOKEN` PAT secret (cross-repo cask push) before the first
+  `v*` tag; (2) add a LICENSE file + set the cask `license`. Recorded here + in `.goreleaser.yaml`/
+  `release.yml` headers; PLAN §6 "cask rejected" is superseded.
 
 - **#GR goreleaser config shape — RESOLVED 2026-06-30** (not a §7 ruling; PLAN §6 fixes only the
   `~> v2` pin + cask-rejected). `.goreleaser.yaml` **schema v2**, pinned major `~> v2` (never
