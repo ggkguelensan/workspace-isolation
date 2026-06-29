@@ -9,12 +9,12 @@
 // materializes repos one at a time, in request order. Each repo is, in this exact
 // order:
 //
-//	1. git worktree add --detach   (the linked worktree off refs/heads/<base>)
-//	2. CreateOwnedRef              (refs/wi/owned/<task>/<repo> — evidence-positive
-//	                                ownership BEFORE we claim the repo "created", so a
-//	                                crash after step 1 leaves a wi-owned reclaimable
-//	                                worktree, never an unexplained orphan — DESIGN §7.1)
-//	3. state.UpdateRepoStage(...Created)   (flip the durable registry to created)
+//  1. git worktree add --detach   (the linked worktree off refs/heads/<base>)
+//  2. CreateOwnedRef              (refs/wi/owned/<task>/<repo> — evidence-positive
+//     ownership BEFORE we claim the repo "created", so a
+//     crash after step 1 leaves a wi-owned reclaimable
+//     worktree, never an unexplained orphan — DESIGN §7.1)
+//  3. state.UpdateRepoStage(...Created)   (flip the durable registry to created)
 //
 // It is STOP-ON-FIRST-FAIL with durable, NOT-rolled-back completed repos: the
 // first repo that fails halts the run, every repo completed before it stays on
@@ -193,14 +193,14 @@ type RemoveResult struct {
 // lock, honoring the evidence-positive reclamation contract (DESIGN §7.1): a repo's
 // worktree is reclaimed ONLY if all three gates pass —
 //
-//	1. wi can PROVE it owns the worktree: the marker ref refs/wi/owned/<task>/<repo>
-//	   exists (a missing marker is an unexplained orphan — wi never created it, or
-//	   lost the evidence);
-//	2. the worktree is CLEAN (no modified/untracked files);
-//	3. it is NOT ahead of base — realized in v0 as: the worktree HEAD still equals the
-//	   marker's recorded sha (the base tip captured at creation). The per-repo base
-//	   branch is not persisted in state.RepoRecord, so the MARKER is the base evidence;
-//	   a HEAD that moved past it carries local work and is "ahead of base".
+//  1. wi can PROVE it owns the worktree: the marker ref refs/wi/owned/<task>/<repo>
+//     exists (a missing marker is an unexplained orphan — wi never created it, or
+//     lost the evidence);
+//  2. the worktree is CLEAN (no modified/untracked files);
+//  3. it is NOT ahead of base — realized in v0 as: the worktree HEAD still equals the
+//     marker's recorded sha (the base tip captured at creation). The per-repo base
+//     branch is not persisted in state.RepoRecord, so the MARKER is the base evidence;
+//     a HEAD that moved past it carries local work and is "ahead of base".
 //
 // Any repo that fails a gate is a HARD BLOCK reported as an unexplained orphan
 // (Reason set) — never auto-pruned, never --force'd (no --force in MVP, DESIGN §7.2),

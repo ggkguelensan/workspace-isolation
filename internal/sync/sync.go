@@ -8,17 +8,17 @@
 // Orchestration. For each repo, independently, under that repo's repo:<name> lock
 // (the same key `land` takes — this is what linearizes the freshness race):
 //
-//	1. git.EnsureClone           (lazy — clone the SSOT detached at the base tip on
-//	                              first sync; a no-op once the mirror exists)
-//	2. git.Fetch                 (update refs/remotes/origin/<base> from the network)
-//	3. git.FastForwardBaseRef    (advance refs/heads/<base> to the fetched origin tip
-//	                              — the SOLE base-ref mutation; a genuine
-//	                              non-fast-forward, i.e. origin rewound/force-pushed,
-//	                              leaves the ref untouched and surfaces
-//	                              *git.NonFastForwardError)
-//	4. mirror.Store              (a freshness Snapshot; behind=0 because the base was
-//	                              just advanced to exactly the fetched origin tip
-//	                              under the lock)
+//  1. git.EnsureClone           (lazy — clone the SSOT detached at the base tip on
+//     first sync; a no-op once the mirror exists)
+//  2. git.Fetch                 (update refs/remotes/origin/<base> from the network)
+//  3. git.FastForwardBaseRef    (advance refs/heads/<base> to the fetched origin tip
+//     — the SOLE base-ref mutation; a genuine
+//     non-fast-forward, i.e. origin rewound/force-pushed,
+//     leaves the ref untouched and surfaces
+//     *git.NonFastForwardError)
+//  4. mirror.Store              (a freshness Snapshot; behind=0 because the base was
+//     just advanced to exactly the fetched origin tip
+//     under the lock)
 //
 // Unlike isolate.New (STOP-on-first-fail, because an isolate is ONE coherent
 // multi-repo workspace whose completed set must remain a resumable prefix), sync is

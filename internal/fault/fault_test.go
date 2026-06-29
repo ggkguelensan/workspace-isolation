@@ -10,14 +10,14 @@ func TestActiveIn(t *testing.T) {
 		env, id string
 		want    bool
 	}{
-		{"", "x", false},          // empty env: nothing active
-		{"x", "", false},          // empty id: never active
-		{"a", "a", true},          // exact single match
-		{"a,b,c", "b", true},      // match among many
-		{" a , b ", "b", true},    // surrounding whitespace trimmed
-		{"foobar", "foo", false},  // EXACT only — substring must not match
-		{"foo", "foobar", false},  // and not the other direction either
-		{"a,b", "c", false},       // absent id
+		{"", "x", false},         // empty env: nothing active
+		{"x", "", false},         // empty id: never active
+		{"a", "a", true},         // exact single match
+		{"a,b,c", "b", true},     // match among many
+		{" a , b ", "b", true},   // surrounding whitespace trimmed
+		{"foobar", "foo", false}, // EXACT only — substring must not match
+		{"foo", "foobar", false}, // and not the other direction either
+		{"a,b", "c", false},      // absent id
 	}
 	for _, c := range cases {
 		if got := activeIn(c.env, c.id); got != c.want {
