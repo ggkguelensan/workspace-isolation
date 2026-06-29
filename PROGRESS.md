@@ -97,15 +97,28 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   pins base + ms unit; reject corpus + accept floor). Mutants confirmed: `UnixMilli`→`Unix`,
   `randLen` 5→4, prefix `op_`→`wi_` all → RED. Reverted → GREEN.
 
+- **M0 · `internal/clock` (time/rand seam)** — `clock.go` + `clock_test.go`: the `Clock` interface
+  (`Now() time.Time` + `Rand() io.Reader`) funnels wi's two volatile inputs (DESIGN §2 determinism,
+  §4). `System` = real UTC time + `crypto/rand` (a local syscall, honors no-hidden-network §2.3);
+  `Fake(instant, seed)` = fixed advanceable instant + a self-contained splitmix64 byte stream
+  (`detReader`, ours not `math/rand` so the sequence is stable across stdlib changes; never
+  short-reads). Guard `CLOCK-DETERMINISM` pins reproducible (same seed → same stream + same op_id via
+  `opid.New`), seed-sensitive (diff seed → diff stream), non-degenerate (not all-zero), and System
+  live (UTC + crypto/rand varies). Mutants confirmed: `Fake.Rand`→`crypto/rand` → reproducible RED;
+  `NewFake` ignores seed → seed-sensitive RED. Reverted → GREEN. (Compile-time `var _ Clock` for both
+  impls.)
+
 ## Next unit (pick this on the next firing)
 
-- **M0 · `internal/clock`** (DESIGN §4 "injectable time / op_id randomness") — the tiny seam the CLI
-  Runner uses to feed `opid.New`: a `Clock` interface (`Now()` + a randomness reader) with a real
-  impl (`time.Now` + `crypto/rand`) and a deterministic `Fake` for golden tests. Pure, no FS — keeps
-  momentum while the FS cluster waits. Mutant: Fake that ignores its seed → determinism test RED.
-- Then the FS-dependent M0 cluster: `internal/testenv` (real-git tmpdir harness) → `internal/layout`
-  Bootstrap+EvalSymlinks → `internal/lockfs` (atomic writes — **open decision #6**: adopt
-  `gofrs/flock` + `google/renameio`) → `internal/lock`.
+- **M0 · `internal/testenv`** (real-git tmpdir harness, PLAN §M0 file list) — `t.TempDir` project
+  roots with seeded git origins (a default branch + an initial commit), hermetic git-config
+  isolation (`GIT_CONFIG_GLOBAL=/dev/null`, deterministic author/committer ident + dates), an
+  EvalSymlinks-normalized root, and a `RunWI` helper. This is the gate for every FS/git unit that
+  follows. Pure-Go but shells out to real `git` (M1 territory begins here). Mutant: harness that
+  leaks the ambient `$HOME` git config → a determinism/isolation assertion RED.
+- Then it unblocks: `internal/layout` Bootstrap+EvalSymlinks → `internal/lockfs` (atomic writes —
+  **open decision #6**: adopt `gofrs/flock` + `google/renameio`) → `internal/lock` → M1 `gitexec`/
+  `git`/`mirror`.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -121,6 +134,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | LAYOUT-PATHS | change any segment literal (`"isolas"`→`"isolate"`, `"repos"`→…) or swap a join order in `layout.go` → `TestPaths` RED vs the hand-written goldens |
 | LAYOUT-SAFE | make `validSegment` always-nil → reject cases of `TestSegmentSafety` RED; always-error → the `ok-name_1` accept floor RED |
 | OPID-FORMAT | change the time unit (`UnixMilli`→`Unix`), `randLen` (5→4), the `op_` prefix, or drop `strings.ToLower` → `TestNewFormat`/`TestValid` RED |
+| CLOCK-DETERMINISM | make `Fake.Rand` return `crypto/rand.Reader` → `TestFakeReproducible` RED; make `NewFake` ignore its seed → `TestFakeSeedSensitive` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
