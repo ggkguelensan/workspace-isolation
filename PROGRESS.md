@@ -10,9 +10,10 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 ## Current position
 
 - **Milestone:** M1 in progress (git verbs / SSOT posture). M0 complete; `gitexec` runner+belt,
-  full `internal/git` (resolve / ff / EnsureClone / IsClean), and `internal/mirror` (cached freshness
-  snapshot + offline read/classify) landed. Remaining M1: the `internal/mirror` **fetch** path
-  (the one dialing path) + the module-wide `INV-NO-NETWORK` arch test.
+  full `internal/git` (resolve / ff / EnsureClone / IsClean / **Fetch / DivergedCounts**), and
+  `internal/mirror` (cached freshness snapshot + offline read/classify) landed. Remaining M1: the
+  `internal/mirror` **fetch orchestration** (`Fetch`/`Refresh`: dial via `git.Fetch`, recompute behind
+  via `git.DivergedCounts`, `Store` a fresh `Snapshot`) + the module-wide `INV-NO-NETWORK` arch test.
 - **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); into Wave B domain code
 
 ## Done
@@ -246,19 +247,39 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   diverts the write (`p+".mutant"`, import kept used) → `TestSnapshotRoundTrips` RED (Load can't find
   it). Reverted → GREEN.
 
+- **M1 · `internal/git` · `Fetch` + `DivergedCounts` (the freshness git verbs)** — `git.go` +
+  `git_test.go`: the two raw git verbs the upcoming `mirror.Fetch` orchestration composes.
+  **`Fetch(dir, remote)`** is the SECOND (with `EnsureClone`) network-permitted verb — it routes through
+  `gitexec.RunNetwork` and updates `refs/remotes/<remote>/*` only; it never moves a local branch ref and
+  never touches the working tree (advancing the SSOT base stays `FastForwardBaseRef`'s exclusive job,
+  DESIGN §5). **`DivergedCounts(dir, local, remote)`** reads `rev-list --left-right --count
+  local...remote` from LOCAL refs only (offline) → `(ahead, behind)`, the basis for both freshness
+  (behind) and the future `main_state` classification. Guards (shared `fetchedMirror` helper: origin at
+  C0, EnsureClone'd mirror, push child C1 to origin, fetch): `GIT-FETCH` (post-fetch
+  `refs/remotes/origin/<base>` == C1 while `refs/heads/<base>` stays C0 AND `IsClean` true) +
+  `GIT-DIVERGED` (local-vs-origin ahead 0/behind 1; reversed args flip to ahead 1/behind 0 — pins each
+  count to the right column). Mutants confirmed: no-op `Fetch` (skip the dial) → tracking ref stays C0 →
+  `TestFetchAdvancesRemoteTrackingOnly` RED; swap the rev-list columns → `TestDivergedCountsAheadBehind`
+  RED (and `GIT-FETCH` stays green, so the swap is attributable to `DivergedCounts`). Reverted → GREEN.
+  The Git-struct doc now names `EnsureClone`+`Fetch` as the only two dialing verbs.
+
 ## Next unit (pick this on the next firing)
 
-- **M1 · `internal/mirror` · the fetch path (the one dialing path).** With the snapshot value type +
-  offline read/classify landed, add `Fetch` (or `Refresh`): given a repo's SSOT clone dir + origin, run
-  `git fetch` via **`gitexec.RunNetwork`** (the ONLY permitted dial), then recompute
-  `behind_origin_as_of_fetch` from LOCAL refs (`rev-list --count refs/heads/<base>..<origin-base>`,
-  offline) and `Store` a fresh `Snapshot`. Guard: after a fetch against an origin that advanced, the
-  stored snapshot's behind count > 0 and `Freshness().Stale` is true; the SSOT working tree stays
-  pristine (`git.IsClean`) — fetch must NOT advance the base ref (that is `FastForwardBaseRef`'s job on
-  the sync path). Use a `testenv` origin + `git.EnsureClone`d mirror; push a new commit to origin, then
-  fetch. Mutant: skip the fetch (recompute against stale remote refs) → behind stays 0 → stale RED.
-  After this, the module-wide **`INV-NO-NETWORK`** arch test in `internal/invariants` (git-child belt
-  asserted across all offline command paths) closes M1.
+- **M1 · `internal/mirror` · the fetch ORCHESTRATION (composes the now-landed git verbs).** The two
+  raw verbs (`git.Fetch` = the dial, `git.DivergedCounts` = offline behind count) are in and guarded;
+  this unit wires them into `mirror`. Add `Refresh(ctx, g *git.Git, clk clock.Clock, mirrorsDir, repo,
+  dir, base) (Snapshot, error)` (exact signature TBD): `g.Fetch(dir, "origin")` → resolve
+  `refs/heads/<base>` (local_base_sha) and `refs/remotes/origin/<base>` (origin_base_sha) →
+  `behind = g.DivergedCounts(dir, refs/heads/<base>, refs/remotes/origin/<base>)` (the right column) →
+  build `Snapshot{FetchedAt: clk.Now() in RFC3339 UTC, …}` → `Store`. **Note:** this is the first part
+  of `mirror` that touches git, so it takes a `*git.Git`+`clock.Clock` (unlike the pure read path) —
+  keep the read functions Runner-free; put orchestration in a new `mirror/fetch.go` so `mirror.go`'s
+  "this file imports no git" doc stays literally true. Guard `MIRROR-FETCH` (testenv origin + EnsureClone'd
+  mirror, push C1 to origin, Refresh): returned/stored snapshot has `behind > 0` and `Freshness().Stale`
+  true, `local_base_sha` == base tip (unmoved), `origin_base_sha` == C1, and `git.IsClean(dir)` holds.
+  Mutant: have `Refresh` skip the `g.Fetch` call (classify against the stale tracking ref) → behind
+  stays 0 → stale RED. After this, the module-wide **`INV-NO-NETWORK`** arch test in
+  `internal/invariants` (git-child belt asserted across all offline command paths) closes M1.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -287,6 +308,8 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | GIT-FF-ONLY | drop the `merge-base --is-ancestor` precheck in `FastForwardBaseRef` (update-ref unconditionally) → a divergent target advances the base ref → `TestFastForwardRefusesNonFastForward` RED (missing error + moved ref) |
 | GIT-CLONE-DETACHED | skip the `switch --detach` in `EnsureClone` (leave `<base>` checked out) → HEAD abbrev-ref is the branch name, not `"HEAD"` → `TestEnsureCloneDetachesAtBaseTip` RED |
 | GIT-CLEAN | make `IsClean` ignore `StatusPorcelain` and always return `true` → an untracked file no longer reads as drift → `TestIsCleanReflectsWorkingTree` RED |
+| GIT-FETCH | make `Fetch` a no-op (return nil without running `git fetch`) → the remote-tracking ref stays at the old tip → `TestFetchAdvancesRemoteTrackingOnly` RED |
+| GIT-DIVERGED | swap the two `rev-list --left-right --count` columns in `DivergedCounts` (read ahead from `fields[1]`, behind from `fields[0]`) → `TestDivergedCountsAheadBehind` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |
 

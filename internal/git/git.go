@@ -15,13 +15,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/ggkguelensan/workspace-isolation/internal/gitexec"
 )
 
-// Git runs typed git verbs through a gitexec.Runner. All verbs here are local
-// (no network), so they use the offline Runner.Run path and never dial.
+// Git runs typed git verbs through a gitexec.Runner. Almost every verb is local
+// and uses the offline Runner.Run path; the two network-permitted verbs —
+// EnsureClone and Fetch — are the sole verbs that route through RunNetwork and
+// dial (DESIGN §2 #3, §5).
 type Git struct {
 	r *gitexec.Runner
 }
@@ -64,6 +67,43 @@ func (g *Git) EnsureClone(ctx context.Context, dir, originURL, base string) erro
 		return fmt.Errorf("git: detach HEAD in %s: %w", dir, err)
 	}
 	return nil
+}
+
+// Fetch updates dir's remote-tracking refs (refs/remotes/<remote>/*) from the
+// network. With clone it is one of only two network-permitted verbs in wi, so it
+// routes through gitexec.RunNetwork. Fetch never moves a local branch ref and
+// never touches the working tree — advancing the SSOT base is FastForwardBaseRef's
+// exclusive job on the sync path (DESIGN §5). remote is wi-internal (always
+// "origin"), not user input.
+func (g *Git) Fetch(ctx context.Context, dir, remote string) error {
+	if _, err := g.r.RunNetwork(ctx, dir, "fetch", "--end-of-options", remote); err != nil {
+		return fmt.Errorf("git: fetch %s in %s: %w", remote, dir, err)
+	}
+	return nil
+}
+
+// DivergedCounts reports how many commits local is ahead of and behind remote,
+// computed from LOCAL refs only (no network). It is the basis for both freshness
+// (behind = how far the base trails origin as of the last fetch) and main_state
+// classification (ahead/behind/diverged). Both refs must resolve; the counts come
+// from `rev-list --left-right --count local...remote`, whose left column is the
+// ahead count and right column the behind count.
+func (g *Git) DivergedCounts(ctx context.Context, dir, local, remote string) (ahead, behind int, err error) {
+	res, err := g.r.Run(ctx, dir, "rev-list", "--left-right", "--count", "--end-of-options", local+"..."+remote)
+	if err != nil {
+		return 0, 0, fmt.Errorf("git: diverged counts %s...%s in %s: %w", local, remote, dir, err)
+	}
+	fields := strings.Fields(res.Stdout)
+	if len(fields) != 2 {
+		return 0, 0, fmt.Errorf("git: unexpected rev-list output %q for %s...%s in %s", res.Stdout, local, remote, dir)
+	}
+	if ahead, err = strconv.Atoi(fields[0]); err != nil {
+		return 0, 0, fmt.Errorf("git: parse ahead count %q: %w", fields[0], err)
+	}
+	if behind, err = strconv.Atoi(fields[1]); err != nil {
+		return 0, 0, fmt.Errorf("git: parse behind count %q: %w", fields[1], err)
+	}
+	return ahead, behind, nil
 }
 
 // isRepo reports whether dir is an existing git repository. It guards the dir's

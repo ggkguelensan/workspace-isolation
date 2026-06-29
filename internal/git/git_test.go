@@ -226,3 +226,126 @@ func TestIsCleanReflectsWorkingTree(t *testing.T) {
 		t.Errorf("clone with an untracked file IsClean = true, want false (not pristine)")
 	}
 }
+
+// pushChildToOrigin clones origin into a throwaway workdir, commits one child of
+// the current base tip, and pushes it back — advancing origin's base by exactly
+// one commit. It returns the pushed commit's SHA.
+func pushChildToOrigin(t *testing.T, env *testenv.Env, origin string) string {
+	t.Helper()
+	work := filepath.Join(env.Root, "pusher")
+	env.Git(t, env.Root, "clone", origin, work)
+	c1 := writeCommit(t, env, work, "feature.txt", "c1", "c1")
+	env.Git(t, work, "push", "origin", testenv.DefaultBranch)
+	return c1
+}
+
+// fetchedMirror builds the canonical "origin advanced under us" scenario: a
+// hermetic origin at C0, an EnsureClone'd SSOT mirror (local base + tracking ref
+// both at C0), then a child commit C1 pushed to origin and Fetch'd into the
+// mirror's remote-tracking ref. The local base is intentionally left at C0. It
+// returns the mirror dir, the local base tip c0, and the pushed origin tip c1.
+func fetchedMirror(t *testing.T, env *testenv.Env, g *git.Git, ctx context.Context) (dir, c0, c1 string) {
+	t.Helper()
+	origin := env.SeedOrigin(t, "acme")
+	dir = filepath.Join(env.Root, "ssot")
+	if err := g.EnsureClone(ctx, dir, "file://"+origin, testenv.DefaultBranch); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+	var err error
+	if c0, err = g.ResolveRef(ctx, dir, "refs/heads/"+testenv.DefaultBranch); err != nil {
+		t.Fatalf("ResolveRef local base: %v", err)
+	}
+	c1 = pushChildToOrigin(t, env, origin)
+	if err := g.Fetch(ctx, dir, "origin"); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	return dir, c0, c1
+}
+
+// Guard GIT-FETCH — the one network dial on the SSOT mirror (DESIGN §5, §2 #3).
+//
+// Fetch updates the mirror's remote-tracking refs from origin over the network —
+// the only verb besides clone permitted to dial, so it routes through
+// gitexec.RunNetwork. It must advance refs/remotes/origin/<base> to origin's new
+// tip WITHOUT moving the local base ref or dirtying the working tree: advancing
+// refs/heads/<base> is FastForwardBaseRef's exclusive job on the sync path, and
+// the SSOT clone must stay pristine (DESIGN §5).
+//
+// Non-vacuity: make Fetch a no-op (return nil without running git fetch) → the
+// remote-tracking ref stays at C0 → TestFetchAdvancesRemoteTrackingOnly RED.
+
+func TestFetchAdvancesRemoteTrackingOnly(t *testing.T) {
+	env := testenv.New(t)
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	dir, c0, c1 := fetchedMirror(t, env, g, ctx)
+	if c0 == c1 {
+		t.Fatalf("precondition: pushed child %s equals base tip %s", c1, c0)
+	}
+
+	// The remote-tracking ref now sees origin's advanced tip...
+	tracking, err := g.ResolveRef(ctx, dir, "refs/remotes/origin/"+testenv.DefaultBranch)
+	if err != nil {
+		t.Fatalf("ResolveRef remote-tracking: %v", err)
+	}
+	if tracking != c1 {
+		t.Errorf("refs/remotes/origin/%s = %s, want fetched tip %s", testenv.DefaultBranch, tracking, c1)
+	}
+
+	// ...but the local base ref has NOT moved (only FastForwardBaseRef advances it)...
+	localBase, err := g.ResolveRef(ctx, dir, "refs/heads/"+testenv.DefaultBranch)
+	if err != nil {
+		t.Fatalf("ResolveRef local base: %v", err)
+	}
+	if localBase != c0 {
+		t.Errorf("local base ref = %s, want it left at %s (fetch must not advance the base)", localBase, c0)
+	}
+
+	// ...and the SSOT working tree stays pristine.
+	clean, err := g.IsClean(ctx, dir)
+	if err != nil {
+		t.Fatalf("IsClean: %v", err)
+	}
+	if !clean {
+		t.Errorf("SSOT mirror dirty after fetch; it must stay pristine")
+	}
+}
+
+// Guard GIT-DIVERGED — ahead/behind counts from LOCAL refs only (offline).
+//
+// DivergedCounts powers both freshness (behind) and main_state classification
+// (ahead/behind/diverged). It reads `rev-list --left-right --count
+// local...remote`: the left column counts how many commits local is AHEAD of
+// remote, the right how many it is BEHIND. After fetching a one-ahead origin, the
+// local base is behind by exactly 1 / ahead 0; reversing the args flips it to
+// ahead 1 / behind 0 — pinning that each count is read from the correct column.
+//
+// Non-vacuity: swap the two columns (read ahead from the behind field and vice
+// versa) → both orientations' assertions RED.
+
+func TestDivergedCountsAheadBehind(t *testing.T) {
+	env := testenv.New(t)
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	dir, _, _ := fetchedMirror(t, env, g, ctx)
+	local := "refs/heads/" + testenv.DefaultBranch
+	remote := "refs/remotes/origin/" + testenv.DefaultBranch
+
+	ahead, behind, err := g.DivergedCounts(ctx, dir, local, remote)
+	if err != nil {
+		t.Fatalf("DivergedCounts(local, remote): %v", err)
+	}
+	if ahead != 0 || behind != 1 {
+		t.Errorf("local vs origin: ahead=%d behind=%d, want ahead=0 behind=1", ahead, behind)
+	}
+
+	ahead, behind, err = g.DivergedCounts(ctx, dir, remote, local)
+	if err != nil {
+		t.Fatalf("DivergedCounts(remote, local): %v", err)
+	}
+	if ahead != 1 || behind != 0 {
+		t.Errorf("origin vs local: ahead=%d behind=%d, want ahead=1 behind=0", ahead, behind)
+	}
+}
