@@ -45,16 +45,29 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   reverted → GREEN. **Decision:** reserved additive blocks (`land_state`/`ports`/`hooks`/`tethers`)
   are NOT pre-declared — added to schema+struct together at their milestone (minor bump) so the
   upcoming `SHAPE-FINGERPRINT` schema↔struct tripwire stays exact.
+- **M0/A · SHAPE-FINGERPRINT + contract.lock.json** — `internal/contract/fingerprint_test.go` +
+  `internal/contract/testdata/contract.lock.json`. One frozen tripwire over the whole contract:
+  `SchemaVersion` + sha256(schema bytes) + a reflection-derived canonical `struct_shape` (json tags
+  incl. `,omitempty`, recursing through pointers/slices/nested types) + its sha256. The lock file IS
+  the fingerprint (env-gated regen via `WI_UPDATE_CONTRACT_LOCK=1`); **decision:** no duplicate Go
+  `SchemaFingerprint` const, to avoid double-maintenance. `TestFingerprintIsNonVacuous` proves the
+  shape extractor catches added field / retype / omitempty change. Real-source mutant (added a
+  `Mutant string` field tagged `json:"-"`) confirmed it turns ONLY `TestContractFrozen` RED while the
+  marshal/golden tests stay green — exactly the silent-drift class the fingerprint exists to catch.
+  Reverted → GREEN. **Wave A contract spine is now structurally complete** (schema/struct/enums all
+  guarded + locked); remaining Wave-A write-first items are INV-NO-LLM, META-VACUITY, NORM-CORRECT.
 
 ## Next unit (pick this on the next firing)
 
-- **M0/A · SHAPE-FINGERPRINT + contract.lock.json** — a sha256 tripwire over (schema bytes +
-  struct shape + `SchemaVersion`) so neither the schema nor the Go struct can drift without the
-  other. Add `SchemaFingerprint`/`ContractVersion` consts to `internal/contract`; freeze the lock
-  in `testdata/contract.lock.json` via `TestContractFrozen`. Mutant: change a struct tag or a
-  schema enum without updating the lock → RED. This closes the Wave-A contract spine.
-- Then begin the remaining M0 packages: `internal/layout` (paths + `.wi/` bootstrap),
-  `internal/lockfs` (atomic writes — needs open decision #6), `internal/lock`, `cli/opid`.
+- **M0/A · INV-NO-LLM** — module-graph denylist guard (DESIGN §2): a test that walks the module
+  graph (parse `go.mod` require block, or `go list -deps`) and fails if any known LLM/agent SDK
+  import path appears. Cheap, closes a §2 invariant, finishes another Wave-A write-first item.
+  Mutant: feed a denylisted path into the checker's scanned corpus → RED.
+- Then `META-VACUITY` (meta-guard asserting every registered (guard→mutant) pair genuinely flips
+  RED). `NORM-CORRECT` (path-scoped golden normalizer) is better deferred to Wave B when there is
+  path-bearing CLI output to normalize.
+- Then the remaining M0 packages: `internal/layout` (paths + `.wi/` bootstrap), `internal/lockfs`
+  (atomic writes — needs open decision #6), `internal/lock`, `cli/opid`.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -63,6 +76,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | SHAPE-ENUM-DOUBLE-ENTRY | add/reorder a value in any `All*()` without editing the `want*()` literal copy |
 | SHAPE-ENVELOPE-INVARIANTS | add `,omitempty` to `Envelope.Error`, or drop the nil→`[]` coercion for repos/capabilities/warnings/next in `MarshalJSON` |
 | SHAPE-SCHEMA | set top-level `additionalProperties:true` (or drop `error` from `required`, or widen a closed enum) in `schema/envelope.schema.json` → `TestSchemaRejectsInvalid` RED |
+| SHAPE-FINGERPRINT | rename/retype/reorder any `Envelope` (or nested) field, or edit the schema bytes, without regenerating `contract.lock.json` → `TestContractFrozen` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
