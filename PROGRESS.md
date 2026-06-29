@@ -12,9 +12,11 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 - **Milestone:** **M2 COMPLETE; M3 NEARLY COMPLETE — the `wi` binary runs end-to-end.** All six MVP
   commands plus `cmd/wi/main.go` now land green; the entire `init→repo add→sync→isolate new→resolve→
   isolate rm` surface is reachable through a runnable, smoke-verified binary. **Release scaffolding
-  sub-unit (a) — the CI gate workflow — has now landed** (`.github/workflows/ci.yml`: gofmt+build+vet+
-  test on ubuntu+macos, Go pinned from go.mod); the ONLY remaining MVP (M0–M3) work is release
-  scaffolding sub-units (b) `.goreleaser.yaml` + (c) Homebrew tap. (Detail below.)
+  sub-units (a) CI gate + (b) `.goreleaser.yaml` have now landed** (a: gofmt+build+vet+test on
+  ubuntu+macos, Go pinned from go.mod; b: v2 config cross-compiling cmd/wi for darwin/linux×amd64/arm64,
+  proven by `goreleaser check` + a four-target snapshot build, wired into CI as a `goreleaser check`
+  job). The ONLY remaining MVP (M0–M3) work is sub-unit **(c)**: the Homebrew `brews:` block + the
+  tag-push `v*` release workflow. (Detail below.)
   Domain command core fully landed and green
   (`internal/config` manifest read+validate, `internal/state` per-isolate runtime registry + durable
   partial success, `internal/isolate.New` N-repo orchestration under the `isolate-state:<task>` lock /
@@ -116,6 +118,24 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 - **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); in Wave B domain code (M2).
 
 ## Done
+
+- **M3 · `.goreleaser.yaml` + `goreleaser check` CI wiring — sub-unit (b) of release scaffolding**
+  (`.goreleaser.yaml` + a `goreleaser-config` job in `ci.yml`; decision **#GR**). Schema **v2**, pinned
+  major `~> v2` (PLAN §6, never auto-upgraded). `builds`: cross-compiles `cmd/wi` for `{darwin,linux} ×
+  {amd64,arm64}`, reproducibly (`CGO_ENABLED=0` + `-trimpath` + `mod_timestamp: {{.CommitTimestamp}}`),
+  `ldflags: -s -w`. `archives`: tar.gz, `name_template wi_{Version}_{Os}_{Arch}`, bundling README +
+  `LICENSE*` (glob, absent-OK). `checksum`: sha256 `checksums.txt`. `snapshot`/`changelog` (github,
+  excludes docs/test/chore/style/ci/merges). `release`: `ggkguelensan/workspace-isolation`,
+  `prerelease: auto`, `mode: replace`. **Version stamping via `-X` omitted on purpose** — `cmd/wi/main.go`
+  declares no `version`/`commit`/`date` vars, so injecting would hit non-existent symbols; deferred to a
+  future `wi version` unit that adds the vars first. **PROCESS ARTIFACT, not a Go fitness function** (like
+  sub-unit a): its fitness is `goreleaser check`, wired as a CI job (`goreleaser-action@v6`, `args: check`,
+  `version: ~> v2`) so a malformed/deprecated config fails CI — no `go test` guard/mutant. **Validated
+  locally with goreleaser v2.16.0**: `goreleaser check` clean (zero deprecations) AND `goreleaser build
+  --snapshot --clean` produced all four binaries — confirmed Mach-O arm64/x86_64 + ELF aarch64/x86-64 via
+  `file`. `dist/` already gitignored (`/dist/`); the `go mod tidy` before-hook left go.mod/go.sum
+  unchanged. Remaining for MVP M0–M3: **sub-unit (c)** — the Homebrew `brews:` block (tap
+  `ggkguelensan/homebrew-tap`) + the tag-push `v*` release workflow.
 
 - **M3 · CI gate workflow — sub-unit (a) of release scaffolding** (`.github/workflows/ci.yml`; preceded
   by a `style:` commit making the tree gofmt-clean). Mechanizes the exact green gate every build
@@ -1013,15 +1033,21 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   Done). Runs `gofmt -l`+`go build`+`go vet`+`go test` on push (`main`+`build/wi`) and PR, matrix
   `[ubuntu, macos]`, Go pinned from go.mod. Process artifact (no Go guard/mutant); verified by parsing
   the YAML and asserting the four gate commands.
-- **NEXT — release scaffolding sub-unit (b): `.goreleaser.yaml`.** Cross-compile `cmd/wi` for
-  darwin/linux × amd64/arm64 with a `builds`+`archives`+`checksum`+`release` block. goreleaser config is
-  DATA, not Go, so its "fitness" is `goreleaser check` (add a `release` job to ci.yml that runs it, OR a
-  standalone validation) — NOT a Go test. **Adopt the §7-recommended owner-flavored choices and record
-  them: release trigger = tag-push `v*`; `version: 2` schema; pin the `brews`/goreleaser action major
-  (`~> v2`), cask rejected (PLAN §6).** Then (c) the **Homebrew tap** stanza (`brews:` block targeting
-  tap repo **`ggkguelensan/homebrew-tap`**) so `brew install` works. **Completing (b)+(c) green = full
-  MVP (M0–M3) = a STOP condition** — say so plainly and stop. NB both (b) and (c) are config DATA, not
-  Go fitness functions (like (a)); their "green" is `goreleaser check` passing, not a `go test` guard.
+- **DONE (this firing) — release scaffolding sub-unit (b): `.goreleaser.yaml` + CI `goreleaser check`**
+  (decision #GR; see Done). v2 config, cross-compiles cmd/wi for darwin/linux×amd64/arm64, proven by
+  `goreleaser check` (clean) + a four-target snapshot build on goreleaser v2.16.0; wired into CI.
+- **NEXT (and the LAST MVP unit) — release scaffolding sub-unit (c): Homebrew tap + release workflow.**
+  Two coupled pieces, both config DATA (fitness = `goreleaser check`, NOT a Go test): **(1)** add a
+  `brews:` block to `.goreleaser.yaml` — `repository: {owner: ggkguelensan, name: homebrew-tap}`, a
+  `homepage`/`description`/`license` (NB no LICENSE file yet — pick a placeholder or add the license
+  first), `commit_author`, and `test do`/`bin` stanza fields so `brew install ggkguelensan/tap/wi`
+  works; **(2)** add `.github/workflows/release.yml` triggered on tag-push `v*` running `goreleaser
+  release` with `goreleaser-action@v6` (`version: ~> v2`), `permissions: contents: write` (+ a
+  `HOMEBREW_TAP_GITHUB_TOKEN`/PAT secret note for pushing the formula to the separate tap repo — the
+  default `GITHUB_TOKEN` can't push cross-repo, so flag this as the one piece needing an owner-provided
+  secret). Re-run `goreleaser check` after adding `brews:`. **Completing (c) green = full MVP (M0–M3) =
+  a STOP condition** — say so plainly and stop. Caveats to surface at STOP: the version-stamping `-X`
+  deferral (needs a `wi version` unit) and the cross-repo tap PAT secret are the two owner follow-ups.
 - Deferred follow-ons (pull in when a command drives them): `isolate.New` **resume** (on re-run skip
   repos already `StageCreated`); per-repo **base persisted in `state`** (lets `resolve` populate
   `branch` instead of v0's empty); state **KV + `cas`** (`--expected __ABSENT__`).
@@ -1089,6 +1115,21 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CMD-MAIN | in `run` (cmd/wi) `_ = code; return contract.ExitOK` instead of `return code` → run swallows Dispatch's computed exit and always exits 0 → `TestRunUnknownCommandExitsUsage` RED (got 0, want 64), while `TestRunInitScaffoldsWorkspace` stays GREEN (init already exits 0) — isolates the mutant to exit-code propagation; alternate: hand `cli.Dispatch` an empty `Registry{}` instead of `BuildRegistry(deps)` → every command is unknown → `TestRunInitScaffoldsWorkspace` RED (no `.wi/` scaffolded, ok:false/usage not created) — pins that the REAL registry over a cwd-resolved root is wired |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
+
+- **#GR goreleaser config shape — RESOLVED 2026-06-30** (not a §7 ruling; PLAN §6 fixes only the
+  `~> v2` pin + cask-rejected). `.goreleaser.yaml` **schema v2**, pinned major `~> v2` (never
+  auto-upgraded). One `builds` entry over `cmd/wi`: `{darwin,linux} × {amd64,arm64}`, `CGO_ENABLED=0`
+  (static pure-Go, zero-cgo posture), `-trimpath` + `mod_timestamp` for **reproducible** byte-stable
+  output, `ldflags: -s -w`. `archives` = tar.gz `wi_{Version}_{Os}_{Arch}` + README + `LICENSE*`;
+  `checksum` = sha256 `checksums.txt`; `release` → `ggkguelensan/workspace-isolation`,
+  `prerelease: auto`, `mode: replace`. **`-X` version stamping intentionally omitted** until a `wi
+  version` unit adds `version`/`commit`/`date` vars to main (injecting into non-existent symbols is a
+  silent no-op at best). **Fitness = `goreleaser check`** (config DATA, not Go; no guard/mutant row),
+  wired as the `goreleaser-config` CI job (`goreleaser-action@v6`, `args: check`). Proven locally with
+  goreleaser **v2.16.0**: `check` clean + `build --snapshot` emitted all four binaries (Mach-O
+  arm64/x86_64 + ELF aarch64/x86-64). The §7-flagged owner choices for the *release trigger* (tag-push
+  `v*`) and the *Homebrew tap repo* (`ggkguelensan/homebrew-tap`) are adopted-and-recorded but land
+  with sub-unit (c) (the release workflow + `brews:` block).
 
 - **#CI CI gate workflow shape — RESOLVED 2026-06-30** (not a §7 ruling; PLAN §6 risk register +
   the §2 fitness-gate intent fix the spirit, not the YAML). `.github/workflows/ci.yml` runs the
