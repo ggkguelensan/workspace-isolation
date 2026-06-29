@@ -194,8 +194,11 @@ starts. Only `wi version` is wired (a stub proving the pipeline shape compiles).
 
 ## 7. Open decisions (need owner ruling before the relevant milestone)
 
-1. **`capabilities[]` + `AllowedWarningCodes` initial token sets** — still placeholders; the contract
-   owner must enumerate the v0 set alongside the schema. *Blocks: M0 finalization.*
+1. ~~**`capabilities[]` + `AllowedWarningCodes` initial token sets**~~ — **RESOLVED 2026-06-29.**
+   `capabilities[]` v0 = `{help-json, resolve-block, dry-run, partial-success}` (pinned in `enums.go`
+   `Capabilities()`). Warning-code v0 = closed `{hydrate_skipped, base_behind_ssot}` (`AllWarningCodes()`),
+   limited to MVP-wired, offline-knowable codes; staleness stays in structured `mirror_freshness.stale`,
+   not a warning. Both double-entry-guarded; grow only with a schema bump.
 2. **Marker-ref mechanism** — `refs/wi/owned/<task>/<repo>` (git ref) chosen over note/reflog for
    atomic creation + gc-protection. Confirm vs a `.wi/index` backref. *Blocks: M2 (marker at add).*
 3. **`boot_id` on darwin** — derive from `sysctl kern.boottime` (no `/proc`); confirm stability

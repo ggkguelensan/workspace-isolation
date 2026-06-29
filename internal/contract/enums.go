@@ -57,6 +57,32 @@ func AllErrorKinds() []ErrorKind {
 	}
 }
 
+// WarningCode is the closed vocabulary for the non-fatal Warning.Code field.
+// Warnings are advisory notes an agent MAY surface but never branches control
+// flow on (that is error.kind's job). The set is closed and double-entry-guarded;
+// growing it is a deliberate, schema-bumped change.
+//
+// v0 set (open decision #1, ruled 2026-06-29): only codes a wired M0–M3 command
+// can emit and that are knowable offline. Staleness is NOT here — it is surfaced
+// by the structured mirror_freshness.stale field (DESIGN §3.3), not a warning.
+type WarningCode string
+
+const (
+	// WarnHydrateSkipped: isolate-new declined to hydrate a gitignored file
+	// because it was not on the allowlist or matched a hard-deny pattern.
+	WarnHydrateSkipped WarningCode = "hydrate_skipped"
+	// WarnBaseBehindSSOT: the isolate's base is behind the current SSOT base
+	// ref; landing would require a sync first. Informational on read paths.
+	WarnBaseBehindSSOT WarningCode = "base_behind_ssot"
+)
+
+// AllWarningCodes returns the closed WarningCode vocabulary in canonical order.
+func AllWarningCodes() []WarningCode {
+	return []WarningCode{
+		WarnHydrateSkipped, WarnBaseBehindSSOT,
+	}
+}
+
 // ExitCode is the closed set of process exit codes. See DESIGN.md §3.2.
 type ExitCode int
 

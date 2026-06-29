@@ -41,6 +41,10 @@ func wantCapabilities() []string {
 	}
 }
 
+func wantWarningCodes() []string {
+	return []string{"hydrate_skipped", "base_behind_ssot"}
+}
+
 func strs[T ~string](xs []T) []string {
 	out := make([]string, len(xs))
 	for i, x := range xs {
@@ -77,12 +81,19 @@ func TestCapabilityDoubleEntry(t *testing.T) {
 	}
 }
 
+func TestWarningCodeDoubleEntry(t *testing.T) {
+	if got, want := strs(AllWarningCodes()), wantWarningCodes(); !slices.Equal(got, want) {
+		t.Errorf("WarningCode vocabulary drift:\n got = %v\n want = %v", got, want)
+	}
+}
+
 // TestNoDuplicateEnumValues guards against a copy-paste that repeats a value
 // (which the ordered double-entry check alone could miss if want*() repeated it too).
 func TestNoDuplicateEnumValues(t *testing.T) {
 	assertUnique(t, "Action", strs(AllActions()))
 	assertUnique(t, "ErrorKind", strs(AllErrorKinds()))
 	assertUnique(t, "Capability", strs(AllCapabilities()))
+	assertUnique(t, "WarningCode", strs(AllWarningCodes()))
 }
 
 func assertUnique(t *testing.T, name string, vals []string) {

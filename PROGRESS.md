@@ -28,6 +28,11 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   error-always-present, repos-always-array, frozen 11-key top-level order + a non-vacuous
   order-extractor proof. Mutant (added `,omitempty` to `Error`) confirmed RED on
   `TestEnvelopeGoldenSuccess`/`TestEnvelopeErrorAlwaysPresent`, then reverted → GREEN.
+- **M0/A · WarningCode closed vocab** (open decision #1, RESOLVED) — `internal/contract/enums.go`:
+  closed `WarningCode` set `{hydrate_skipped, base_behind_ssot}` + `AllWarningCodes()`; `Warning.Code`
+  retyped `string`→`WarningCode`. Extended `SHAPE-ENUM-DOUBLE-ENTRY` (`wantWarningCodes` +
+  `TestWarningCodeDoubleEntry` + uniqueness). Real-source mutant (`"stray_mutant"`) confirmed RED,
+  reverted → GREEN. Staleness deliberately NOT a warning — it lives in `mirror_freshness.stale`.
 
 ## Next unit (pick this on the next firing)
 
@@ -39,7 +44,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 - Then: `SHAPE-FINGERPRINT` (sha256 schema↔struct tripwire so neither side drifts silently)
   + `testdata/contract.lock.json`.
 - Before the schema locks: settle open decision #1 (warning-code vocabulary starter set), since
-  `Warning.Code` needs a closed enum to validate against. Adopt the documented recommendation.
+  `Warning.Code` needs a closed enum to validate against. **DONE** — see WarningCode above.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -50,9 +55,10 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
-- *(none yet — first open decision needed is the `capabilities[]` + warning-code token set,
-  which blocks M0 finalization. Capabilities vocab is already pinned in `enums.go`; warning-code
-  vocab still TODO before the Envelope/schema unit locks.)*
+- **#1 `capabilities[]` + warning-code token sets — RESOLVED 2026-06-29.** Capabilities v0 =
+  `{help-json, resolve-block, dry-run, partial-success}` (pinned in `Capabilities()`). Warning-code
+  v0 = closed `{hydrate_skipped, base_behind_ssot}` (`AllWarningCodes()`), MVP-wired + offline-knowable
+  only; staleness stays structured in `mirror_freshness.stale`. Recorded in DESIGN §8 + PLAN §7.
 
 ## Conventions
 

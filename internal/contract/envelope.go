@@ -78,12 +78,12 @@ type MirrorFreshness struct {
 	BehindOriginAsOfFetch int    `json:"behind_origin_as_of_fetch,omitempty"`
 }
 
-// Warning is a non-fatal note. Code is drawn from the closed warning vocabulary
-// (see DESIGN §8 / open decision #1); message is free text agents never branch on.
+// Warning is a non-fatal note. Code is drawn from the closed WarningCode
+// vocabulary (enums.go); message is free text agents never branch on.
 type Warning struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Repo    string `json:"repo,omitempty"`
+	Code    WarningCode `json:"code"`
+	Message string      `json:"message"`
+	Repo    string      `json:"repo,omitempty"`
 }
 
 // Error is the failure payload. Agents branch on Kind (and the exit code),

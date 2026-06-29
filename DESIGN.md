@@ -299,6 +299,7 @@ can never cascade into a data-loss chain in one invocation.
 | SSOT HEAD posture | detached HEAD + `update-ref` for both sync and land (§5) |
 | per-repo lock | sync & land acquire identical `repo:<name>` key in v0 (§6.1) |
 | closed-enum ownership | `internal/contract` sole owner; all others import; drift-guarded by `contract.lock.json` |
+| warning-code vocab (v0) | closed set `{hydrate_skipped, base_behind_ssot}` (decision #1); only MVP-wired, offline-knowable codes; staleness stays in structured `mirror_freshness.stale`, not a warning; grows only with a schema bump |
 | `state cas` ownership | `internal/state` sole owner; land consumes; `--expected __ABSENT__` sentinel frozen |
 | help/did_you_mean/next ownership | `suggest` owns Levenshtein, `help` owns model, cli envelope writer is sole injector; defer unknown-command typos to cobra's `SuggestionsFor` |
 | path / `.wi/` ownership | new `internal/layout` owns all paths + bootstrap |
