@@ -41,11 +41,14 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   unknown command / factory arg-rejection all collapse to ONE `usage` envelope (kind=usage → exit 64).
   Guard `DISPATCH-ROUTES`; resolves decision **#F** (hand-rolled stdlib parser, NOT cobra — zero-dep
   posture #6/#C, fixed small command surface). **The ENTIRE generic CLI pipeline — argv → dispatch →
-  outcome → one envelope (json|text) → mapped exit — is now complete and green.** What remains for MVP:
-  the per-command handlers that plug real domain work into the pipeline (`init`/`repo add`/`sync`/`isolate
-  new`/`resolve`/`isolate rm`), each a `Command` returning a `*Result`/`*CommandError` over the green
-  M0–M2 core (never an envelope, never an exit code) with a real `Registry` factory binding its deps +
-  validating its args; then `cmd/wi` main (build the real registry + `clock.System`, call `Dispatch`, the
+  outcome → one envelope (json|text) → mapped exit — is complete and green, and the FIRST per-command
+  handler is now plugged into it:** `wi resolve` (pure read — `state.Load`→`not_found`-on-`ErrNoRecord`,
+  else `resolve.Bundle`→`Result{Action:read}`) + the `Deps`/`BuildRegistry` seam (the dep-bound factory
+  map `cmd/wi` hands to `Dispatch`); guard `CMD-RESOLVE`, establishing the handler→`Result`/`CommandError`
+  contract every remaining command follows. What remains for MVP: the rest of the per-command handlers
+  (`init`/`repo add`/`sync`/`isolate new`/`isolate rm`), each a `Command` returning a
+  `*Result`/`*CommandError` over the green M0–M2 core (never an envelope, never an exit code) with a
+  `BuildRegistry` factory binding its deps + validating its args; then `cmd/wi` main (build the real registry + `clock.System`, call `Dispatch`, the
   single `os.Exit` via `exitcontract.Exit`); then CI + `.goreleaser.yaml` + Homebrew tap. Deferred
   enrichments pulled in when a command needs them: a `--` end-of-flags terminator + `did_you_mean` in
   dispatch, `isolate.New` resume (skip repos already `StageCreated`), per-repo base persisted in `state`
@@ -57,6 +60,30 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M3/B · first per-command handler — `wi resolve` + the `Deps`/`BuildRegistry` seam** (`cmd_resolve.go`
+  + `cmd_registry.go` + `cmd_resolve_test.go`). The first real `Command` plugged into the green generic
+  pipeline, plus the registry-builder seam `cmd/wi` will use. `Deps{Layout}` carries the
+  already-resolved startup dependencies the factories close over (grows additively — a new dep is a new
+  field, existing handlers untouched); `BuildRegistry(Deps) Registry` wires each subcommand's canonical
+  name → its arg-parsing factory (adding a command = one line here + its `cmd_<name>.go`, no change to
+  `Dispatch`). `newResolveCommand(l, args)` is the `resolve` factory: validates the positional args
+  (exactly one task, a safe segment via `layout.ValidateSegment`) → a `*CommandError{Kind:usage}` on
+  failure (the traversal check lives HERE so a bad task name is a clean usage refusal, not an opaque
+  internal error from state/layout), else binds task+layout into `resolveCmd`. `resolveCmd.Run` is a
+  PURE projection (DESIGN §3.1, §map 166): `state.Load(StateDir, task)` → on `state.ErrNoRecord` a
+  `not_found` refusal (operator hint points at `wi isolate new`), any other load error unclassified →
+  internal, else `resolve.Bundle` → `Result{Action: read, Resolve: &block}`. No git, no network, no
+  mutation. Handlers live in `package cli` (top of the dep stack — importing `layout`/`state`/`resolve`
+  is one-directional, no cycle). Guard `CMD-RESOLVE` (`cmd_resolve_test.go`, real bootstrapped layout +
+  stored record, driving the command THROUGH `BuildRegistry`'s factory — the exact path `cmd/wi` uses):
+  a present 2-repo record → a `read` Result whose resolve block carries INDEPENDENTLY-derived paths
+  (scheme literals joined over the normalized root, not via the layout accessors the impl uses); a
+  missing record → `*CommandError{Kind:not_found}` naming the task; factory arg validation (0/2 args +
+  a traversing name → usage, one safe arg → a runnable Command). Mutant demonstrated RED-then-reverted:
+  `Run` skips the `errors.Is(err, state.ErrNoRecord)` branch (`if false && …`) → a missing isolate
+  surfaces as a plain `*errors.errorString` (→ internal) not a `*CommandError{not_found}` →
+  `TestResolveMissingIsolateIsNotFound` RED. Full `go build ./… && go vet ./… && go test ./…` GREEN (19
+  packages). Establishes the handler→`Result`/`CommandError` contract every remaining command follows.
 - **M3/B · `internal/cli` DISPATCH layer — `Registry` + `Dispatch` (argv → Command + Meta → Execute)**
   (`dispatch.go` + `dispatch_test.go`). The front half of the Runner, sitting on top of the green
   `Execute` core (DESIGN §3, §4). `Registry` = `map[string]func(args []string) (Command, error)`: a
@@ -627,23 +654,28 @@ cobra). **The entire generic CLI pipeline — argv → dispatch → outcome → 
 mapped exit — is now complete and green.** What remains for MVP is the per-command handlers that plug
 real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 
-- **NEXT — M3 · the per-command handlers, one cohesive unit each** (`init` → `repo add` → `sync` →
-  `isolate new` → `resolve` → `isolate rm`). Each is a `Command` (`Run(ctx) (*Result, error)`) that does
-  its domain work over the green M0–M2 core (config/state/git/mirror/isolate/resolve) and returns a typed
-  `*Result` (or a `*CommandError`) — NEVER an envelope, never an exit code (the pipeline owns both). Each
-  ships with a real `Registry` factory binding its deps (layout/clock/git) and parsing/validating its
-  positional args (arg-count/shape errors → `*CommandError{Kind:usage}` or a factory error, both → exit
-  64 via `Dispatch`). Suggested order/scope: start with `init` (smallest — `layout.Bootstrap` + write a
-  starter `wi.config.jsonc`, `ActionCreated`) or `resolve` (pure: `state.Load`→`ErrNoRecord`-to-
-  `not_found`, then `resolve.Bundle`, `ActionRead`), since both exercise the handler→Result→envelope
-  contract with minimal new surface; then the heavier `isolate new` (drive `isolate.New`, map its
-  `StatusPartial`→a durable `*CommandError{Kind:partial}` carrying `repos[]`) and `sync`/`repo add`/
-  `isolate rm`. Guard each handler with its own fitness test (the typed `Result`/`CommandError` it
-  returns for the success + each refusal class) — the generic pipeline (`RUN-PIPELINE`/`DISPATCH-ROUTES`)
-  already proves the envelope/exit wiring, so a handler test asserts only the DOMAIN mapping.
-- **Then** `cmd/wi/main.go` — the single process entry: build the real `Registry` + `clock.System`,
-  call `cli.Dispatch`, and make the SOLE `os.Exit` via `exitcontract.Exit(code)`. Then CI +
-  `.goreleaser.yaml` + Homebrew tap. Completing this chain = full MVP (M0–M3) green = a STOP condition.
+- **DONE (this iteration):** `resolve` (pure read) + the `Deps`/`BuildRegistry` seam — guard
+  `CMD-RESOLVE`. The handler→`Result`/`CommandError` contract pattern is now established for the rest.
+- **NEXT — M3 · the remaining per-command handlers, one cohesive unit each** (`init` → `repo add` →
+  `sync` → `isolate new` → `isolate rm`). Each is a `Command` (`Run(ctx) (*Result, error)`) doing its
+  domain work over the green M0–M2 core (config/state/git/mirror/isolate) and returning a typed
+  `*Result` (or `*CommandError`) — NEVER an envelope, never an exit code (the pipeline owns both) — plus
+  one line in `BuildRegistry` and a factory that parses+validates its args (→ `*CommandError{Kind:usage}`
+  → exit 64). Guard each with its own fitness test asserting ONLY the domain mapping (the generic
+  `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/exit wiring), following `CMD-RESOLVE`.
+  Suggested next: **`init`** — `layout.Resolve`+`Bootstrap` over a target dir (cwd or arg) + write a
+  starter `wi.config.jsonc`, `ActionCreated`; `already_exists` if a project is already there. NOTE `init`
+  needs the config WRITE path, deferred by decision #C (read-only so far) — so it pulls in a minimal
+  config writer (a starter-manifest emitter is enough; the AST-preserving `repo add` edit path can stay
+  deferred to its own unit). `init` also forces the **root-discovery** decision (cwd vs `--root` vs
+  walk-up) since it DEFINES the root — rule + record it then (lean: target = cwd, overridable by an
+  explicit arg/flag; walk-up deferred). Then the heavier `isolate new` (drive `isolate.New`, map its
+  `StatusPartial` → a durable `*CommandError{Kind:partial}` carrying `repos[]`), `sync`, `repo add`,
+  `isolate rm`.
+- **Then** `cmd/wi/main.go` — the single process entry: discover the root → build `Deps` +
+  `clock.System`, `BuildRegistry`, call `cli.Dispatch`, and make the SOLE `os.Exit` via
+  `exitcontract.Exit(code)`. Then CI + `.goreleaser.yaml` + Homebrew tap. Completing this chain = full
+  MVP (M0–M3) green = a STOP condition.
 - Deferred follow-ons (pull in when a command drives them): `isolate.New` **resume** (on re-run skip
   repos already `StageCreated`); per-repo **base persisted in `state`** (lets `resolve` populate
   `branch` instead of v0's empty); state **KV + `cas`** (`--expected __ABSENT__`).
@@ -694,6 +726,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | SHAPE-ASSEMBLE | in `cli.Success` set `e.OK=false` (break the ok ⟺ error==nil coupling) → `TestSuccessEnvelopeCoupling` RED; or have the shared `spine` omit `Capabilities`/`SchemaVersion` (leave them zero) → `assertCommonFields` reddens in BOTH `TestSuccessEnvelopeCoupling` + `TestFailureEnvelopeCoupling` |
 | SHAPE-DRYRUN-EXIT0 | make `cli.ExitFor` return a refusal code when `len(env.Blocked)>0` (treat a would-block verdict as a refusal) → `TestExitForBlockedVerdictsAreExitNeutral` RED (blocked must be exit-neutral); the companion assertion that a genuine usage error on a `--dry-run` still maps to 64 guards against the over-correction (a blanket `if env.DryRun { return ExitOK }` would wrongly swallow it) |
 | SHAPE-TEXT-PROJECTION | drop ANY field from `cli.RenderText`/its helpers (e.g. comment out the `worktree` line in `renderRepo`) → that field's unique sentinel leaf is absent from the render → `TestRenderTextIsLossless` RED, naming the exact dropped fact (the independent `collectStringLeaves` reflection walk enumerates every envelope string leaf; the hand-written renderer can't silently omit one). Non-vacuity is inline: ≥25 leaves must be found and a never-present sentinel must NOT match |
+| CMD-RESOLVE | in `resolveCmd.Run` drop the `errors.Is(err, state.ErrNoRecord)` branch (`if false && …`) → a missing isolate falls through as a plain error → maps to kind=internal not not_found → `TestResolveMissingIsolateIsNotFound` RED (got `*errors.errorString`, want `*cli.CommandError{not_found}`); or make `newResolveCommand` accept any arg count (skip `len(args)!=1`) → `TestResolveFactoryValidatesArgs` RED |
 | DISPATCH-ROUTES | in `cli.resolveCommand` ignore the parsed name and always return a fixed real command (`return "init", positional, true`) → an unknown name wrongly runs a real command (exit 0 not 64) → `TestDispatchRoutesUnknownToUsage` RED, and the 2-token name is mis-stamped with its args dropped → `TestDispatchRoutesTwoTokenCommand` RED; or skip the `op_id` mint (leave `Meta.OpID` empty) → `TestDispatchMintsOpID` RED (`opid.Valid("")` fails on both the success and usage paths) |
 | RUN-PIPELINE | in `cli.envelopeFor` drop the durable-partial result-merge (`if false && r != nil { env.Repos = r.Repos … }`) → a partial no longer carries its per-repo detail → `TestExecutePartialCarriesReposAndExitsTwo` RED ("got 0 repos"); or make `Execute` ignore `ExitFor` and `return contract.ExitOK` → every non-zero-exit assertion (CommandError→3, partial→2, internal→70) RED |
 
