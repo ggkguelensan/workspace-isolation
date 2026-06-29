@@ -49,8 +49,15 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   scaffolds a workspace at the resolved root (Bootstrap the `.wi/` subtree, then write a starter
   `wi.config.jsonc` LAST as an `O_EXCL` commit point; re-init → `already_exists` leaving the manifest
   intact), resolving the config WRITE path (decision #C, minimal starter-emitter) and the root-discovery
-  decision (#G: root = cwd, init takes no operand). Guard `CMD-INIT`. What remains for MVP: the rest of
-  the per-command handlers (`isolate new`/`sync`/`repo add`/`isolate rm`), each a `Command` returning a
+  decision (#G: root = cwd, init takes no operand). Guard `CMD-INIT`. **The third handler — `wi isolate
+  new` — has now landed too** (the marquee command): it resolves each requested repo against the manifest
+  → `isolate.RepoSpec` (undeclared → not_found, missing manifest → not_found+`wi init`, malformed → usage
+  = decision #H), reads the minted op_id via `OpIDFrom(ctx)` into the durable `IsolateRecord`, drives
+  `isolate.New`, and maps `StatusComplete`→created / `StatusPartial`→the durable `(result,
+  *CommandError{partial})` carrying per-repo `repos[]` (#D) / `*lock.HeldError`→lock_held; the first
+  handler needing a `*git.Git` (added `Deps.Git`, wired in `BuildRegistry`). Guard `CMD-ISOLATE-NEW`.
+  What remains for MVP: the rest of
+  the per-command handlers (`sync`/`repo add`/`isolate rm`), each a `Command` returning a
   `*Result`/`*CommandError` over the green M0–M2 core (never an envelope, never an exit code) with a
   `BuildRegistry` factory binding its deps + validating its args; then `cmd/wi` main (build the real registry + `clock.System`, call `Dispatch`, the
   single `os.Exit` via `exitcontract.Exit`); then CI + `.goreleaser.yaml` + Homebrew tap. Deferred
@@ -64,6 +71,36 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M3/B · `wi isolate new` handler — the marquee command** (`cmd_isolate_new.go` + `Deps.Git` +
+  `BuildRegistry` line + `cmd_isolate_new_test.go`). The seam between the isolate domain core (durable
+  partial success, DESIGN §6.3) and the envelope contract — and the FIRST handler needing a `*git.Git`
+  (added `Git *git.Git` to `Deps`, wired in `BuildRegistry`; read-only commands leave it nil).
+  `newIsolateNewCommand(l, g, args)` validates `<task>` (a safe segment via `layout.ValidateSegment` →
+  usage) + ≥1 `<repo>`; repo names are NOT segment-checked at the factory (an undeclared one is
+  not_found, not usage — the operand is well-formed, it just names nothing wi manages). `isolateNewCmd.Run`:
+  (a) `config.Load(l.Config())` — missing manifest (`fs.ErrNotExist`) → `not_found` + `wi init` hint, a
+  malformed manifest → `usage` (decision #H: user-fixable input, exit 64, NOT internal); (b) resolves
+  each requested repo via `cfg.Lookup` → `isolate.RepoSpec{Name, Base(effective — defaults applied by
+  config.Parse)}`, an undeclared repo → `not_found` naming it (resolved BEFORE any materialization, so a
+  bad name writes no state record); (c) reads the minted op_id via `OpIDFrom(ctx)` (the CTX-OPID payoff)
+  and drives `isolate.New(ctx, l, g, task, opID, specs)`; (d) maps Status onto the return convention —
+  `StatusComplete` → `Result{Action:created, Repos:[…projected]}`; `StatusPartial` → the DURABLE PARTIAL
+  `(result, *CommandError{Kind:partial, Action:created})` carrying per-repo `repos[]` (decision #D, the
+  only both-non-nil case); a returned `*lock.HeldError` → `*CommandError{Kind:lock_held}` (exit 6); any
+  other returned err → internal. `projectRepoOutcome` maps `isolate.RepoOutcome`→`contract.RepoResult`
+  (Stage==created → action created else noop; worktree path + tip sha; a per-repo `Error{kind:internal}`
+  on exactly the failed repo — Mirror/Branch empty for v0, a refined per-repo Error.Kind awaits the
+  gitexec stderr classifier). It never assembles an envelope or picks an exit code. Guard `CMD-ISOLATE-NEW`
+  (`cmd_isolate_new_test.go`, hermetic `testenv` + real `git`, driven THROUGH `BuildRegistry`'s factory):
+  complete path (2 repos created + the durable `IsolateRecord.OpID` == the op_id injected into the ctx —
+  proving the seam pays off); durable partial (web has no SSOT → both a `*CommandError{partial,
+  Action:created}` AND a result whose repos[] shows api created / web errored, durable registry api
+  created / web pending); undeclared-repo → not_found naming the repo + NO record written; missing
+  manifest → not_found + `wi init` help + NO record; factory arg validation (<2 args or a traversing task
+  → usage, safe task+repo → a Command). Mutant demonstrated RED-then-reverted: on `StatusPartial` return
+  `(result, nil)` instead of the partial `*CommandError` → a partial is mis-reported as a clean success →
+  `TestIsolateNewDurablePartial` RED (`want *cli.CommandError, got <nil>`). Full `go build ./… &&
+  go vet ./… && go test ./…` GREEN (20 packages).
 - **M3/B · op_id propagation via context — the `WithOpID`/`OpIDFrom` seam** (`opctx.go` +
   `Execute` injection + `opctx_test.go`). The small prerequisite that unblocks every handler which must
   record the op identity in DURABLE state (the first being `isolate new` → `IsolateRecord.OpID`). The
@@ -695,34 +732,43 @@ cobra). **The entire generic CLI pipeline — argv → dispatch → outcome → 
 mapped exit — is now complete and green.** What remains for MVP is the per-command handlers that plug
 real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 
-- **DONE (this iteration):** the `WithOpID`/`OpIDFrom` **context seam** (`Execute` injects `Meta.OpID`
-  into the ctx the Command sees) — guard `CTX-OPID`. The prerequisite that lets `isolate new` write the
+- **DONE (this iteration):** `isolate new <task> <repo>…` — the marquee handler — guard
+  `CMD-ISOLATE-NEW`; added `Deps.Git`. Resolves each requested repo against the manifest → `RepoSpec`
+  (undeclared → not_found, missing manifest → not_found+`wi init`, malformed → usage = decision #H),
+  reads the op_id via `OpIDFrom(ctx)` into the durable `IsolateRecord`, drives `isolate.New`, and maps
+  `StatusComplete`→created / `StatusPartial`→durable `(result, *CommandError{partial})` (#D) /
+  `*lock.HeldError`→lock_held.
+- **DONE (prior iteration):** the `WithOpID`/`OpIDFrom` **context seam** (`Execute` injects `Meta.OpID`
+  into the ctx the Command sees) — guard `CTX-OPID`. The prerequisite that let `isolate new` write the
   envelope's op_id into the durable `IsolateRecord` instead of a divergent one.
 - **DONE (prior iteration):** `init` (scaffold a workspace) — guard `CMD-INIT`; resolves decision #G
   (root = cwd, init takes no operand). Bootstraps `.wi/` then writes a starter `wi.config.jsonc` LAST
   (O_EXCL commit point); re-init → `already_exists` leaving the manifest byte-for-byte intact.
 - **DONE (prior iteration):** `resolve` (pure read) + the `Deps`/`BuildRegistry` seam — guard
   `CMD-RESOLVE`. The handler→`Result`/`CommandError` contract pattern is now established for the rest.
-- **NEXT — M3 · the remaining per-command handlers, one cohesive unit each** (`repo add` →
-  `sync` → `isolate new` → `isolate rm`). Each is a `Command` (`Run(ctx) (*Result, error)`) doing its
+- **NEXT — M3 · the remaining per-command handlers, one cohesive unit each** (`sync` →
+  `repo add` → `isolate rm`). Each is a `Command` (`Run(ctx) (*Result, error)`) doing its
   domain work over the green M0–M2 core (config/state/git/mirror/isolate) and returning a typed
   `*Result` (or `*CommandError`) — NEVER an envelope, never an exit code (the pipeline owns both) — plus
   one line in `BuildRegistry` and a factory that parses+validates its args (→ `*CommandError{Kind:usage}`
   → exit 64). Guard each with its own fitness test asserting ONLY the domain mapping (the generic
-  `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/exit wiring), following `CMD-RESOLVE`/`CMD-INIT`.
-  Suggested next: **`isolate new <task> <repo>…`** — the marquee handler, now UNBLOCKED by the op_id
-  seam. Plan: factory validates `<task>` (a safe segment) + ≥1 `<repo>`; `Run` reads `config.Load(l.Config())`,
-  resolves each requested repo name against the manifest → `isolate.RepoSpec{Name, Base(effective)}`
-  (unknown repo → `not_found` naming it; missing manifest → `not_found` hinting `wi init`), gets the
-  op_id via `OpIDFrom(ctx)`, then drives `isolate.New(ctx, l, g, task, opID, specs)`. Map the outcome:
-  `StatusComplete` → `Result{Action:created, Repos:[…projected RepoResult]}`; `StatusPartial` → the
-  durable `(result, *CommandError{Kind:partial})` carrying per-repo `repos[]` (decision #D); a returned
-  `*lock.HeldError` → `*CommandError{Kind:lock_held}` (exit 6); other returned err → internal. **Needs a
-  `*git.Git` in `Deps`** (add `Git *git.Git` + wire it in `BuildRegistry`) — first handler to. NOTE
-  per DESIGN §5/§324 the SSOT clone is materialized by `wi sync` (lazy `EnsureClone`), NOT by `isolate
-  new`; so against an unsynced repo `isolate.New`'s `ResolveRef` fails → surfaces as a partial. A
-  pre-flight "SSOT exists? else hint `wi sync`" check is a nice enrichment but can come with `sync`.
-  Then `sync`, `repo add` (the deferred AST-preserving config edit path lands HERE), `isolate rm`.
+  `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/exit wiring), following
+  `CMD-RESOLVE`/`CMD-INIT`/`CMD-ISOLATE-NEW`.
+  **Suggested next: `sync [<repo>…]`** — the command that MATERIALIZES the SSOT (lazy `EnsureClone` on
+  first sync per DESIGN §5/lines 203/324), so it unblocks `isolate new` against a fresh manifest. Plan:
+  factory takes 0+ repo names (none → all declared repos; a named repo not in the manifest → not_found).
+  `Run` loads the manifest, then per repo, UNDER the `repo:<name>` lock (DESIGN §6.1, the key that
+  linearizes the sync/land freshness race): `git.EnsureClone(ctx, l.Repo(name), cfg url, base)` (the ONE
+  permitted network dial, via `gitexec.RunNetwork`) if absent, then `git.Fetch` + `git.FastForwardBaseRef`
+  (the SOLE base-ref-mutation path — update-ref ff-only, no checkout/merge, SSOT stays detached &
+  pristine), then persist a `mirror.Snapshot` for the `mirror_freshness` block. A genuine non-ff (origin
+  rewound/force-pushed) → `*NonFastForwardError` → a per-repo error (kind: a fresh `conflict`? or
+  `mirror_stale`? — DECIDE when building; lean `conflict`). Map to `Result{Action:synced, Repos:[…]}`,
+  partial on first per-repo failure mirroring isolate new's projection. NOTE this is the first handler to
+  use `gitexec.RunNetwork` end-to-end — exercise the offline belt's narrow opt-in. Then `repo add` (the
+  deferred AST-preserving config edit path lands HERE — read+mutate+atomically rewrite `wi.config.jsonc`,
+  preserving comments/formatting; lock `project-registry`), `isolate rm` (evidence-positive reclamation
+  via `refs/wi/owned/<task>/<repo>` — HARD BLOCK on an unexplained orphan, never auto-prune; DESIGN §7.1).
 - **Then** `cmd/wi/main.go` — the single process entry: discover the root → build `Deps` +
   `clock.System`, `BuildRegistry`, call `cli.Dispatch`, and make the SOLE `os.Exit` via
   `exitcontract.Exit(code)`. Then CI + `.goreleaser.yaml` + Homebrew tap. Completing this chain = full
@@ -782,6 +828,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CTX-OPID | in `Execute` drop the `ctx = WithOpID(ctx, m.OpID)` injection (`if false {…}`) → the Command observes `""` from `OpIDFrom(ctx)` instead of the minted op_id → `TestExecuteInjectsOpIDIntoContext` RED (saw `""`, want the `Meta.OpID`) |
 | DISPATCH-ROUTES | in `cli.resolveCommand` ignore the parsed name and always return a fixed real command (`return "init", positional, true`) → an unknown name wrongly runs a real command (exit 0 not 64) → `TestDispatchRoutesUnknownToUsage` RED, and the 2-token name is mis-stamped with its args dropped → `TestDispatchRoutesTwoTokenCommand` RED; or skip the `op_id` mint (leave `Meta.OpID` empty) → `TestDispatchMintsOpID` RED (`opid.Valid("")` fails on both the success and usage paths) |
 | RUN-PIPELINE | in `cli.envelopeFor` drop the durable-partial result-merge (`if false && r != nil { env.Repos = r.Repos … }`) → a partial no longer carries its per-repo detail → `TestExecutePartialCarriesReposAndExitsTwo` RED ("got 0 repos"); or make `Execute` ignore `ExitFor` and `return contract.ExitOK` → every non-zero-exit assertion (CommandError→3, partial→2, internal→70) RED |
+| CMD-ISOLATE-NEW | in `isolateNewCmd.Run`, on `res.Status == isolate.StatusPartial` return `(result, nil)` instead of `(result, *CommandError{Kind:partial})` → a partial is mis-reported as a clean success (no error, exit 0) → `TestIsolateNewDurablePartial` RED (`want *cli.CommandError, got <nil>`); or drop the unknown-repo `!ok` not_found branch (skip the `cfg.Lookup` check) → `TestIsolateNewUnknownRepoIsNotFound` RED (no error / wrong kind) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
@@ -797,6 +844,15 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   the project? — resolve explicitly later, e.g. by the presence of `wi.config.jsonc`). Recorded here +
   in the `cmd_init.go`/`newInitCommand` doc comments; the `cmd/wi` main (a later unit) implements the
   `layout.Resolve(cwd)` startup path.
+- **#H malformed-manifest error kind — RESOLVED 2026-06-30** (not a §7 ruling; forced by `isolate new`
+  loading the manifest — the closed 11-kind taxonomy has no dedicated "bad config" kind). **A manifest
+  that exists but fails `config.Parse` (unknown key, missing url/base, duplicate repo, JSON syntax) maps
+  to `kind=usage` (exit 64), NOT `internal`.** Rationale: a malformed manifest is user-fixable INPUT,
+  exactly what `usage` (exit 64, "the operator gave bad input") communicates — surfacing it as `internal`
+  (exit 70) would wrongly assert a wi BUG and mislead an agent into retrying rather than fixing the file.
+  A MISSING manifest (`fs.ErrNotExist`) is distinct → `not_found` + a `wi init` hint (the workspace isn't
+  initialized, not malformed). Recorded in the `cmd_isolate_new.go` `Run` doc comment; every later
+  manifest-reading handler (`sync`, `repo add`, `isolate rm`) follows the SAME two-way split.
 - **#F CLI arg-parsing library — RESOLVED 2026-06-30** (an open architectural decision from the PLAN
   stack/Wave-B text, which named `cobra` as a candidate and listed it among the `go.mod` pins; recorded
   as a new resolved item in PLAN §7). **Hand-rolled stdlib parser, NOT cobra** (no new dependency). `internal/cli.Dispatch` does its own parsing: a forgiving single-pass global-flag
