@@ -71,6 +71,36 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M2/B · `internal/sync` — the sync domain core (materialize + advance + record freshness)**
+  (`sync.go` + `sync_test.go`). The orchestration core behind `wi sync`, built as its own domain package
+  for symmetry with `internal/isolate` (the other materializing command) and hermetic testability — the
+  thin `cmd_sync` handler that projects it onto the envelope is the NEXT unit. `sync.Run(ctx, l, g, clk,
+  opID, specs) (Result, error)` syncs each `RepoSpec{Name, URL, Base}` in request order, each UNDER its
+  own `repo:<name>` lock (the identical key v1 `land` takes — this is what linearizes the freshness race,
+  DESIGN §6.1). Per repo (`syncOne`): `git.EnsureClone` (lazy — clone the SSOT detached at base tip on
+  first sync, no-op once present) → `git.Fetch` (the network dial) → `git.ResolveRef(origin/<base>)` →
+  `git.FastForwardBaseRef(base, originSHA)` (the SOLE base-ref mutation — ff-only update-ref, no
+  checkout/merge, SSOT stays detached & pristine; a rewound/force-pushed origin → `*git.NonFastForwardError`
+  leaves the ref untouched) → `mirror.Store` a `Snapshot{behind:0}` (behind=0 because the base was just
+  advanced to exactly the fetched origin tip under the lock — provably current). **CONTINUE-on-fail**
+  (decision below): repos are independent SSOTs, so a per-repo failure (unreachable origin, non-ff, held
+  lock) is recorded in that repo's `RepoOutcome.Err` and the remaining repos are STILL synced; overall
+  `Status=StatusPartial` if any failed. This deliberately DIFFERS from `isolate.New`'s stop-on-first-fail
+  (an isolate is one coherent workspace whose completed set must stay a resumable prefix; sync has no such
+  inter-repo dependency). `Run`'s Go-error return is reserved for an op-level failure — in v0 every failure
+  is per-repo, so it returns nil error and reports via Status/Repos. The first `internal/` package to drive
+  `gitexec.RunNetwork` end-to-end (clone+fetch). Guard `SYNC-RUN` (`sync_test.go`, hermetic `testenv` +
+  real git against local `file://` origins): fresh repo → lazy clone + base advanced to origin tip +
+  behind-0 freshness persisted (`mirror.Load` round-trip) + SSOT working tree pristine (`IsClean`); origin
+  advances (a pushed commit) → a second sync FAST-FORWARDS the on-disk base ref to the new tip;
+  continue-on-fail → an unreachable repo listed FIRST fails yet the reachable repo after it still syncs,
+  overall partial. Each SHA assertion checks the base ref ON DISK (`g.ResolveRef`), independent of the
+  returned snapshot. Mutant demonstrated RED-then-reverted: drop the `g.FastForwardBaseRef` call (`if
+  false {…}`) → after the origin advances the base ref stays frozen at the seed tip (`48f4258c…`, the
+  testenv golden) instead of advancing → `TestSyncFastForwardsToNewOriginTip` RED on the on-disk assertion,
+  while the fresh-materialize test (FF is a no-op when seed==origin) and continue-on-fail test stay GREEN —
+  isolating the mutant to the advance path. Full `go build ./… && go vet ./… && go test ./…` GREEN
+  (21 packages).
 - **M3/B · `wi isolate new` handler — the marquee command** (`cmd_isolate_new.go` + `Deps.Git` +
   `BuildRegistry` line + `cmd_isolate_new_test.go`). The seam between the isolate domain core (durable
   partial success, DESIGN §6.3) and the envelope contract — and the FIRST handler needing a `*git.Git`
@@ -732,7 +762,12 @@ cobra). **The entire generic CLI pipeline — argv → dispatch → outcome → 
 mapped exit — is now complete and green.** What remains for MVP is the per-command handlers that plug
 real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 
-- **DONE (this iteration):** `isolate new <task> <repo>…` — the marquee handler — guard
+- **DONE (this iteration):** `internal/sync` — the **sync domain core** `sync.Run` (guard `SYNC-RUN`).
+  Built as its own domain package (mirroring `internal/isolate`) rather than inline in the handler, so the
+  orchestration — per-repo, under `repo:<name>`, `EnsureClone`→`Fetch`→`FastForwardBaseRef`→`mirror.Store`,
+  CONTINUE-on-fail — is hermetically testable below the envelope machinery. The first `internal/` package
+  to drive `gitexec.RunNetwork` (clone+fetch) end-to-end. The thin `cmd_sync` handler is NEXT.
+- **DONE (prior iteration):** `isolate new <task> <repo>…` — the marquee handler — guard
   `CMD-ISOLATE-NEW`; added `Deps.Git`. Resolves each requested repo against the manifest → `RepoSpec`
   (undeclared → not_found, missing manifest → not_found+`wi init`, malformed → usage = decision #H),
   reads the op_id via `OpIDFrom(ctx)` into the durable `IsolateRecord`, drives `isolate.New`, and maps
@@ -754,21 +789,27 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   → exit 64). Guard each with its own fitness test asserting ONLY the domain mapping (the generic
   `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/exit wiring), following
   `CMD-RESOLVE`/`CMD-INIT`/`CMD-ISOLATE-NEW`.
-  **Suggested next: `sync [<repo>…]`** — the command that MATERIALIZES the SSOT (lazy `EnsureClone` on
-  first sync per DESIGN §5/lines 203/324), so it unblocks `isolate new` against a fresh manifest. Plan:
-  factory takes 0+ repo names (none → all declared repos; a named repo not in the manifest → not_found).
-  `Run` loads the manifest, then per repo, UNDER the `repo:<name>` lock (DESIGN §6.1, the key that
-  linearizes the sync/land freshness race): `git.EnsureClone(ctx, l.Repo(name), cfg url, base)` (the ONE
-  permitted network dial, via `gitexec.RunNetwork`) if absent, then `git.Fetch` + `git.FastForwardBaseRef`
-  (the SOLE base-ref-mutation path — update-ref ff-only, no checkout/merge, SSOT stays detached &
-  pristine), then persist a `mirror.Snapshot` for the `mirror_freshness` block. A genuine non-ff (origin
-  rewound/force-pushed) → `*NonFastForwardError` → a per-repo error (kind: a fresh `conflict`? or
-  `mirror_stale`? — DECIDE when building; lean `conflict`). Map to `Result{Action:synced, Repos:[…]}`,
-  partial on first per-repo failure mirroring isolate new's projection. NOTE this is the first handler to
-  use `gitexec.RunNetwork` end-to-end — exercise the offline belt's narrow opt-in. Then `repo add` (the
-  deferred AST-preserving config edit path lands HERE — read+mutate+atomically rewrite `wi.config.jsonc`,
-  preserving comments/formatting; lock `project-registry`), `isolate rm` (evidence-positive reclamation
-  via `refs/wi/owned/<task>/<repo>` — HARD BLOCK on an unexplained orphan, never auto-prune; DESIGN §7.1).
+  **Suggested next: the `cmd_sync.go` handler** — the thin envelope projection over the now-green
+  `sync.Run` core (the domain orchestration landed this iteration). Plan: `newSyncCommand(l, g, clk, args)`
+  factory takes 0+ repo names (none → all declared repos; a named repo not in the manifest → not_found —
+  resolved against `config.Load` BEFORE any dial, exactly like `isolate new`); add a `Clock` field to
+  `Deps` (sync is the first handler needing the clock for the snapshot timestamp) and the `"sync"`
+  `BuildRegistry` line binding `d.Layout`/`d.Git`/`d.Clock`. `syncCmd.Run`: `config.Load(l.Config())` —
+  missing manifest → not_found+`wi init`, malformed → usage (decision #H, same two-way split); map the
+  requested names (or all `cfg.Repos`) → `[]sync.RepoSpec{Name, URL, Base}`; call `sync.Run`; project the
+  `Result` onto `Result{Action:synced, Repos:[…]}` (a `projectSyncOutcome` mapping each `sync.RepoOutcome`
+  → `contract.RepoResult{Repo, Action:synced|noop, SHA:Snapshot.LocalBaseSHA, Mirror, Freshness:&Snapshot.Freshness()}`,
+  a per-repo `Error` on the failed repo), with `StatusPartial`→durable `(result, *CommandError{partial,
+  Action:synced})` mirroring `cmd_isolate_new`'s projection. **OPEN per-repo-kind question to settle in the
+  handler:** a `*git.NonFastForwardError` per-repo failure — map to `kind=conflict` (lean) vs a fresh kind;
+  a `*lock.HeldError` per-repo → `kind=lock_held`; everything else → `internal` (refine once the gitexec
+  stderr→kind classifier lands). The generic `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/
+  exit wiring, so guard `CMD-SYNC` asserts ONLY the domain mapping (drive THROUGH `BuildRegistry`'s factory,
+  hermetic `testenv`+git): synced repo → `synced` Result with the freshness block; unknown repo →
+  not_found; partial → durable `(result, *CommandError{partial})`. Then `repo add` (the deferred
+  AST-preserving config edit path lands HERE — read+mutate+atomically rewrite `wi.config.jsonc`, preserving
+  comments/formatting; lock `project-registry`), `isolate rm` (evidence-positive reclamation via
+  `refs/wi/owned/<task>/<repo>` — HARD BLOCK on an unexplained orphan, never auto-prune; DESIGN §7.1).
 - **Then** `cmd/wi/main.go` — the single process entry: discover the root → build `Deps` +
   `clock.System`, `BuildRegistry`, call `cli.Dispatch`, and make the SOLE `os.Exit` via
   `exitcontract.Exit(code)`. Then CI + `.goreleaser.yaml` + Homebrew tap. Completing this chain = full
@@ -829,6 +870,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | DISPATCH-ROUTES | in `cli.resolveCommand` ignore the parsed name and always return a fixed real command (`return "init", positional, true`) → an unknown name wrongly runs a real command (exit 0 not 64) → `TestDispatchRoutesUnknownToUsage` RED, and the 2-token name is mis-stamped with its args dropped → `TestDispatchRoutesTwoTokenCommand` RED; or skip the `op_id` mint (leave `Meta.OpID` empty) → `TestDispatchMintsOpID` RED (`opid.Valid("")` fails on both the success and usage paths) |
 | RUN-PIPELINE | in `cli.envelopeFor` drop the durable-partial result-merge (`if false && r != nil { env.Repos = r.Repos … }`) → a partial no longer carries its per-repo detail → `TestExecutePartialCarriesReposAndExitsTwo` RED ("got 0 repos"); or make `Execute` ignore `ExitFor` and `return contract.ExitOK` → every non-zero-exit assertion (CommandError→3, partial→2, internal→70) RED |
 | CMD-ISOLATE-NEW | in `isolateNewCmd.Run`, on `res.Status == isolate.StatusPartial` return `(result, nil)` instead of `(result, *CommandError{Kind:partial})` → a partial is mis-reported as a clean success (no error, exit 0) → `TestIsolateNewDurablePartial` RED (`want *cli.CommandError, got <nil>`); or drop the unknown-repo `!ok` not_found branch (skip the `cfg.Lookup` check) → `TestIsolateNewUnknownRepoIsNotFound` RED (no error / wrong kind) |
+| SYNC-RUN | drop the `g.FastForwardBaseRef` call in `syncOne` (`if false {…}`, keep the snapshot built from `originSHA`) → after the origin advances the on-disk base ref is never moved → `TestSyncFastForwardsToNewOriginTip` RED (on-disk base frozen at the seed tip, not the new origin tip), while the fresh-materialize + continue-on-fail tests stay GREEN (isolates the mutant to the advance path); secondary: turn the per-repo loop's continue-on-fail into break/return-on-first-error → `TestSyncContinuesOnFailureAndReportsPartial` RED (the reachable repo after the failed one is never synced) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
@@ -853,6 +895,21 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   A MISSING manifest (`fs.ErrNotExist`) is distinct → `not_found` + a `wi init` hint (the workspace isn't
   initialized, not malformed). Recorded in the `cmd_isolate_new.go` `Run` doc comment; every later
   manifest-reading handler (`sync`, `repo add`, `isolate rm`) follows the SAME two-way split.
+- **#S sync failure semantics — RESOLVED 2026-06-30** (not a §7 ruling; forced by building `internal/sync`
+  — the multi-repo `wi sync` needs a defined behavior when one repo fails). **`sync` is CONTINUE-on-fail
+  (best-effort per repo), NOT stop-on-first-fail.** Each repo is synced independently under its own
+  `repo:<name>` lock; a per-repo failure (unreachable origin, `*git.NonFastForwardError` on a rewound
+  origin, a held lock) is recorded in that repo's `RepoOutcome.Err` and the remaining repos are STILL
+  attempted; overall `Status=StatusPartial` if any failed (→ exit 2). Rationale: repos are independent
+  SSOTs with no inter-dependency, so a network blip or non-ff on one must not strand the others; and each
+  repo's sync is atomic + idempotent, so there is nothing to "resume" as a contiguous prefix. This
+  deliberately DIFFERS from `isolate.New` (stop-on-first-fail — decision baked into `internal/isolate`),
+  because an isolate is ONE coherent multi-repo workspace whose completed set must remain a resumable
+  prefix (DESIGN §6.3). `sync.Run`'s Go-error return is therefore reserved for an op-level failure that
+  prevents the whole run; in v0 every failure is per-repo, so it returns a nil error and reports via
+  Status/Repos. Recorded in the `internal/sync` package doc; the `cmd_sync` handler will project
+  `StatusPartial` onto a durable `(result, *CommandError{partial, Action:synced})` exactly as
+  `cmd_isolate_new` does (decision #D).
 - **#F CLI arg-parsing library — RESOLVED 2026-06-30** (an open architectural decision from the PLAN
   stack/Wave-B text, which named `cobra` as a candidate and listed it among the `go.mod` pins; recorded
   as a new resolved item in PLAN §7). **Hand-rolled stdlib parser, NOT cobra** (no new dependency). `internal/cli.Dispatch` does its own parsing: a forgiving single-pass global-flag
