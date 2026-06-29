@@ -10,9 +10,11 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 ## Current position
 
 - **Milestone:** **M2 in progress** (domain command core: `config`, `state`, `isolate`, `resolve`).
-  `internal/config` read+validate AND `internal/state` per-isolate registry record landed and green.
-  **Next: `internal/isolate`** (N-repo worktree add + wi-owned marker ref), then `resolve` (path bundle).
-  Likely state follow-ons (namespaced KV + `cas`) remain, pulled in when a command needs them.
+  `internal/config` read+validate, `internal/state` per-isolate registry record, AND the
+  `git.AddWorktree` materialization primitive (first sub-step of `internal/isolate`) landed and green.
+  **Next: `internal/isolate`** — the marker-ref verb (`refs/wi/owned/<task>/<repo>`) then the N-repo
+  orchestration that drives `AddWorktree` + `state.UpdateRepoStage` per repo — then `resolve` (path
+  bundle). Likely state follow-ons (namespaced KV + `cas`) remain, pulled in when a command needs them.
   M0 + M1 complete: contract spine, layout, opid, clock, testenv, lockfs, lock, `gitexec` runner+belt,
   full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch / DivergedCounts), complete
   `internal/mirror`, and both DESIGN §2 architecture invariants (INV-NO-LLM + INV-NO-NETWORK).
@@ -349,29 +351,51 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   RED. All reverted → full `go build/vet/test` GREEN. **Decision #S** (Stage is a state-owned typed string,
   not a contract enum) recorded below.
 
+- **M2 · `internal/git` · `AddWorktree` (isolate materialization primitive)** — `git.go` +
+  `git_test.go`: the per-repo verb `internal/isolate` composes to materialize one worktree off the SSOT.
+  `AddWorktree(ctx, ssotDir, worktreePath, rev)` runs `git worktree add --detach <path> <rev>` (offline
+  `Run`), producing a **linked worktree sharing the SSOT object store** (native git sharing — no object
+  duplication, DESIGN §1 line 30) that is **detached** (holds no branch, so the SSOT base ref is never
+  "checked out in a worktree" and `FastForwardBaseRef` can always advance it — the keystone, DESIGN §5).
+  rev is wi-internal (a SHA or `refs/heads/<base>`); ownership/gc-protection via the
+  `refs/wi/owned/<task>/<repo>` marker (DESIGN §7.1) is a separate follow-on step. Guard `GIT-WORKTREE`
+  (testenv SSOT, EnsureClone'd): after add, the worktree HEAD is detached (`--abbrev-ref` == "HEAD") at
+  the base tip; its `.git` is a **gitlink file** (not a dir) and `rev-parse --git-common-dir` resolves to
+  the **SSOT's own `.git`** (structural object-store-sharing / no-dup check, the isolation invariant PLAN
+  §line 102); and the SSOT working tree stays **pristine** (`IsClean`). Mutant (materialize via a
+  standalone `git clone` instead of a linked worktree) confirmed RED on **all three** assertions —
+  abbrev-ref "main" (branch checked out, not detached), `.git` a directory, and the common git dir the
+  clone's own (object duplication) — proving the guard verifies genuine worktree sharing, the precise
+  worktree-vs-clone design choice, not merely "a checkout appeared". Reverted → full `go build/vet/test`
+  GREEN. (`--detach` is defense-in-depth: a SHA or fully-qualified ref already detaches; the flag keeps a
+  short-branch-name caller detached too.)
+
 ## Next unit (pick this on the next firing) — M2 continues
 
 M2 (DESIGN §map: `config`, `state`, `isolate`, `resolve`) is the domain command core: committed
 manifest + runtime registry + isolate create/remove/repair + the resolve path bundle. Build order
 within M2: `config` ✅ → `state` ✅ → **`isolate`** → `resolve`.
 
-- **NEXT: M2 · `internal/isolate` · isolate create (the partial-success-critical command core).**
+- **M2 · `internal/isolate` · isolate create (the partial-success-critical command core).**
   `isolate new <task> [repos…]` materializes one worktree per declared repo off the SSOT base, recording
-  progress in `internal/state` as it goes. Build order within the unit, smallest cohesive first: (1) the
-  single-repo worktree-add verb on `internal/git` (`git worktree add --detach <isolas/<task>/<repo>>
-  <base-tip>` into the per-isolate tree, offline `Run`), then (2) the **wi-owned marker ref**
-  `refs/wi/owned/<task>/<repo>` (decision #2 — evidence-positive ownership for reclamation; create via
-  `update-ref` in the SSOT clone), then (3) the N-repo orchestration that writes `state.NewIsolateRecord`
-  (all pending) BEFORE adding any worktree and calls `state.UpdateRepoStage(…, StageCreated)` **after each**
-  add. The orchestration is **stop-on-first-fail with durable, not-rolled-back completed repos** (DESIGN
-  §6.3 durable partial success, exit 2, resumable) — the `state` package already proves the registry stays
-  durable across a crash mid-flip; isolate just has to drive it in the right order under the
-  `isolate-state:<task>` lock. Honor SSOT invariants: the worktree adds come off `refs/heads/<base>` but
-  NEVER move it (only `git.FastForwardBaseRef` advances a base ref); no checkout/dirt in `repos/`.
-  Fitness ideas: a worktree-add guard (worktree exists + detached at base tip + marker ref present) and a
-  partial-success guard (inject a `WI_FAULT` crash on the 2nd repo's add → registry shows repo 1
-  `StageCreated`, repos 2..N `StagePending`, exit 2). Likely state follow-ons (namespaced KV + `cas` with
-  the `--expected __ABSENT__` sentinel, DESIGN §line 321) get pulled in when isolate/land needs them.
+  progress in `internal/state` as it goes. Build order within the unit, smallest cohesive first: (1) ✅
+  the single-repo worktree-add verb `git.AddWorktree` (done, guard `GIT-WORKTREE`). **NEXT: (2) the
+  wi-owned marker ref** `refs/wi/owned/<task>/<repo>` — a `git` verb (likely `CreateOwnedRef(ctx, ssotDir,
+  task, repo, sha)` via `update-ref refs/wi/owned/<task>/<repo> <sha>`) recording evidence-positive
+  ownership for reclamation (decision #2, DESIGN §7.1); these refs live under `refs/wi/*` (NOT
+  `refs/heads/*`, so they are not "leaked branches" and are gc-protected). Smallest cohesive unit:
+  the create verb + a read/exists verb, guarded by a fitness that the ref exists under `refs/wi/owned/…`
+  at the recorded sha and is absent before. Then **(3) the N-repo orchestration** that writes
+  `state.NewIsolateRecord` (all pending) BEFORE adding any worktree and calls
+  `state.UpdateRepoStage(…, StageCreated)` **after each** add+marker. The orchestration is
+  **stop-on-first-fail with durable, not-rolled-back completed repos** (DESIGN §6.3 durable partial
+  success, exit 2, resumable) — `state` already proves the registry stays durable across a crash mid-flip;
+  isolate just drives it in the right order under the `isolate-state:<task>` lock. Honor SSOT invariants:
+  worktree adds come off `refs/heads/<base>` but NEVER move it (only `git.FastForwardBaseRef` advances a
+  base ref); no checkout/dirt in `repos/`. Fitness ideas for (3): a partial-success guard (inject a
+  `WI_FAULT` crash on the 2nd repo's add → registry shows repo 1 `StageCreated`, repos 2..N
+  `StagePending`, exit 2). Likely state follow-ons (namespaced KV + `cas` with the `--expected __ABSENT__`
+  sentinel, DESIGN §line 321) get pulled in when isolate/land needs them.
 - Then **`resolve`** (path bundle — projects an isolate's repo paths into the `resolve` envelope block).
   M2 completing unlocks M3 (`cli`/`help`/`suggest` + `cmd/wi` → MVP end-to-end).
 
@@ -406,6 +430,7 @@ within M2: `config` ✅ → `state` ✅ → **`isolate`** → `resolve`.
 | GIT-CLEAN | make `IsClean` ignore `StatusPorcelain` and always return `true` → an untracked file no longer reads as drift → `TestIsCleanReflectsWorkingTree` RED |
 | GIT-FETCH | make `Fetch` a no-op (return nil without running `git fetch`) → the remote-tracking ref stays at the old tip → `TestFetchAdvancesRemoteTrackingOnly` RED |
 | GIT-DIVERGED | swap the two `rev-list --left-right --count` columns in `DivergedCounts` (read ahead from `fields[1]`, behind from `fields[0]`) → `TestDivergedCountsAheadBehind` RED |
+| GIT-WORKTREE | materialize via a standalone `git clone <ssotDir> <path>` instead of `git worktree add --detach` in `AddWorktree` → the result checks out `main` (not detached) and has its own `.git` dir + object store (common-dir ≠ SSOT) → `TestAddWorktreeIsDetachedLinkedAndShared` RED on all three assertions (proves the guard verifies genuine linked-worktree sharing, not just a checkout) |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |

@@ -349,3 +349,85 @@ func TestDivergedCountsAheadBehind(t *testing.T) {
 		t.Errorf("origin vs local: ahead=%d behind=%d, want ahead=1 behind=0", ahead, behind)
 	}
 }
+
+// Guard GIT-WORKTREE — per-repo isolate materialization (DESIGN §1, §5, §7.1).
+//
+// AddWorktree is the primitive isolate new composes once per declared repo. It
+// must materialize a worktree that is, all at once:
+//
+//	(1) DETACHED at the requested rev — it holds no branch, so the SSOT base ref
+//	    is never "checked out in a worktree" and FastForwardBaseRef can always
+//	    advance it (the keystone, DESIGN §5);
+//	(2) a LINKED worktree SHARING the SSOT object store — its .git is a gitlink
+//	    *file* and its common git dir resolves to the SSOT's .git, so there is no
+//	    object duplication (the isolation invariant, DESIGN §1 line 30);
+//	(3) materialized WITHOUT dirtying the SSOT working tree (it must stay
+//	    pristine — DESIGN §5).
+//
+// Non-vacuity: materialize via a standalone `git clone` instead of a linked
+// worktree → the result checks out the base BRANCH (abbrev-ref "main", not
+// "HEAD") and has its OWN .git directory + object store (common git dir is the
+// clone's, not the SSOT's) → all three assertions RED. This is the faithful
+// mutant because worktree-vs-clone is precisely the design choice the guard
+// protects (native object-store sharing, no duplication — DESIGN §1 line 30),
+// not merely "a checkout appeared". (--detach is defense-in-depth: a SHA or
+// fully-qualified ref like refs/heads/<base> already detaches, but a caller that
+// passes a short branch name still gets a detached worktree.)
+
+func TestAddWorktreeIsDetachedLinkedAndShared(t *testing.T) {
+	env := testenv.New(t)
+	origin := env.SeedOrigin(t, "acme")
+	ssot := filepath.Join(env.Root, "ssot")
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	if err := g.EnsureClone(ctx, ssot, "file://"+origin, testenv.DefaultBranch); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+	baseRef := "refs/heads/" + testenv.DefaultBranch
+	baseTip := env.Git(t, ssot, "rev-parse", baseRef)
+
+	// isolas/<task>/<repo> — the per-isolate worktree path (layout owns this in the
+	// real flow; here we just place it under the hermetic root).
+	wt := filepath.Join(env.Root, "isolas", "taskx", "acme")
+	if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
+		t.Fatalf("mkdir isolate dir: %v", err)
+	}
+
+	if err := g.AddWorktree(ctx, ssot, wt, baseRef); err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+
+	// (1) detached at the base tip — no branch checked out in the worktree.
+	if got := env.Git(t, wt, "rev-parse", "--abbrev-ref", "HEAD"); got != "HEAD" {
+		t.Errorf("worktree HEAD abbrev-ref = %q, want %q (detached, no branch)", got, "HEAD")
+	}
+	if got := env.Git(t, wt, "rev-parse", "HEAD"); got != baseTip {
+		t.Errorf("worktree HEAD = %s, want the base tip %s", got, baseTip)
+	}
+
+	// (2) linked worktree sharing the SSOT object store: .git is a gitlink FILE,
+	// and the common git dir resolves to the SSOT's own .git (no object dup).
+	fi, err := os.Stat(filepath.Join(wt, ".git"))
+	if err != nil {
+		t.Fatalf("stat worktree .git: %v", err)
+	}
+	if fi.IsDir() {
+		t.Errorf("worktree .git is a directory; a linked worktree's .git must be a gitlink file")
+	}
+	commonDir := env.Git(t, wt, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	ssotGitDir := env.Git(t, ssot, "rev-parse", "--path-format=absolute", "--git-dir")
+	if commonDir != ssotGitDir {
+		t.Errorf("worktree common git dir = %q, want the SSOT's git dir %q (shared store, no dup)", commonDir, ssotGitDir)
+	}
+
+	// (3) the SSOT working tree stays pristine after the worktree add.
+	clean, err := g.IsClean(ctx, ssot)
+	if err != nil {
+		t.Fatalf("IsClean ssot: %v", err)
+	}
+	if !clean {
+		t.Errorf("SSOT dirty after worktree add; it must stay pristine")
+	}
+}

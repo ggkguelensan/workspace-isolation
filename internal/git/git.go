@@ -106,6 +106,26 @@ func (g *Git) DivergedCounts(ctx context.Context, dir, local, remote string) (ah
 	return ahead, behind, nil
 }
 
+// AddWorktree materializes a linked git worktree at worktreePath off the SSOT
+// clone at ssotDir, checked out DETACHED at rev. It is the per-repo isolate
+// materialization primitive isolate new composes (DESIGN §1, §6.3).
+//
+// Two properties are load-bearing. The worktree shares the SSOT's object store —
+// native git worktree sharing, so no objects are duplicated (DESIGN §1 line 30):
+// the worktree's .git is a gitlink file into <ssotDir>/.git/worktrees/<id>. And
+// it is DETACHED (--detach forces this even when rev names a branch), so it holds
+// no branch ref; the SSOT base ref is therefore never "checked out in a worktree"
+// and FastForwardBaseRef can always advance it (the keystone, DESIGN §5). It is a
+// local operation (offline Run). rev is wi-internal — a SHA or a ref such as
+// refs/heads/<base>. Ownership/gc-protection via the refs/wi/owned/<task>/<repo>
+// marker (DESIGN §7.1) is layered on by a separate step, not here.
+func (g *Git) AddWorktree(ctx context.Context, ssotDir, worktreePath, rev string) error {
+	if _, err := g.r.Run(ctx, ssotDir, "worktree", "add", "--detach", worktreePath, rev); err != nil {
+		return fmt.Errorf("git: add worktree %s at %s in %s: %w", worktreePath, rev, ssotDir, err)
+	}
+	return nil
+}
+
 // isRepo reports whether dir is an existing git repository. It guards the dir's
 // existence first so git is never spawned in a missing directory (which would
 // be an opaque start failure rather than a clean "not a repo").
