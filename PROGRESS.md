@@ -11,8 +11,10 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 - **Milestone:** **M2 COMPLETE; M3 NEARLY COMPLETE — the `wi` binary runs end-to-end.** All six MVP
   commands plus `cmd/wi/main.go` now land green; the entire `init→repo add→sync→isolate new→resolve→
-  isolate rm` surface is reachable through a runnable, smoke-verified binary. The ONLY remaining MVP
-  (M0–M3) work is the release scaffolding: CI + `.goreleaser.yaml` + Homebrew tap. (Detail below.)
+  isolate rm` surface is reachable through a runnable, smoke-verified binary. **Release scaffolding
+  sub-unit (a) — the CI gate workflow — has now landed** (`.github/workflows/ci.yml`: gofmt+build+vet+
+  test on ubuntu+macos, Go pinned from go.mod); the ONLY remaining MVP (M0–M3) work is release
+  scaffolding sub-units (b) `.goreleaser.yaml` + (c) Homebrew tap. (Detail below.)
   Domain command core fully landed and green
   (`internal/config` manifest read+validate, `internal/state` per-isolate runtime registry + durable
   partial success, `internal/isolate.New` N-repo orchestration under the `isolate-state:<task>` lock /
@@ -114,6 +116,25 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 - **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); in Wave B domain code (M2).
 
 ## Done
+
+- **M3 · CI gate workflow — sub-unit (a) of release scaffolding** (`.github/workflows/ci.yml`; preceded
+  by a `style:` commit making the tree gofmt-clean). Mechanizes the exact green gate every build
+  iteration already enforces locally — `gofmt -l` (no diffs), `go build ./...`, `go vet ./...`,
+  `go test ./...` — on push to `main`+`build/wi` and on every pull request, matrix `[ubuntu-latest,
+  macos-latest]` (Linux = recent upstream git; macOS = Apple Git, the PLAN §6 portability risk). Go is
+  pinned from `go.mod` via `setup-go`'s `go-version-file` (single source of truth, no toolchain drift);
+  golden suite is fail-closed by construction (plain `go test` never passes `-update`, so goldens are
+  asserted, PLAN §2); least-privilege `contents: read`; `cancel-in-progress` per ref; `fail-fast: false`
+  so one OS's failure doesn't mask the other. Actions pinned to major tags (checkout@v4, setup-go@v5);
+  SHA-pinning noted as an owner hardening. **PROCESS ARTIFACT, not a Go fitness function** — this is the
+  one MVP unit whose "green" is the workflow's own gate passing, NOT a `go test` guard/mutant pair (as
+  flagged when the unit was queued). Verified by parsing the YAML (via Ruby's `psych`; pyyaml absent)
+  and asserting the four gate commands run on both OSes, triggers/perms/matrix/Go-pin are as intended.
+  **Prerequisite finding:** `gofmt -l` flagged three already-committed files (`fault_test.go` trailing-
+  comment column alignment; `isolate.go`/`sync.go` numbered-list doc comments whose tab-indented
+  continuation lines gofmt 1.19+ reflows) — fixed in the preceding `style:` commit, since a `gofmt -l`
+  gate cannot be green on a tree gofmt would rewrite. Decision **#CI** recorded below. Remaining for MVP
+  M0–M3: sub-unit (b) `.goreleaser.yaml` + (c) Homebrew tap.
 
 - **M3 · `cmd/wi/main.go` — the single process entry; the `wi` BINARY now runs end-to-end** (`main.go` +
   `main_test.go`, guard `CMD-MAIN`). The ONLY `main` package and the ONLY `os.Exit` site in the tree:
@@ -987,18 +1008,20 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 - **DONE — `cmd/wi/main.go`** (guard `CMD-MAIN`, see Done): the single process entry / only `os.Exit`
   site, wiring cwd→layout→real `Deps`→`BuildRegistry`→`Dispatch` through the testable `run` seam. The `wi`
   binary now runs the full command surface end-to-end (smoke-verified).
-- **NEXT (and the LAST MVP unit) — release scaffolding: CI + `.goreleaser.yaml` + Homebrew tap.** This is
-  the M3 tail in IMPLEMENTATION_PLAN. Smallest-cohesive-unit decomposition, one per firing: (a) a GitHub
-  Actions **CI workflow** (`.github/workflows/ci.yml`) running `go build ./... && go test ./... && go vet`
-  (+ `gofmt -l` gate) on push/PR — the same green gate every firing already enforces locally, now
-  mechanized; (b) **`.goreleaser.yaml`** (cross-compile `cmd/wi` for darwin/linux × amd64/arm64, archives,
-  checksums, a `builds`+`archives`+`release` block) — note goreleaser config is DATA, not Go, so its
-  "fitness" is `goreleaser check` in CI rather than a Go test; (c) the **Homebrew tap** stanza
-  (`brews:`/a formula template) so `brew install` works. OPEN per §7: the exact release trigger (tag-push
-  vs manual) + tap repo name are owner-flavored — adopt the documented recommendation (tag-push `v*`,
-  tap `ggkguelensan/homebrew-tap`) and record it. Completing (a)–(c) green = full MVP (M0–M3) = a STOP
-  condition (CI is a process artifact, not a Go fitness function, so this is the one MVP unit whose
-  "green" is the workflow passing, not a `go test` guard — flag clearly when reached).
+- **DONE (this firing) — release scaffolding sub-unit (a): the CI gate workflow** (`.github/workflows/
+  ci.yml`, decision #CI; preceded by a `style:` commit making the tree gofmt-clean — a prerequisite, see
+  Done). Runs `gofmt -l`+`go build`+`go vet`+`go test` on push (`main`+`build/wi`) and PR, matrix
+  `[ubuntu, macos]`, Go pinned from go.mod. Process artifact (no Go guard/mutant); verified by parsing
+  the YAML and asserting the four gate commands.
+- **NEXT — release scaffolding sub-unit (b): `.goreleaser.yaml`.** Cross-compile `cmd/wi` for
+  darwin/linux × amd64/arm64 with a `builds`+`archives`+`checksum`+`release` block. goreleaser config is
+  DATA, not Go, so its "fitness" is `goreleaser check` (add a `release` job to ci.yml that runs it, OR a
+  standalone validation) — NOT a Go test. **Adopt the §7-recommended owner-flavored choices and record
+  them: release trigger = tag-push `v*`; `version: 2` schema; pin the `brews`/goreleaser action major
+  (`~> v2`), cask rejected (PLAN §6).** Then (c) the **Homebrew tap** stanza (`brews:` block targeting
+  tap repo **`ggkguelensan/homebrew-tap`**) so `brew install` works. **Completing (b)+(c) green = full
+  MVP (M0–M3) = a STOP condition** — say so plainly and stop. NB both (b) and (c) are config DATA, not
+  Go fitness functions (like (a)); their "green" is `goreleaser check` passing, not a `go test` guard.
 - Deferred follow-ons (pull in when a command drives them): `isolate.New` **resume** (on re-run skip
   repos already `StageCreated`); per-repo **base persisted in `state`** (lets `resolve` populate
   `branch` instead of v0's empty); state **KV + `cas`** (`--expected __ABSENT__`).
@@ -1066,6 +1089,26 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CMD-MAIN | in `run` (cmd/wi) `_ = code; return contract.ExitOK` instead of `return code` → run swallows Dispatch's computed exit and always exits 0 → `TestRunUnknownCommandExitsUsage` RED (got 0, want 64), while `TestRunInitScaffoldsWorkspace` stays GREEN (init already exits 0) — isolates the mutant to exit-code propagation; alternate: hand `cli.Dispatch` an empty `Registry{}` instead of `BuildRegistry(deps)` → every command is unknown → `TestRunInitScaffoldsWorkspace` RED (no `.wi/` scaffolded, ok:false/usage not created) — pins that the REAL registry over a cwd-resolved root is wired |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
+
+- **#CI CI gate workflow shape — RESOLVED 2026-06-30** (not a §7 ruling; PLAN §6 risk register +
+  the §2 fitness-gate intent fix the spirit, not the YAML). `.github/workflows/ci.yml` runs the
+  green gate `gofmt -l` → `go build ./...` → `go vet ./...` → `go test ./...` (the same gate every
+  build firing runs locally) on `push` to `main`+`build/wi` and on every `pull_request`. **Matrix =
+  `[ubuntu-latest, macos-latest]`**: ubuntu gives a recent upstream git, macOS exercises Apple Git
+  (the PLAN §6 lag risk). A pinned **git-floor cell** (2.38, the `merge-tree --write-tree` floor) is
+  **deferred to the M5 capstone "portability CI matrix"** (PLAN Wave C / §1) — M3 needs only the
+  green gate on a representative pair, not the full portability sweep. **Go pinned from `go.mod`** via
+  `setup-go`'s `go-version-file` (one source of truth; no workflow/`go.mod` drift). **Golden suite is
+  fail-closed by construction** — plain `go test` never passes the harness's `-update` flag, so
+  goldens are asserted, never regenerated (PLAN §2 "CI refuses -update"); no special invocation
+  needed. Hygiene: least-privilege `permissions: contents: read`; `concurrency` cancel-in-progress
+  per ref; `strategy.fail-fast: false` (one OS's failure must not mask the other). Actions pinned to
+  **major tags** (checkout@v4, setup-go@v5); SHA-pinning is an available owner hardening, not adopted
+  for MVP. **This unit has NO Go fitness function** — it is a process artifact whose "green" is the
+  workflow's own gate passing; its fitness is the YAML parsing and the four gate commands being
+  present on both OSes (asserted at author time via Ruby `psych`, pyyaml being absent). It therefore
+  has no row in the mutant registry by design (a guard→mutant pair would require a Go test). The
+  `brews`-deprecated and goreleaser concerns (PLAN §6) attach to sub-units (b)/(c), still pending.
 
 - **#RD `isolate rm` outcome → envelope/exit mapping — RESOLVED 2026-06-30** (not a §7 ruling; DESIGN
   defines the exit table + the `orphan_unexplained` sub-code but pins no per-outcome mapping for the rm
