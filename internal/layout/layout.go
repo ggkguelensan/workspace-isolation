@@ -175,6 +175,13 @@ func (l Layout) Isolate(task, repo string) (string, error) {
 	return filepath.Join(l.IsolasDir(), task, repo), nil
 }
 
+// ValidateSegment reports an error if name is not a safe single path component,
+// applying the exact rule the path constructors enforce. It is exported so
+// sibling packages that derive filenames from user-supplied repo/task names
+// (notably internal/lock, whose keys become lock filenames) share this one
+// traversal-prevention chokepoint instead of duplicating it.
+func ValidateSegment(kind, name string) error { return validSegment(kind, name) }
+
 // validSegment rejects any string that is not a single, safe path component:
 // empty, "." / "..", containing a path separator (either flavor) or NUL, or
 // absolute. This is the chokepoint that prevents user-supplied repo/task names

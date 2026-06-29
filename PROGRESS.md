@@ -9,8 +9,9 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** M0 (contract spine) — in progress
-- **Wave:** A (contract spine, precedes all domain code)
+- **Milestone:** M0 building blocks complete (contract spine + layout + opid + clock + testenv +
+  lockfs + lock) → starting M1 (git child-process layer)
+- **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); into Wave B domain code
 
 ## Done
 
@@ -163,17 +164,35 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `O_TRUNC` write instead of temp+rename) confirmed `TestAtomicReplaceIsCrashSafe` RED (target torn to
   `"v2…"`), reverted → GREEN. flock advisory-lock half is a separate follow-up unit.
 
+- **M0 · `internal/lock` (lock-key namespace + total-order acquire)** — `keys.go` + `acquire.go`
+  (+ `keys_test.go`, `acquire_test.go`): the SOLE owner of wi's advisory lock-key namespace, built on
+  `lockfs.FileLock` (DESIGN §6.1). Closed namespace: `project-registry`, `repo:<name>` (the key sync
+  AND land both take — this is what linearizes their freshness race), `isolate-state:<task>`.
+  Constructors `ProjectRegistry()`/`Repo(name)`/`IsolateState(task)` route names through the new
+  exported `layout.ValidateSegment` (one shared traversal chokepoint — keys become lock filenames), and
+  a `Key` derives its own `.lock` path so callers never assemble lock paths. `Acquire(locksDir, keys…)`
+  folds the set into `orderedUnique` order (sorted+deduped) and TryLocks each non-blocking:
+  all-or-nothing — a held key rolls back the partial acquire and returns typed `*HeldError` (→ exit 6
+  `lock_held`), never blocks, never double-grants; `Held.Release()` frees in reverse, idempotent.
+  Guards: `LOCK-KEYS` (pinned canonical strings + path derivation + unsafe-name rejection),
+  `LOCK-ORDER` (`orderedUnique` is order-independent + dedups), `LOCK-MUTEX` (overlap refused with
+  `*HeldError` naming the key; partial-failure rollback proven via fresh re-acquire). All four mutants
+  confirmed RED: no-op sort comparator → `TestOrderedUnique…` RED; treat refused TryLock as success →
+  `TestAcquireRefusesOverlap` RED; skip rollback on refusal → `TestAcquireReleasesOnPartialFailure` RED;
+  `repo:`→`repository:` → `TestCanonicalKeyStrings` RED. Reverted → GREEN. Auto-lock-break self-heal
+  (§7.3) stays a separate M4 unit. **M0 building blocks are now complete** (contract spine + layout +
+  opid + clock + testenv + lockfs + lock).
+
 ## Next unit (pick this on the next firing)
 
-- **M0 · `internal/lock`** — the closed lock-key namespace + total-order multi-acquire built on
-  `lockfs.FileLock`. Define a closed set of lock *kinds* (e.g. project / repo:<name> / task:<name>)
-  mapping to file paths under `LocksDir()`; acquiring multiple locks at once MUST sort the keys into a
-  total order before locking so two processes grabbing the same set can never deadlock (classic
-  lock-ordering). Guard: a multi-acquire requested in opposite orders by two callers still serializes
-  (no deadlock, no double-grant); mutant = drop the sort → reverse-order acquire can interleave. Key
-  derivation likely wants the `validSegment` discipline from `layout`. Auto-lock-break self-heal stays
-  deferred to M4. After `internal/lock`, **M0 is essentially complete** → proceed to M1
-  `gitexec`/`git`/`mirror`.
+- **M1 · `internal/gitexec`** — the single typed wrapper around the `git` child process (DESIGN §M1,
+  §2.3). All git invocation funnels through here: build `*exec.Cmd` with the hermetic env discipline
+  (no prompts, no implicit network on offline paths), capture stdout/stderr/exit-code, return a typed
+  result/error. This is the chokepoint the no-hidden-network invariant is enforced at, and the seam the
+  later `git`/`mirror` packages build on. Guard: an offline-classified command makes ZERO network dials
+  (assert via a git transcript/`GIT_TRACE` or a deliberately-unreachable remote that must NOT be
+  contacted); mutant = let a network-touching arg through the offline path. Pairs with `internal/git`
+  (porcelain helpers incl. the SSOT `FastForwardBaseRef` update-ref-only path) and `internal/mirror`.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -194,6 +213,9 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | HEAL-ATOMIC-WRITE | replace `WriteFileAtomic`'s temp+rename with an in-place `O_TRUNC` write to the final path (still honoring `FaultBeforeRename`) → under the injected crash the target is torn to the new content → `TestAtomicReplaceIsCrashSafe` RED |
 | LAYOUT-BOOTSTRAP | skip the `WiSubdirs` loop in `Bootstrap` → a declared `.wi/` subdir is missing → `TestBootstrapCreatesSubtree` RED; drop `EvalSymlinks` in `Resolve` (`return New(root)`) → a symlinked root keeps its link component → `TestResolveNormalizesSymlinks` RED |
 | FLOCK-EXCLUDES | take the lock with `LOCK_SH` instead of `LOCK_EX` in `FileLock.TryLock`/`Lock` → two holders coexist → `TestFlockExcludesSecondHolder` + `TestLockBlocksUntilReleased` RED |
+| LOCK-KEYS | change a kind prefix (`repo:`→`repository:`, …) or the `.lock` suffix in `internal/lock/keys.go` → `TestCanonicalKeyStrings` / `TestKeyPathDerivation` RED |
+| LOCK-ORDER | make `orderedUnique` leave input order intact (no-op comparator) or skip the dedup → `TestOrderedUniqueIsTotalOrderAndDedups` RED |
+| LOCK-MUTEX | treat a refused `TryLock` (`!ok`) as acquired → `TestAcquireRefusesOverlap` RED; or skip `h.Release()` rollback on refusal → `TestAcquireReleasesOnPartialFailure` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
