@@ -9,13 +9,14 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** M1 nearly complete (git verbs / SSOT posture). M0 complete; `gitexec` runner+belt,
-  full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch / DivergedCounts), and **complete
-  `internal/mirror`** (cached freshness read/classify + `Refresh` fetch orchestration) landed. The
-  SSOT/mirror layer is done. Remaining M1: the module-wide `INV-NO-NETWORK` arch test in
-  `internal/invariants` (git-child egress belt asserted across all offline command paths), which closes
-  M1 → M2.
-- **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); into Wave B domain code
+- **Milestone:** **M1 COMPLETE** (git verbs / SSOT posture / no-network invariant). M0 complete;
+  `gitexec` runner+belt, full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch /
+  DivergedCounts), complete `internal/mirror` (cached freshness read/classify + `Refresh` fetch
+  orchestration), and the module-wide `INV-NO-NETWORK` architecture test (`internal/invariants`) all
+  landed and green. The SSOT/mirror layer and both DESIGN §2 architecture invariants (INV-NO-LLM +
+  INV-NO-NETWORK) are done. **Next: M2** — the domain command core (`config`, `state`, `isolate`,
+  `resolve`).
+- **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); into Wave B domain code (M2)
 
 ## Done
 
@@ -279,21 +280,51 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   stale tracking ref) confirmed RED on behind/stale/origin_base, reverted to GREEN. **`internal/mirror`
   is now complete** (Snapshot/Freshness/Store/Load read+classify + Refresh fetch).
 
-## Next unit (pick this on the next firing)
+- **M1 · `internal/invariants` · `INV-NO-NETWORK` (module-wide architecture test) — CLOSES M1** —
+  `nonetwork_test.go`: the architecture half of DESIGN §2 #3 (the gitexec `GITEXEC-OFFLINE-BELT` unit
+  proves the belt *works*; this proves the belt *cannot be bypassed*). `TestNoHiddenNetwork` walks the
+  module tree (skipping `.git`, non-`.go`, and `_test.go`), derives each file's slash-separated package
+  path, and — for every package NOT in `egressAllowed` — fails if it imports `os/exec` (can spawn a git
+  child) or references the `GIT_ALLOW_PROTOCOL` belt key. Uses **go/parser** (not grep), so the belt key
+  in a comment or this guard's own prose never false-positives; pure `scanFileForEgress(src)
+  (importsExec, refsBelt)` is driven directly by the non-vacuity test. **Allowlist decision (#N below):**
+  `{internal/gitexec, internal/testenv}` — gitexec is the runtime chokepoint that applies the belt;
+  testenv is the test-only git-fixture harness (a non-`_test.go` support pkg never reachable from
+  `cmd/wi`). Survey confirmed those are the only two source files importing `os/exec`, and
+  `GIT_ALLOW_PROTOCOL` appears only in gitexec. Guard `INV-NO-NETWORK` + self-test
+  `TestNoNetworkScannerIsNonVacuous` (scanner flags an `os/exec`-import source, flags a belt-key
+  string-literal source, and clears a clean source). **Two mutants demonstrated** (arch tests co-locate
+  detector+test, so RED-first is the mutate-demonstrate cycle, per the INV-NO-LLM precedent): empty
+  `egressAllowed` → `TestNoHiddenNetwork` RED (gitexec+testenv themselves trip, proving the walk + both
+  detectors fire on real source); `scanFileForEgress` always `(false,false)` → `TestNoNetworkScanner
+  IsNonVacuous` RED (a blind scanner is a silent false negative). Both reverted → full `go build/vet/test`
+  GREEN. **M1 is now COMPLETE** (gitexec belt + full git verbs + mirror + INV-NO-NETWORK).
 
-- **M1 · `internal/invariants` · `INV-NO-NETWORK` (module-wide architecture test).** The unit-level
-  half is already proven at the gitexec chokepoint (`GITEXEC-OFFLINE-BELT`); this is the architecture
-  tripwire that the belt is actually the ONLY way git is ever launched on offline paths. Approach
-  (mirror the `INV-NO-LLM` pattern in this package — a source-scanning arch test, no network needed):
-  assert that **`gitexec` is the sole package that constructs `exec.Command("git", …)`** (or otherwise
-  spawns a git child), and that **only `RunNetwork` is reachable from network-permitted verbs** while
-  every other git call goes through the belt-applying `Run`. Concretely: walk the `internal/` tree
-  (go/parser or a token scan), flag any `exec.Command`/`exec.CommandContext` whose first arg is `"git"`
-  outside `internal/gitexec`, and flag any use of `GIT_ALLOW_PROTOCOL` outside gitexec. Guard
-  `INV-NO-NETWORK`; non-vacuity: the scanner must flag a synthetic `exec.Command("git", "fetch")`
-  planted in a non-gitexec package (same self-test shape as `TestNoLLMScannerIsNonVacuous`). Decide the
-  exact scope rule (AST vs token; whether `RunNetwork` callers need an allowlist) at implementation
-  time and record it. **This closes M1.** Then M1 → M2 (`config`, `state`, `isolate`, `resolve`).
+## Next unit (pick this on the next firing) — M2 begins
+
+M2 (DESIGN §map: `config`, `state`, `isolate`, `resolve`) is the domain command core: committed
+manifest + runtime registry + isolate create/remove/repair + the resolve path bundle. Build order
+within M2: **`config` first** (everything downstream reads the manifest), then `state` (the registry +
+namespaced KV + cas), then `isolate`, then `resolve`.
+
+- **NEXT: M2 · `internal/config` · parse + validate `wi.config.jsonc` (read half).** `internal/config`
+  is the SOLE owner of the committed declarative manifest at `<root>/wi.config.jsonc` (DESIGN §1 line 19,
+  §map line 167: "parse/validate/AST-preserving edit of wi.config.jsonc (owns ONLY the file)"). Start
+  with the smallest cohesive unit: a typed `Config` (repos + defaults/policy) + a `Parse`/`Load` that
+  reads the JSONC manifest and validates it (closed/known keys, required fields, repo-name validity via
+  the shared `layout.ValidateSegment` chokepoint — repo names become path segments). **Open decision to
+  settle at impl time + record:** the JSONC parser — DESIGN says the file is `.jsonc` (JSON-with-comments)
+  and that `repo add` is a *pure, AST-preserving* manifest edit (§ line 204), so the eventual writer must
+  preserve comments/formatting. Decide whether to (a) take a JSONC dep (e.g. `tidwall/jsonc` to strip
+  comments for the read path + a separate AST-preserving writer later) or (b) hand-roll, weighing it
+  against the zero-new-deps posture established for lockfs (decision #6) and the INV-NO-LLM surface. The
+  AST-preserving *edit* half (for `repo add`) is a SEPARATE later unit — this unit is read+validate only.
+  Guard `CONFIG-PARSE` (golden manifest → expected typed `Config`; a malformed/unknown-key/bad-repo-name
+  corpus rejected; accept floor). Non-vacuity mutant: make validation always-accept (or the parser ignore
+  a field) → the reject corpus / golden RED.
+- Then **`state`** (registry per-repo + KV + `cas`; `UpdateRepoStage` after each worktree add for durable
+  partial success, DESIGN §line 252), **`isolate`** (worktree add + wi-owned marker ref), **`resolve`**
+  (path bundle). M2 completing unlocks M3 (`cli`/`help`/`suggest` + `cmd/wi` → MVP end-to-end).
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -318,6 +349,8 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | LOCK-ORDER | make `orderedUnique` leave input order intact (no-op comparator) or skip the dedup → `TestOrderedUniqueIsTotalOrderAndDedups` RED |
 | LOCK-MUTEX | treat a refused `TryLock` (`!ok`) as acquired → `TestAcquireRefusesOverlap` RED; or skip `h.Release()` rollback on refusal → `TestAcquireReleasesOnPartialFailure` RED |
 | GITEXEC-OFFLINE-BELT | drop `GIT_ALLOW_PROTOCOL=none` from `Run`'s overlay → an offline `ls-remote file://…` succeeds instead of being refused → `TestOfflineRefusesTransport` RED (unit-level half of INV-NO-NETWORK) |
+| INV-NO-NETWORK (architecture) | empty `egressAllowed` (or import `os/exec` / reference `GIT_ALLOW_PROTOCOL` in any non-allowlisted package) → `TestNoHiddenNetwork` RED (gitexec+testenv themselves trip, proving the walk + both detectors fire on real source) |
+| INV-NO-NETWORK (detector) | make `scanFileForEgress` always return `(false,false)` → `TestNoNetworkScannerIsNonVacuous` RED (a blind scanner would be a silent false negative) |
 | GITEXEC-CAPTURE | make `run` swallow a non-zero exit (return `nil` instead of `*ExitError`) → `TestRunSurfacesExitError` RED |
 | GIT-FF-ONLY | drop the `merge-base --is-ancestor` precheck in `FastForwardBaseRef` (update-ref unconditionally) → a divergent target advances the base ref → `TestFastForwardRefusesNonFastForward` RED (missing error + moved ref) |
 | GIT-CLONE-DETACHED | skip the `switch --detach` in `EnsureClone` (leave `<base>` checked out) → HEAD abbrev-ref is the branch name, not `"HEAD"` → `TestEnsureCloneDetachesAtBaseTip` RED |
@@ -337,6 +370,18 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   in the spec). The `stale` bool and the count are non-redundant — the count is `,omitempty` (absent at
   0), so `stale` is the stable field agents branch on. Never-fetched repo → `mirror.ErrNoSnapshot` →
   the `mirror_freshness` block is omitted entirely (≠ "fresh"). Recorded in DESIGN §5.
+
+- **#N INV-NO-NETWORK egress allowlist — RESOLVED 2026-06-30** (not one of the 7 §7 rulings; the
+  enforcement form of DESIGN §2 #3). The architecture guard permits `os/exec` import + `GIT_ALLOW_PROTOCOL`
+  reference only in `{internal/gitexec, internal/testenv}`. **gitexec** is the runtime chokepoint that
+  launches every git child and applies the belt; **testenv** is the test-only git-fixture harness — a
+  non-`_test.go` support package (so the `_test.go` skip doesn't cover it) that runs git directly via
+  `exec.Command`, but is never reachable from `cmd/wi`, so it never ships in a command path. A tree survey
+  confirmed those are the only two source files importing `os/exec`, and `GIT_ALLOW_PROTOCOL` appears
+  nowhere but gitexec. Scope rule: **go/parser AST scan** (not a token/grep scan) so the belt key inside a
+  comment or this guard's own prose can't false-positive; detection is import-of-`os/exec` + belt-key
+  string-literal, which is stricter and simpler than tracing `RunNetwork` reachability and needs no
+  caller allowlist. Recorded here + in the `nonetwork_test.go` header.
 
 - **#1 `capabilities[]` + warning-code token sets — RESOLVED 2026-06-29.** Capabilities v0 =
   `{help-json, resolve-block, dry-run, partial-success}` (pinned in `Capabilities()`). Warning-code
