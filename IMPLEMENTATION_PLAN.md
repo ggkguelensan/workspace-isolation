@@ -207,7 +207,8 @@ starts. Only `wi version` is wired (a stub proving the pipeline shape compiles).
    leaning roll-forward, but then an interrupted remove can't be undone by re-running. *Blocks: M2.*
 5. **SIGINT / exit-130 coverage** — add an explicit per-long-running-command SIGINT row (clean
    partial-state flush + exit 130 + well-formed envelope) or accept the SIGKILL-sweep folding.
-6. **Go libs sign-off** — adopt `gofrs/flock` + `google/renameio` (recommended) vs hand-rolled
-   `syscall.Flock` + manual fsync for zero deps. *Blocks: M0 (lockfs).*
+6. **Go libs sign-off** — **RESOLVED 2026-06-30 (split):** `WriteFileAtomic` hand-rolled (zero deps;
+   keeps the `WI_FAULT` crash-window seam in-tree for HEAL-ATOMIC-WRITE non-vacuity); flock half adopts
+   `gofrs/flock` at `flock_unix.go`. See DESIGN §6.2 + PROGRESS #6.
 7. **Supported git version window** — floor/ceiling, include next-rc cell? Determines the
    portability matrix and the doctor git-version-floor warning predicate.

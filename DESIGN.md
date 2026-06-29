@@ -226,7 +226,14 @@ lock happens **only** on a flock-trustworthy local filesystem with a proven-dead
 
 `internal/lockfs.WriteFileAtomic` is the **single** atomic writer reused by every `.wi/` writer
 (mirror, registry, state, land, ports, trust): write to a temp file in the same dir → `fsync` →
-`rename` (atomic on one fs) → `fsync` the parent dir. Eliminates the three-duplicate-writers smell.
+`chmod` to the caller's mode → `rename` (atomic on one fs) → `fsync` the parent dir. Eliminates the
+three-duplicate-writers smell.
+
+> **Decision #6 (Go libs, lockfs) — split ruling.** `WriteFileAtomic` is **hand-rolled** (no
+> `google/renameio`): owning the temp→rename boundary in-tree is what lets the `WI_FAULT`
+> fault-injection seam abort *exactly* in the crash window, which is how guard `HEAL-ATOMIC-WRITE`
+> proves crash-safety is non-vacuous — a library hides that seam. The advisory **flock** half adopts
+> `gofrs/flock` when `flock_unix.go` lands.
 
 ### 6.3 Partial-success durability
 

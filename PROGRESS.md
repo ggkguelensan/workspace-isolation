@@ -122,15 +122,28 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   was rejected as vacuous (same-second SHA collision); the absolute golden is the real pin. `RunWI`
   deferred to M3 (needs the built binary).
 
+- **M0 · `internal/lockfs` atomic writer** — `atomic.go` + `atomic_test.go`: `WriteFileAtomic(path,
+  data, perm)`, the SINGLE atomic writer every `.wi/` state writer reuses (DESIGN §6.2). Recipe:
+  `os.CreateTemp` in the SAME dir (rename stays intra-fs ⇒ atomic) → write → fsync → chmod to the
+  caller's mode (CreateTemp gives 0600; Chmod dodges umask) → close → `os.Rename` over the target →
+  `fsyncDir` the parent so the rename itself is durable. Failure paths remove the temp and leave the
+  target untouched. **First consumer of the `WI_FAULT` seam:** `FaultBeforeRename`
+  (`lockfs.before_rename`) aborts in the exact temp-written-but-not-renamed window. Guard
+  `HEAL-ATOMIC-WRITE` (plain `t.TempDir`, no git ⇒ no `testenv` needed): content+perm round-trip;
+  **crash-safety** — under the injected fault the target keeps its complete OLD content (never torn)
+  and no temp turds remain; two-sided floor that an un-faulted replace DOES apply. Mutant (in-place
+  `O_TRUNC` write instead of temp+rename) confirmed `TestAtomicReplaceIsCrashSafe` RED (target torn to
+  `"v2…"`), reverted → GREEN. flock advisory-lock half is a separate follow-up unit.
+
 ## Next unit (pick this on the next firing)
 
-- **M0 · `internal/lockfs` atomic writer** (`WriteFileAtomic`) — **open decision #6: RESOLVED →
-  adopt `google/renameio` for atomic replace + `gofrs/flock` for advisory locks** (record on first
-  use). Start with the atomic-write half (temp-in-same-dir + fsync + rename + parent-dir fsync) since
-  it's the SOLE `.wi/` writer (DESIGN §6.2) every state writer reuses; flock self-heal is a separate
-  follow-up unit. Guard via `testenv`: write a file, assert content + that no temp/partial siblings
-  remain; mutant (a fault-injected crash between temp-write and rename, via the `WI_FAULT` seam)
-  must leave NO torn file. Then layout `Bootstrap`+EvalSymlinks, `internal/lock`, then M1
+- **M0 · `internal/lockfs` flock half** (`flock_unix.go`) — advisory `flock(2)` to serialize
+  concurrent `wi` processes (PLAN §M0 line 166). Per decision #6 adopt `gofrs/flock` (cross-platform
+  advisory-lock wrapper); verify it adds no network behavior and no INV-NO-LLM token before
+  `go get`. Auto-lock-break is its own later unit (DESIGN §7.3: flock-trustworthy local fs + proven-
+  dead PID only) — do NOT bundle it. **Alternatively** take layout `Bootstrap`+EvalSymlinks first
+  (now unblocked by `testenv`; pure-stdlib, mkdir the `.wi/` subtree) if preferring zero new deps this
+  iteration. Then `internal/lock` (closed lock-key namespace + total-order multi-acquire), then M1
   `gitexec`/`git`/`mirror`.
 
 ## Mutant registry (guard → mutant that must turn it RED)
@@ -149,6 +162,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | OPID-FORMAT | change the time unit (`UnixMilli`→`Unix`), `randLen` (5→4), the `op_` prefix, or drop `strings.ToLower` → `TestNewFormat`/`TestValid` RED |
 | CLOCK-DETERMINISM | make `Fake.Rand` return `crypto/rand.Reader` → `TestFakeReproducible` RED; make `NewFake` ignore its seed → `TestFakeSeedSensitive` RED |
 | TESTENV-HERMETIC | drop the fixed `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` → seeded SHA ≠ `goldenBaseSHA` → `TestSeedOriginIsDeterministic` RED; drop `GIT_AUTHOR_NAME` injection → ambient username leaks → `TestHermeticIdentity` RED |
+| HEAL-ATOMIC-WRITE | replace `WriteFileAtomic`'s temp+rename with an in-place `O_TRUNC` write to the final path (still honoring `FaultBeforeRename`) → under the injected crash the target is torn to the new content → `TestAtomicReplaceIsCrashSafe` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
@@ -156,6 +170,17 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `{help-json, resolve-block, dry-run, partial-success}` (pinned in `Capabilities()`). Warning-code
   v0 = closed `{hydrate_skipped, base_behind_ssot}` (`AllWarningCodes()`), MVP-wired + offline-knowable
   only; staleness stays structured in `mirror_freshness.stale`. Recorded in DESIGN §8 + PLAN §7.
+
+- **#6 Go libs sign-off (lockfs) — RESOLVED 2026-06-30, as a SPLIT ruling.** The §7 recommendation
+  was "adopt `gofrs/flock` + `google/renameio`." Enacted with a deliberate override on the atomic-write
+  half: **`WriteFileAtomic` is hand-rolled (zero new deps)**, not `google/renameio`. Decisive reason —
+  this unit's entire fitness is crash-safety, which is *proven* by injecting `WI_FAULT` exactly between
+  the temp write and the rename; a library hides that boundary, so the non-vacuity mutant could not be
+  expressed. DESIGN's own §M0 file-list note already specifies the manual recipe (`temp + fsync +
+  chmod + rename + parent-fsync`), and §7 lists hand-rolled as the explicit alternative — so this is
+  enacting the spec, not deviating from it. The **flock** half keeps the recommendation: adopt
+  `gofrs/flock` when `flock_unix.go` lands (deferred to that unit; verify no network / no LLM token at
+  `go get` time). Owner may override either leg. Recorded in DESIGN §6.2 + PLAN §7.
 
 - **#A op_id encoding specifics — RESOLVED 2026-06-29** (DESIGN §3.1 fixed the skeleton
   `op_<base36ts>_<base32rand>` + `.<n>`; these fill the unspecified gaps). Time unit = Unix
