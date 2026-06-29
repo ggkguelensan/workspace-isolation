@@ -74,17 +74,29 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 - **Wave A is COMPLETE** (modulo `NORM-CORRECT`, intentionally deferred to Wave B): contract spine
   (enums/envelope/schema/fingerprint-lock), INV-NO-LLM, and the WI_FAULT/META-VACUITY methodology
   harness are all in and green. M0 now proceeds to its non-contract packages.
+- **M0 · `internal/layout` (path core)** — `layout.go` + `layout_test.go`: `Layout` is the SOLE
+  owner of every wi path (DESIGN §1, §4). `New(absRoot)` (cleans, requires absolute) + accessors
+  `Root/Config/ReposDir/IsolasDir/WiDir`, the seven `.wi/` subtree dirs
+  (`locks/state/log/mirrors/land/ports/trust` via one `WiSubdirs()` SSOT), and the input-bearing
+  `Repo/TaskDir/Isolate`. `validSegment` is the chokepoint blocking traversal: rejects
+  empty / `.` / `..` / path-separator (either flavor) / NUL / absolute, so user repo/task names
+  can't escape the tree. Guards `LAYOUT-PATHS` (hand-written golden relative paths — independent
+  copy of the scheme) + `LAYOUT-SAFE` (reject corpus + an accept floor). Mutants confirmed:
+  `isolas`→`isolate` → `TestPaths` RED; `validSegment`→always-nil → reject cases RED; →always-error
+  → accept floor RED. All reverted → GREEN. **Deferred to the post-`testenv` unit:** `Bootstrap`
+  (mkdir the `.wi/` subtree) + EvalSymlinks root normalization — both need an existing on-disk root,
+  so they wait for the real-FS `internal/testenv` harness (also M0).
 
 ## Next unit (pick this on the next firing)
 
-- **M0 · `internal/layout`** (open decision #2 territory is later; this is just paths) — the sole
-  owner of every wi path + `.wi/` bootstrap (DESIGN §1, §8 "path/.wi ownership"). A pure,
-  filesystem-free path calculator: given a project root + task + repo, derive `repos/<repo>`,
-  `isolas/<task>/<repo>`, the `.wi/` state subtree, log path, etc. Unit test pins the exact scheme
-  (golden path strings) + rejects unsafe inputs (path traversal `..`, absolute, empty task/repo).
-  Mutant: change a join/segment so a derived path drifts from the pinned golden → RED.
-- Then `internal/lockfs` (atomic writes — **needs open decision #6**: adopt `gofrs/flock` +
-  `google/renameio` per the documented recommendation), `internal/lock`, `cli/opid`.
+- **M0 · `internal/cli/opid`** — frozen op-id format `op_<base36ts>_<base32rand>` + `<parent>.<n>`
+  child suffix (PLAN §M0 file list). Pure + deterministic with an injected clock/rand source, so it
+  needs no FS harness — a good next small unit while `lockfs`/`testenv` (which need real files) wait.
+  Unit test pins the exact shape via regexp + determinism under a fixed seed; mutant: widen/misformat
+  the pattern → RED.
+- Then the FS-dependent M0 cluster: `internal/testenv` (real-git tmpdir harness) → `internal/layout`
+  Bootstrap+EvalSymlinks → `internal/lockfs` (atomic writes — **open decision #6**: adopt
+  `gofrs/flock` + `google/renameio`) → `internal/lock`.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -97,6 +109,8 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | INV-NO-LLM | introduce a denylisted LLM/agent-SDK module into `go.mod`/`go.sum` (or empty `llmDenylist`) → `TestNoLLMDependencies` / `TestNoLLMScannerIsNonVacuous` RED |
 | META-VACUITY | make `refSubject` ignore the fault (e.g. `if false && Active(refFaultID)`, or always return 42) so the under-fault subprocess passes → `TestMetaVacuity` RED ("harness is vacuous") |
 | (fault seam unit) | replace exact `strings.TrimSpace(f) == id` with `strings.Contains` in `activeIn` → the `{"foobar","foo"}` case of `TestActiveIn` RED |
+| LAYOUT-PATHS | change any segment literal (`"isolas"`→`"isolate"`, `"repos"`→…) or swap a join order in `layout.go` → `TestPaths` RED vs the hand-written goldens |
+| LAYOUT-SAFE | make `validSegment` always-nil → reject cases of `TestSegmentSafety` RED; always-error → the `ok-name_1` accept floor RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
