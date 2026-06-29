@@ -1,0 +1,44 @@
+# Release — cuts a GitHub release and publishes the Homebrew cask whenever a `v*` tag is pushed
+# (decision #GR/#HC). Separate from ci.yml: CI gates every push/PR with the green gate + `goreleaser
+# check`; THIS runs the real `goreleaser release` only on a version tag, so day-to-day pushes never
+# publish anything.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*" # e.g. v0.1.0, v1.2.3, v1.0.0-rc1 (the latter publishes as a prerelease — release.prerelease: auto)
+
+# goreleaser needs to create the GitHub release and upload archives in THIS repo.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: goreleaser release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # goreleaser refuses a shallow clone — it needs full history + tags for the changelog
+
+      - name: Set up Go (pinned from go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: false
+
+      - name: goreleaser release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2" # pin the major; never auto-upgrade (PLAN §6)
+          args: release --clean
+        env:
+          # In-repo release upload uses the auto-provided token.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Cross-repo push of the cask to ggkguelensan/homebrew-tap needs a PAT with `repo` scope:
+          # the default GITHUB_TOKEN cannot write another repository. OWNER ACTION REQUIRED — set this
+          # secret before the first tagged release, or goreleaser fails at the cask-publish step.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

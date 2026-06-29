@@ -76,3 +76,29 @@ release:
   draft: false
   prerelease: auto # a v*-rc / pre-release tag is published as a prerelease
   mode: replace
+
+# Homebrew tap (sub-unit c) — a CASK, not a formula (decision #HC). goreleaser HARD-deprecated
+# `brews` (formula) inside the `~> v2` range we pin (so PLAN §6's "pin the major to dodge the
+# deprecation, cask rejected" mitigation does not hold — `goreleaser check`, our fitness, FAILS on
+# `brews`), steering prebuilt-binary Homebrew distribution to `homebrew_casks`. Casks are macOS-only,
+# so `brew install --cask ggkguelensan/tap/wi` covers macOS; Linux users take the release tarballs
+# (or `go install`). On a real release goreleaser pushes the generated cask to the SEPARATE repo
+# ggkguelensan/homebrew-tap; the cross-repo push needs a PAT (the default Actions GITHUB_TOKEN can't
+# write another repo) — supplied via the HOMEBREW_TAP_GITHUB_TOKEN secret the release workflow passes
+# through. `goreleaser check` validates this block without the token (it doesn't execute templates).
+homebrew_casks:
+  - name: wi
+    repository:
+      owner: ggkguelensan
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: "https://github.com/ggkguelensan/workspace-isolation"
+    description: "Deterministic multi-repo workspace isolation for parallel coding agents"
+    # license: intentionally unset — the repo has no LICENSE yet (an owner legal decision).
+    #          Add a LICENSE file + set this to its SPDX id before the first tagged release.
+    skip_upload: auto # don't overwrite the stable cask from a snapshot or prerelease tag
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
