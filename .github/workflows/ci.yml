@@ -1,0 +1,68 @@
+# CI — the green gate every build iteration already enforces locally, now mechanized.
+# It runs `go build` + `go vet` + `go test` + a `gofmt -l` cleanliness check on every push
+# to the active branches and every pull request, so a contributor (human or agent) cannot
+# merge a tree that does not build, fails a fitness/unit test, or drifts from gofmt.
+#
+# Matrix rationale (DESIGN portability / PLAN §6 risk register): ubuntu-latest gives a recent
+# upstream git; macos-latest exercises Apple Git, which lags upstream and is the host most wi
+# users run on. The FULL portability matrix — a pinned git-floor cell (2.38, the
+# `merge-tree --write-tree` floor) — is intentionally deferred to the M5 capstone
+# "portability CI matrix" (PLAN Wave C); M3 only needs the green gate on a representative pair.
+#
+# The golden suite is fail-closed here by construction: plain `go test` never passes the
+# harness's `-update` flag, so goldens are asserted, never regenerated (PLAN §2 "CI refuses
+# -update"). Go is pinned from go.mod via setup-go's go-version-file, so the toolchain has a
+# single source of truth and cannot drift from the module's `go` directive.
+name: ci
+
+on:
+  push:
+    branches: [main, build/wi]
+  pull_request:
+
+# Least privilege: the gate only reads the checked-out tree.
+permissions:
+  contents: read
+
+# Supersede in-flight runs for the same ref so a rapid push sequence doesn't pile up.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: build · vet · test · gofmt
+    strategy:
+      fail-fast: false # report every OS's result; a macOS failure must not mask Linux (or vice versa)
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go (pinned from go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: false
+
+      - name: gofmt (no diffs allowed)
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt-clean — run 'gofmt -w .':"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "gofmt: clean"
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
