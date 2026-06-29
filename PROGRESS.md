@@ -19,10 +19,15 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `error.kind → exit-code` table `ExitCodeFor`, guard `SHAPE-FAIL-MATRIX`, + the sole `os.Exit` wrapper
   `Exit`), and `internal/cli.Emit` landed — the serialization chokepoint that writes EXACTLY ONE
   schema-valid envelope as a single compact line + newline, through the same `json.Marshal` path the
-  contract goldens are frozen against (guard `SHAPE-ONE-ENVELOPE`). **Next M3 units (bottom-up):** the
-  `--format text` lossless projection (`SHAPE-TEXT-PROJECTION`), the envelope ASSEMBLER (build a
-  `contract.Envelope` from a command result + op_id + capabilities, the piece feeding `Emit`), the
-  parse→dispatch tree + central error→envelope→exit wiring, per-command handlers
+  contract goldens are frozen against (guard `SHAPE-ONE-ENVELOPE`); and the `internal/cli` ASSEMBLER
+  landed — `Meta{OpID,Command,DryRun}` + the `Success`/`Failure` envelope constructors (sole owners of
+  the **ok ⟺ error==nil** coupling + the always-stamped `schema_version`/`capabilities`/op_id/command/
+  dry_run spine) + `ExitFor` (process exit as a pure function of the top-level error; `Blocked` is
+  exit-neutral; resolves decision **#D** — partial = top-level `error.kind=partial`→exit 2, and dry-run
+  exit-0 is honored by the planner leaving `Error` nil rather than a blanket override). Guards
+  `SHAPE-ASSEMBLE` + `SHAPE-DRYRUN-EXIT0`. **Next M3 units (bottom-up):** the `--format text` lossless
+  projection (`SHAPE-TEXT-PROJECTION`), the parse→dispatch tree + central error→envelope→exit wiring
+  (the Runner: `Command` iface → typed `*Result` → assemble → `Emit` → `ExitFor`), per-command handlers
   (`init`/`repo add`/`sync`/`isolate new`/`resolve`/`isolate rm`), `cmd/wi`, then CI + `.goreleaser.yaml`
   + Homebrew tap. Open decision to rule at the dispatch unit: cobra (PLAN text) vs hand-rolled stdlib
   `flag` — lean stdlib given the zero-dep posture (#6, #C), record then. Deferred enrichments pulled in
@@ -35,6 +40,26 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M3/B · `internal/cli` assembler — `Meta` + `Success`/`Failure` + `ExitFor`** (`assemble.go` +
+  `assemble_test.go`). The outcome→envelope→exit core that feeds `Emit`. `Meta{OpID, Command, DryRun}`
+  is the per-invocation context the Runner threads in; the unexported `spine(Meta)` stamps the
+  always-identical fields ONCE (`schema_version`=`contract.SchemaVersion`, `capabilities`=
+  `contract.Capabilities()`, op_id/command/dry_run) so handlers return plain structs and never touch the
+  wire. `Success(m, action, repos)` and `Failure(m, action, errPayload)` are the SOLE envelope
+  constructors — they enforce the **ok ⟺ error==nil** coupling at the only two call sites that can build
+  an envelope (Success → ok=true, nil error; Failure → ok=false, a stored *copy* of the error so the
+  caller can't alias-mutate it); additive blocks (`Resolve`/`Planned`/`Blocked`) + `Warnings`/`Next` are
+  command-specific and set by the caller on the returned value (they don't bear on the coupling).
+  `ExitFor(env)` derives the process code as a **pure function of the top-level error** — nil → exit 0;
+  else `exitcontract.ExitCodeFor(env.Error.Kind)` (the single §3.2 authority, so `partial`→2 falls out
+  for free). It deliberately does NOT consult `Blocked` or `DryRun`. Resolves decision **#D** (how
+  "every --dry-run → exit 0" is honored AND how partial success is represented). Guards `SHAPE-ASSEMBLE`
+  (Success/Failure couplings + always-set common fields) + `SHAPE-DRYRUN-EXIT0` (`ExitFor` couples
+  error→code via the matrix incl. partial→2, a populated `Blocked` is exit-neutral, and a genuine
+  top-level error on a dry-run is NOT swallowed to 0). Both mutants demonstrated RED-then-reverted:
+  `Success` sets `ok=false` → the coupling assertion RED; `ExitFor` returns `ExitRefused` when
+  `len(Blocked)>0` → the dry-run-with-blocked exit-neutrality assertion RED. Full `go build ./… &&
+  go vet ./… && go test ./…` GREEN (19 packages).
 - **M3/B · `internal/cli.Emit` — the one-envelope serialization chokepoint** (`emit.go` +
   `emit_test.go`). `Emit(io.Writer, contract.Envelope) error` writes EXACTLY ONE envelope: a single
   compact JSON line + one trailing newline, and nothing else (DESIGN §3.1). It serializes through
@@ -501,26 +526,31 @@ part is the contract plumbing (one well-formed envelope per invocation, JSON def
 exit-code set, text as a lossless projection), NOT arg parsing — so build the contract spine of the
 CLI first, bottom-up, smallest cohesive unit each firing.
 
-- **NEXT — M3 · the central `error.kind → exit-code` mapper (`SHAPE-FAIL-MATRIX`).** The smallest,
-  most foundational M3 unit and a Wave-B write-first guard. A pure function mapping every
-  `contract.ErrorKind` to its `contract.ExitCode` per the DESIGN §3 failure matrix (exit 2 `partial`;
-  exit 4 `dirty_worktree`/`conflict`/`already_exists`; exit 5 `needs_approval`; exit 6 `lock_held` +
-  `mirror_stale`-on-land; etc.), plus the success exit 0. Likely lives in a new `internal/cli/exit`
-  package (or the `exitcontract` package Wave A names — the single chokepoint so there are no bare
-  `os.Exit` literals). Guard `SHAPE-FAIL-MATRIX`: an INDEPENDENT literal kind↔exit table (a second
-  source, like the enum double-entry) asserts every kind maps to the documented code AND the map is
-  total over `contract.AllErrorKinds()` (no kind unmapped, no extra). Mutant: perturb one pairing (e.g.
-  `lock_held`→4 instead of 6) → the matrix test reddens on that row; and/or drop a kind from the map →
-  totality check reddens. Pure, zero-I/O, no new deps.
-- **Then** the one-envelope emitter/assembler (build a `contract.Envelope` from a command result +
-  op_id + capabilities; marshal once to stdout; `SHAPE-ONE-ENVELOPE`), then the `--format text`
-  lossless projection (`SHAPE-TEXT-PROJECTION`), then the parse→dispatch tree + the central
-  error→envelope→exit wiring, then per-command handlers (`init`/`repo add`/`sync`/`isolate new`/
-  `resolve`/`isolate rm`), then `cmd/wi` main, then CI/release. **Open architectural decision to rule at
-  the dispatch unit:** cobra (named in the PLAN Wave-B text) vs hand-rolled stdlib `flag` — given the
-  established zero-dep posture (decisions #6, #C) and wi's small, fixed command surface, lean stdlib
-  `flag` + a tiny hand-rolled subcommand switch unless a concrete need for cobra emerges; record the
-  ruling then.
+Done so far in M3 (bottom-up): `exitcontract` (the `error.kind→exit-code` matrix `ExitCodeFor` + the
+sole `os.Exit` wrapper, `SHAPE-FAIL-MATRIX`), `cli.Emit` (one-envelope serialization, `SHAPE-ONE-ENVELOPE`),
+and the `cli` ASSEMBLER (`Meta` + `Success`/`Failure` + `ExitFor`, `SHAPE-ASSEMBLE`/`SHAPE-DRYRUN-EXIT0`).
+The pure contract spine of the CLI (assemble → serialize → exit) is now complete and green.
+
+- **NEXT — M3 · `--format text` lossless projection (`SHAPE-TEXT-PROJECTION`).** The human-facing
+  render of an already-assembled `contract.Envelope` — a PURE, path-scoped projection of the SAME struct
+  the JSON form serializes (DESIGN §3.1: text is a projection, never a re-read of git/state). Likely
+  `cli.RenderText(io.Writer, contract.Envelope) error` (or a `Render(w, env, format)` that dispatches
+  json|text, with json = `Emit`). It MUST be derivable purely from the envelope (no new I/O, no second
+  data source) so the two formats can never disagree. Guard `SHAPE-TEXT-PROJECTION`: every
+  agent-significant field present in the envelope (op_id, ok/action, each repo's path/stage, error
+  kind+message, blocked verdicts) appears in the text render — i.e. text is lossless w.r.t. the fields
+  an operator needs — and a success vs error vs partial render are distinguishable. Mutant: drop a field
+  from the text template (e.g. omit `error.kind`) → the "kind appears in text" assertion RED; or render
+  from a hardcoded string ignoring the envelope → the field-presence assertions RED. Pure, zero-I/O.
+- **Then** the parse→dispatch tree + the central error→envelope→exit wiring — the **Runner**: a
+  `Command` interface → typed `*Result` → `assemble` (`Success`/`Failure`) → `Emit`/`RenderText` →
+  `ExitFor`, threading `op_id`/`command`/`dry_run` via `Meta`. Then per-command handlers
+  (`init`/`repo add`/`sync`/`isolate new`/`resolve`/`isolate rm`) — each returns domain data, never an
+  envelope. Then `cmd/wi` main (the single `os.Exit` via `exitcontract.Exit`). Then CI + `.goreleaser.yaml`
+  + Homebrew tap. **Open architectural decision to rule at the dispatch unit:** cobra (named in the PLAN
+  Wave-B text) vs hand-rolled stdlib `flag` — given the established zero-dep posture (decisions #6, #C)
+  and wi's small, fixed command surface, lean stdlib `flag` + a tiny hand-rolled subcommand switch unless
+  a concrete need for cobra emerges; record the ruling then.
 - Deferred follow-ons (pull in when a command drives them): `isolate.New` **resume** (on re-run skip
   repos already `StageCreated`); per-repo **base persisted in `state`** (lets `resolve` populate
   `branch` instead of v0's empty); state **KV + `cas`** (`--expected __ABSENT__`).
@@ -568,6 +598,8 @@ CLI first, bottom-up, smallest cohesive unit each firing.
 | RESOLVE-BUNDLE | wire per-repo `mirror` to the worktree path (`mirror := worktree`) instead of `layout.Repo` in `resolve.Bundle` → the SSOT mirror equals the worktree, reddening both repos' `Mirror` assertions in `TestBundleProjectsRecordPaths` (proves Bundle distinguishes the `isolas/<task>/<repo>` worktree from the `repos/<repo>` SSOT clone); or `continue` on one repo (drop it from the loop) → the projected `Repos` count/second-repo assertions RED (proves every recorded repo is projected, in order) |
 | SHAPE-ONE-ENVELOPE | make `cli.Emit` write the envelope TWICE (a second `w.Write(b)`) → the stream carries two top-level JSON values → `TestEmitWritesExactlyOneEnvelope` RED (second `Decode` returns a document, not `io.EOF`); or drop the trailing `'\n'` (`w.Write` without `append(b,'\n')`) → `TestEmitTerminatesWithSingleNewline` RED |
 | SHAPE-FAIL-MATRIX | perturb one pairing in `exitcontract.exitByKind` (e.g. `KindLockHeld`→`ExitRefused`/4 instead of `ExitLocked`/6) → `TestExitCodeForMatchesFailureMatrix` RED on that kind's row vs the independent §3.2 literal copy; or drop a kind whose code collides with the defensive default (e.g. remove `KindInternal`, code 70 == `ExitCodeFor`'s unmapped default) → the value test stays GREEN but `TestExitCodeForIsTotalOverAllKinds` RED (MappedKinds no longer covers `AllErrorKinds`), proving the totality check is non-redundant with the value check |
+| SHAPE-ASSEMBLE | in `cli.Success` set `e.OK=false` (break the ok ⟺ error==nil coupling) → `TestSuccessEnvelopeCoupling` RED; or have the shared `spine` omit `Capabilities`/`SchemaVersion` (leave them zero) → `assertCommonFields` reddens in BOTH `TestSuccessEnvelopeCoupling` + `TestFailureEnvelopeCoupling` |
+| SHAPE-DRYRUN-EXIT0 | make `cli.ExitFor` return a refusal code when `len(env.Blocked)>0` (treat a would-block verdict as a refusal) → `TestExitForBlockedVerdictsAreExitNeutral` RED (blocked must be exit-neutral); the companion assertion that a genuine usage error on a `--dry-run` still maps to 64 guards against the over-correction (a blanket `if env.DryRun { return ExitOK }` would wrongly swallow it) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
@@ -647,6 +679,27 @@ CLI first, bottom-up, smallest cohesive unit each firing.
   newline is a terminator for line readers, not part of the JSON value. Pretty-printing, if ever wanted
   for human reading, is a `--format text`/pretty concern layered on top, never the machine default.
   Recorded in the `internal/cli` package doc + guard `SHAPE-ONE-ENVELOPE`.
+
+- **#D dry-run exit-0 mechanism + partial-success envelope representation — RESOLVED 2026-06-30** (not
+  one of the 7 §7 rulings; DESIGN §3.2 says "every --dry-run → exit 0" and lists `partial`→exit 2 but
+  does NOT state the envelope's `ok` value for a partial, whether `error.kind=partial` sits at top level,
+  or *how* dry-run exit-0 is achieved). Two coupled rulings, both embodied in `cli.ExitFor` being a
+  **pure function of the top-level error** (nil → 0; else `exitcontract.ExitCodeFor(kind)`):
+  - **Partial success** = `ok:false` + a **top-level `error.kind=partial`** + per-repo detail in
+    `repos[]`, → **exit 2** via the matrix. This is the only representation consistent with `partial`
+    being BOTH a closed `error.kind` AND a closed `ExitCode` mapped to each other (`exitcontract`,
+    decision none-needed — the table already pairs them) and with §6.3 (durable, resumable). `ok` is
+    false because the operation did not fully succeed; the kind field + `repos[]` carry which repos
+    completed. `Failure(m, ActionCreated, Error{Kind:KindPartial,…})` is the constructor a partial uses
+    (action stays the in-flight verb, the partial verdict rides in `error.kind`).
+  - **Dry-run exit-0** is achieved by the **planner discipline**, NOT a special case in `ExitFor`: a
+    dry-run that RAN puts its would-block verdicts in `Blocked[]` and leaves `Error` nil, so it falls
+    through to exit 0 — `Blocked` is exit-neutral. A blanket `if env.DryRun { return ExitOK }` was
+    REJECTED because it would wrongly swallow a genuine top-level error on a `--dry-run` invocation (e.g.
+    a usage error that stopped the command *before* any plan was produced must still exit 64). "Every
+    --dry-run → exit 0" is thus read as "every dry-run that produced a plan", which the nil-error path
+    delivers without `ExitFor` ever consulting `DryRun`. Recorded in the `internal/cli` package doc +
+    guards `SHAPE-ASSEMBLE`/`SHAPE-DRYRUN-EXIT0`.
 
 - **#N INV-NO-NETWORK egress allowlist — RESOLVED 2026-06-30** (not one of the 7 §7 rulings; the
   enforcement form of DESIGN §2 #3). The architecture guard permits `os/exec` import + `GIT_ALLOW_PROTOCOL`
