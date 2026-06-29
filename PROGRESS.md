@@ -87,13 +87,22 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   (mkdir the `.wi/` subtree) + EvalSymlinks root normalization — both need an existing on-disk root,
   so they wait for the real-FS `internal/testenv` harness (also M0).
 
+- **M0 · `internal/cli/opid` (op-id format)** — `opid.go` + `opid_test.go`: mints/validates the one
+  volatile envelope field (DESIGN §2/§3.1/§8). Root id `op_<base36ts>_<base32rand>` (ts = Unix
+  millis base36; rand = 5 bytes → 8 chars lowercase unpadded base32), child suffix `.<n>` (n≥1,
+  nests). `New(now, io.Reader)` is pure/deterministic (reads exactly `randLen`, errors on short read
+  — never truncates); `Child`; `Valid` over a frozen regex. **Decisions recorded** (#A below): ms
+  time unit, 5 random bytes, n≥1 no-leading-zero child index. Guard `OPID-FORMAT` pins the shape from
+  independent angles (zero-bytes→`"aaaaaaaa"` pins the base32 encoding; inverse `ParseInt(base36)`
+  pins base + ms unit; reject corpus + accept floor). Mutants confirmed: `UnixMilli`→`Unix`,
+  `randLen` 5→4, prefix `op_`→`wi_` all → RED. Reverted → GREEN.
+
 ## Next unit (pick this on the next firing)
 
-- **M0 · `internal/cli/opid`** — frozen op-id format `op_<base36ts>_<base32rand>` + `<parent>.<n>`
-  child suffix (PLAN §M0 file list). Pure + deterministic with an injected clock/rand source, so it
-  needs no FS harness — a good next small unit while `lockfs`/`testenv` (which need real files) wait.
-  Unit test pins the exact shape via regexp + determinism under a fixed seed; mutant: widen/misformat
-  the pattern → RED.
+- **M0 · `internal/clock`** (DESIGN §4 "injectable time / op_id randomness") — the tiny seam the CLI
+  Runner uses to feed `opid.New`: a `Clock` interface (`Now()` + a randomness reader) with a real
+  impl (`time.Now` + `crypto/rand`) and a deterministic `Fake` for golden tests. Pure, no FS — keeps
+  momentum while the FS cluster waits. Mutant: Fake that ignores its seed → determinism test RED.
 - Then the FS-dependent M0 cluster: `internal/testenv` (real-git tmpdir harness) → `internal/layout`
   Bootstrap+EvalSymlinks → `internal/lockfs` (atomic writes — **open decision #6**: adopt
   `gofrs/flock` + `google/renameio`) → `internal/lock`.
@@ -111,6 +120,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | (fault seam unit) | replace exact `strings.TrimSpace(f) == id` with `strings.Contains` in `activeIn` → the `{"foobar","foo"}` case of `TestActiveIn` RED |
 | LAYOUT-PATHS | change any segment literal (`"isolas"`→`"isolate"`, `"repos"`→…) or swap a join order in `layout.go` → `TestPaths` RED vs the hand-written goldens |
 | LAYOUT-SAFE | make `validSegment` always-nil → reject cases of `TestSegmentSafety` RED; always-error → the `ok-name_1` accept floor RED |
+| OPID-FORMAT | change the time unit (`UnixMilli`→`Unix`), `randLen` (5→4), the `op_` prefix, or drop `strings.ToLower` → `TestNewFormat`/`TestValid` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
@@ -118,6 +128,14 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `{help-json, resolve-block, dry-run, partial-success}` (pinned in `Capabilities()`). Warning-code
   v0 = closed `{hydrate_skipped, base_behind_ssot}` (`AllWarningCodes()`), MVP-wired + offline-knowable
   only; staleness stays structured in `mirror_freshness.stale`. Recorded in DESIGN §8 + PLAN §7.
+
+- **#A op_id encoding specifics — RESOLVED 2026-06-29** (DESIGN §3.1 fixed the skeleton
+  `op_<base36ts>_<base32rand>` + `.<n>`; these fill the unspecified gaps). Time unit = Unix
+  **milliseconds** (rough chronology + human-debuggable, distinct from s/ns). Random = **5 bytes**
+  → 8 chars lowercase unpadded standard base32 (`[a-z2-7]`); plenty of within-ms collision
+  resistance. Child index **n ≥ 1, no leading zero**; children nest (`.1.2`). op_id is not required
+  to be lexicographically sortable (uniqueness comes from the random half). Recorded in DESIGN §8 row
+  + `internal/cli/opid` doc comment.
 
 ## Conventions
 

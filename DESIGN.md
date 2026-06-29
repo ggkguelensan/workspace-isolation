@@ -306,6 +306,6 @@ can never cascade into a data-loss chain in one invocation.
 | initial clone | `git.EnsureClone` lazy on first `wi sync --repo r` |
 | `main_state` reference | local mirror base `refs/heads/<base>`; behind-origin = cached field |
 | reserved envelope fields | all `omitempty` in v0 (M0 struct + golden tests); capabilities gated to wired commands |
-| op_id format | `op_<base36ts>_<base32rand>`; child suffix `<parent>.<n>`; cli Runner logs one JSONL summary per op (git ops take no logger) |
+| op_id format | `op_<base36ts>_<base32rand>`; child suffix `<parent>.<n>`; cli Runner logs one JSONL summary per op (git ops take no logger). **v0 specifics (PROGRESS decision #A):** ts = Unix **ms** base36; rand = **5 bytes** → 8-char lowercase unpadded base32 `[a-z2-7]`; child `n ≥ 1` no leading zero, nests; not lexicographically sortable. |
 | isolate-new atomicity | stop-on-first-fail, durable-partial, exit 2, resumable |
 | land atomicity (`--atomic`) | validate-all-then-apply (`merge-tree` pre-check) in v1; post-apply surprise degrades to exit 2 |
