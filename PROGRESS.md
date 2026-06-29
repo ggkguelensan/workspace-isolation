@@ -57,16 +57,22 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   Reverted → GREEN. **Wave A contract spine is now structurally complete** (schema/struct/enums all
   guarded + locked); remaining Wave-A write-first items are INV-NO-LLM, META-VACUITY, NORM-CORRECT.
 
+- **M0/A · INV-NO-LLM** — `internal/invariants` (new package owning DESIGN §2 architecture guards).
+  `nollm_test.go` walks the module graph (`go.mod` + `go.sum`, the full transitive closure) and
+  fails if any curated LLM/agent-SDK token appears in a module path; pure `scanForDenylisted` +
+  cwd-walk-up `moduleRoot`. `TestNoLLMScannerIsNonVacuous` exercises the same detector on a synthetic
+  `go-openai` line. Real-source mutant (appended a `// ...go-openai` comment to `go.mod`) confirmed
+  `TestNoLLMDependencies` RED (flagged `[openai go-openai]`), reverted via `git checkout` → GREEN.
+
 ## Next unit (pick this on the next firing)
 
-- **M0/A · INV-NO-LLM** — module-graph denylist guard (DESIGN §2): a test that walks the module
-  graph (parse `go.mod` require block, or `go list -deps`) and fails if any known LLM/agent SDK
-  import path appears. Cheap, closes a §2 invariant, finishes another Wave-A write-first item.
-  Mutant: feed a denylisted path into the checker's scanned corpus → RED.
-- Then `META-VACUITY` (meta-guard asserting every registered (guard→mutant) pair genuinely flips
-  RED). `NORM-CORRECT` (path-scoped golden normalizer) is better deferred to Wave B when there is
-  path-bearing CLI output to normalize.
-- Then the remaining M0 packages: `internal/layout` (paths + `.wi/` bootstrap), `internal/lockfs`
+- **M0/A · META-VACUITY** — a meta-guard that mechanically asserts the (guard→mutant) registry is
+  honest: for each registered pair, applying the mutant must turn its guard RED. Likely realized as a
+  build-tag/`WI_FAULT` harness the test toggles, or a documented-and-checked registry table. Closes
+  the last methodology guard of Wave A. (`NORM-CORRECT`, the path-scoped golden normalizer, stays
+  deferred to Wave B when there is path-bearing CLI output to normalize.)
+- Then the first non-contract M0 package: `internal/layout` (all paths: `repos/`, `isolas/<task>/<repo>/`,
+  `.wi/` subtree + bootstrap) — needs a unit test pinning the path scheme. After that `internal/lockfs`
   (atomic writes — needs open decision #6), `internal/lock`, `cli/opid`.
 
 ## Mutant registry (guard → mutant that must turn it RED)
@@ -77,6 +83,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | SHAPE-ENVELOPE-INVARIANTS | add `,omitempty` to `Envelope.Error`, or drop the nil→`[]` coercion for repos/capabilities/warnings/next in `MarshalJSON` |
 | SHAPE-SCHEMA | set top-level `additionalProperties:true` (or drop `error` from `required`, or widen a closed enum) in `schema/envelope.schema.json` → `TestSchemaRejectsInvalid` RED |
 | SHAPE-FINGERPRINT | rename/retype/reorder any `Envelope` (or nested) field, or edit the schema bytes, without regenerating `contract.lock.json` → `TestContractFrozen` RED |
+| INV-NO-LLM | introduce a denylisted LLM/agent-SDK module into `go.mod`/`go.sum` (or empty `llmDenylist`) → `TestNoLLMDependencies` / `TestNoLLMScannerIsNonVacuous` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
