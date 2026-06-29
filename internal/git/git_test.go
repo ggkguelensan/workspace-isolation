@@ -431,3 +431,75 @@ func TestAddWorktreeIsDetachedLinkedAndShared(t *testing.T) {
 		t.Errorf("SSOT dirty after worktree add; it must stay pristine")
 	}
 }
+
+// Guard GIT-OWNED-REF — evidence-positive ownership marker (DESIGN §7.1, decision #2).
+//
+// CreateOwnedRef records that wi created the (task, repo) worktree by writing the
+// marker ref refs/wi/owned/<task>/<repo> at the worktree's sha; OwnedRefSHA reads
+// it back. This marker is the POSITIVE evidence reclamation requires (DESIGN §7.1):
+// a worktree or branch is reclaimable only if such a ref proves wi owns it — an
+// unexplained orphan with no marker is a HARD BLOCK, never auto-pruned.
+//
+// Two load-bearing properties (decision #2 — a git ref chosen over a note/reflog):
+//
+//	(1) the marker lives under refs/wi/*, NOT refs/heads/* — so its commit stays
+//	    gc-reachable (a ref protects its object) yet it is NOT a branch, so it never
+//	    appears as a stray branch violating the SSOT-pristine invariant (DESIGN §5);
+//	(2) creation is atomic (a single update-ref) and the read cleanly distinguishes
+//	    a genuinely absent marker (exists=false, nil error) from a real read error.
+//
+// Non-vacuity: create the marker under refs/heads/ instead of refs/wi/ (flip the
+// namespace in ownedRef) → the marker becomes a stray branch: refs/wi/owned/ is
+// empty while refs/heads/ grows a second ref → both the "lives under refs/wi at the
+// sha" and the "no stray branch" assertions RED. This is the faithful mutant because
+// the refs/wi-vs-refs/heads namespace IS precisely what decision #2 buys (gc-
+// protection without leaking a branch). (A no-op CreateOwnedRef additionally reddens
+// the round-trip absent→present, proving the verb does real work.)
+
+func TestOwnedRefMarksOwnershipUnderRefsWi(t *testing.T) {
+	env := testenv.New(t)
+	origin := env.SeedOrigin(t, "acme")
+	ssot := filepath.Join(env.Root, "ssot")
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	if err := g.EnsureClone(ctx, ssot, "file://"+origin, testenv.DefaultBranch); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+	baseTip := env.Git(t, ssot, "rev-parse", "refs/heads/"+testenv.DefaultBranch)
+	const task, repo = "taskx", "acme"
+
+	// Absent before: the read verb cleanly reports "no marker recorded", not an error
+	// (the common case reclamation inspects on an orphan).
+	if sha, exists, err := g.OwnedRefSHA(ctx, ssot, task, repo); err != nil || exists {
+		t.Fatalf("OwnedRefSHA before create = (%q, %v, %v), want (\"\", false, nil)", sha, exists, err)
+	}
+
+	if err := g.CreateOwnedRef(ctx, ssot, task, repo, baseTip); err != nil {
+		t.Fatalf("CreateOwnedRef: %v", err)
+	}
+
+	// Present after, at the recorded sha — read back through the verb...
+	sha, exists, err := g.OwnedRefSHA(ctx, ssot, task, repo)
+	if err != nil {
+		t.Fatalf("OwnedRefSHA after create: %v", err)
+	}
+	if !exists || sha != baseTip {
+		t.Errorf("OwnedRefSHA after create = (%q, %v), want (%q, true)", sha, exists, baseTip)
+	}
+
+	// ...and the marker really lives under refs/wi/owned/ at that sha (verified with
+	// raw git, not the verb under test).
+	rawOwned := env.Git(t, ssot, "for-each-ref", "--format=%(objectname)", "refs/wi/owned/"+task+"/"+repo)
+	if rawOwned != baseTip {
+		t.Errorf("refs/wi/owned/%s/%s = %q, want the worktree sha %q", task, repo, rawOwned, baseTip)
+	}
+
+	// The marker is NOT a branch: refs/heads/ still holds only the base ref, so the
+	// SSOT never grows a stray branch — the marker is gc-protected via refs/wi/* alone.
+	branches := env.Git(t, ssot, "for-each-ref", "--format=%(refname)", "refs/heads/")
+	if want := "refs/heads/" + testenv.DefaultBranch; branches != want {
+		t.Errorf("refs/heads/ = %q, want only %q (marker must not leak a branch)", branches, want)
+	}
+}

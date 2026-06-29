@@ -199,8 +199,13 @@ starts. Only `wi version` is wired (a stub proving the pipeline shape compiles).
    `Capabilities()`). Warning-code v0 = closed `{hydrate_skipped, base_behind_ssot}` (`AllWarningCodes()`),
    limited to MVP-wired, offline-knowable codes; staleness stays in structured `mirror_freshness.stale`,
    not a warning. Both double-entry-guarded; grow only with a schema bump.
-2. **Marker-ref mechanism** — `refs/wi/owned/<task>/<repo>` (git ref) chosen over note/reflog for
-   atomic creation + gc-protection. Confirm vs a `.wi/index` backref. *Blocks: M2 (marker at add).*
+2. ~~**Marker-ref mechanism**~~ — **RESOLVED 2026-06-30.** `refs/wi/owned/<task>/<repo>` (git ref)
+   chosen over note/reflog AND over a `.wi/index` backref: a ref gives atomic creation (one
+   `update-ref`) and gc-protection (the ref keeps its commit reachable) while living under `refs/wi/*`,
+   NOT `refs/heads/*`, so it never appears as a stray branch in the pristine SSOT (DESIGN §5). A
+   `.wi/index` backref was rejected — it would be a second, non-atomic source of truth that could
+   drift from git's own ref store and is not gc-aware. Implemented as `git.CreateOwnedRef` +
+   `git.OwnedRefSHA` (guard `GIT-OWNED-REF`). *Blocked: M2 (marker at add) — now unblocked.*
 3. **`boot_id` on darwin** — derive from `sysctl kern.boottime` (no `/proc`); confirm stability
    across sleep/wake and PID-reuse-guard soundness. *Blocks: M4 (lock liveness).*
 4. **isolate-remove recovery policy** — roll-forward (finish deletion) vs roll-back (restore);

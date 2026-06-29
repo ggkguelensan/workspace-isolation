@@ -126,6 +126,52 @@ func (g *Git) AddWorktree(ctx context.Context, ssotDir, worktreePath, rev string
 	return nil
 }
 
+// ownedRef is the wi-owned marker ref for (task, repo). Like FastForwardBaseRef's
+// "refs/heads/"+base, the namespace is wi convention encoded in exactly one place:
+// markers live under refs/wi/owned/ — a ref (so its commit stays gc-reachable) that
+// is NOT a branch (so it never appears as a stray branch in the pristine SSOT,
+// DESIGN §5).
+func ownedRef(task, repo string) string {
+	return "refs/wi/owned/" + task + "/" + repo
+}
+
+// CreateOwnedRef records wi's ownership of the (task, repo) worktree by atomically
+// creating the marker ref refs/wi/owned/<task>/<repo> at sha (a single update-ref).
+// This is the POSITIVE evidence reclamation requires (DESIGN §7.1, decision #2): a
+// worktree or branch is reclaimable only if such a marker proves wi created it; an
+// unexplained orphan with no marker is a hard block, never auto-pruned. A git ref
+// is chosen over a note/reflog precisely because it gives atomic creation and gc-
+// protection (the ref keeps its commit reachable) while staying out of the branch
+// namespace. It is a local operation. task/repo are wi-internal and already
+// segment-validated by the caller before they reach here — this package holds no
+// path policy, exactly as base is the caller's concern in FastForwardBaseRef.
+func (g *Git) CreateOwnedRef(ctx context.Context, ssotDir, task, repo, sha string) error {
+	ref := ownedRef(task, repo)
+	if _, err := g.r.Run(ctx, ssotDir, "update-ref", ref, sha); err != nil {
+		return fmt.Errorf("git: create owned ref %s -> %s in %s: %w", ref, sha, ssotDir, err)
+	}
+	return nil
+}
+
+// OwnedRefSHA reports the sha the marker ref refs/wi/owned/<task>/<repo> points at
+// and whether it exists, cleanly distinguishing a genuinely absent marker
+// (exists=false, nil error — the "no ownership recorded" case reclamation inspects
+// on an orphan) from a real read failure. It is a local, read-only operation:
+// `rev-parse --verify --quiet` emits the sha and exits 0 when the ref resolves, and
+// exits 1 with no output for a valid-but-absent ref.
+func (g *Git) OwnedRefSHA(ctx context.Context, ssotDir, task, repo string) (sha string, exists bool, err error) {
+	ref := ownedRef(task, repo)
+	res, runErr := g.r.Run(ctx, ssotDir, "rev-parse", "--verify", "--quiet", "--end-of-options", ref)
+	if runErr != nil {
+		var ee *gitexec.ExitError
+		if errors.As(runErr, &ee) && ee.Result.ExitCode == 1 {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("git: read owned ref %s in %s: %w", ref, ssotDir, runErr)
+	}
+	return strings.TrimSpace(res.Stdout), true, nil
+}
+
 // isRepo reports whether dir is an existing git repository. It guards the dir's
 // existence first so git is never spawned in a missing directory (which would
 // be an opaque start failure rather than a clean "not a repo").

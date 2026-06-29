@@ -10,11 +10,13 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 ## Current position
 
 - **Milestone:** **M2 in progress** (domain command core: `config`, `state`, `isolate`, `resolve`).
-  `internal/config` read+validate, `internal/state` per-isolate registry record, AND the
-  `git.AddWorktree` materialization primitive (first sub-step of `internal/isolate`) landed and green.
-  **Next: `internal/isolate`** — the marker-ref verb (`refs/wi/owned/<task>/<repo>`) then the N-repo
-  orchestration that drives `AddWorktree` + `state.UpdateRepoStage` per repo — then `resolve` (path
-  bundle). Likely state follow-ons (namespaced KV + `cas`) remain, pulled in when a command needs them.
+  `internal/config` read+validate, `internal/state` per-isolate registry record, AND the two
+  `internal/git` isolate primitives — `AddWorktree` (worktree materialization) + `CreateOwnedRef`/
+  `OwnedRefSHA` (the `refs/wi/owned/<task>/<repo>` ownership marker, decision #2 RESOLVED) — landed and
+  green. **Next: the `internal/isolate` package itself** — the N-repo orchestration that drives
+  `AddWorktree` + `CreateOwnedRef` + `state.UpdateRepoStage` per repo (stop-on-first-fail, durable
+  partial success) — then `resolve` (path bundle). Likely state follow-ons (namespaced KV + `cas`)
+  remain, pulled in when a command needs them.
   M0 + M1 complete: contract spine, layout, opid, clock, testenv, lockfs, lock, `gitexec` runner+belt,
   full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch / DivergedCounts), complete
   `internal/mirror`, and both DESIGN §2 architecture invariants (INV-NO-LLM + INV-NO-NETWORK).
@@ -370,6 +372,28 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   GREEN. (`--detach` is defense-in-depth: a SHA or fully-qualified ref already detaches; the flag keeps a
   short-branch-name caller detached too.)
 
+- **M2 · `internal/git` · `CreateOwnedRef` + `OwnedRefSHA` (evidence-positive ownership marker)** —
+  `git.go` + `git_test.go`: the wi-owned marker-ref verbs (decision #2, DESIGN §7.1), the second
+  sub-step of `internal/isolate`. **`CreateOwnedRef(ctx, ssotDir, task, repo, sha)`** atomically writes
+  `refs/wi/owned/<task>/<repo>` at sha (a single `update-ref`) — the POSITIVE evidence reclamation
+  requires: a worktree/branch is reclaimable only if such a marker proves wi created it; an unexplained
+  orphan with no marker is a HARD BLOCK, never auto-pruned. **`OwnedRefSHA(...)` → `(sha, exists, err)`**
+  reads it back via `rev-parse --verify --quiet`, cleanly distinguishing a genuinely absent marker
+  (`exists=false`, nil error — the "no ownership recorded" case reclamation inspects on an orphan) from a
+  real read failure (exit 1 + empty output ⇒ absent; the same `*gitexec.ExitError` exit-code idiom
+  `FastForwardBaseRef` uses). The namespace lives in one place (`ownedRef`), exactly as
+  `FastForwardBaseRef` owns `"refs/heads/"+base`; task/repo are caller-validated (this package holds no
+  path policy). The decisive property: markers live under `refs/wi/*`, NOT `refs/heads/*`, so the commit
+  is gc-reachable yet the marker is **not a branch** — the pristine SSOT never grows a stray branch
+  (DESIGN §5). Guard `GIT-OWNED-REF` (testenv SSOT, EnsureClone'd): absent-before via the verb; after
+  create the verb reads back the sha AND raw git confirms `refs/wi/owned/<task>/<repo>` == sha while
+  `refs/heads/` still holds ONLY the base ref (no leaked branch). Mutant (flip `ownedRef`'s namespace
+  `refs/wi/`→`refs/heads/`) confirmed RED on both the "lives under refs/wi at the sha" and the "no stray
+  branch" assertions (refs/wi/owned empty; refs/heads/ grew `wi/owned/taskx/acme`), while the round-trip
+  stayed GREEN — proving those two assertions, not the round-trip, carry the decision-#2 namespace
+  property. Reverted → full `go build/vet/test` GREEN. **Decision #2** (git ref over note/reflog AND over
+  a `.wi/index` backref) recorded below + marked RESOLVED in PLAN §7.
+
 ## Next unit (pick this on the next firing) — M2 continues
 
 M2 (DESIGN §map: `config`, `state`, `isolate`, `resolve`) is the domain command core: committed
@@ -379,14 +403,15 @@ within M2: `config` ✅ → `state` ✅ → **`isolate`** → `resolve`.
 - **M2 · `internal/isolate` · isolate create (the partial-success-critical command core).**
   `isolate new <task> [repos…]` materializes one worktree per declared repo off the SSOT base, recording
   progress in `internal/state` as it goes. Build order within the unit, smallest cohesive first: (1) ✅
-  the single-repo worktree-add verb `git.AddWorktree` (done, guard `GIT-WORKTREE`). **NEXT: (2) the
+  the single-repo worktree-add verb `git.AddWorktree` (done, guard `GIT-WORKTREE`). (2) ✅ **the
   wi-owned marker ref** `refs/wi/owned/<task>/<repo>` — a `git` verb (likely `CreateOwnedRef(ctx, ssotDir,
   task, repo, sha)` via `update-ref refs/wi/owned/<task>/<repo> <sha>`) recording evidence-positive
   ownership for reclamation (decision #2, DESIGN §7.1); these refs live under `refs/wi/*` (NOT
   `refs/heads/*`, so they are not "leaked branches" and are gc-protected). Smallest cohesive unit:
   the create verb + a read/exists verb, guarded by a fitness that the ref exists under `refs/wi/owned/…`
-  at the recorded sha and is absent before. Then **(3) the N-repo orchestration** that writes
-  `state.NewIsolateRecord` (all pending) BEFORE adding any worktree and calls
+  at the recorded sha and is absent before. ✅ DONE — `git.CreateOwnedRef` + `git.OwnedRefSHA`, guard
+  `GIT-OWNED-REF`, decision #2 RESOLVED. **NEXT: (3) the N-repo orchestration** (the `internal/isolate`
+  package itself) that writes `state.NewIsolateRecord` (all pending) BEFORE adding any worktree and calls
   `state.UpdateRepoStage(…, StageCreated)` **after each** add+marker. The orchestration is
   **stop-on-first-fail with durable, not-rolled-back completed repos** (DESIGN §6.3 durable partial
   success, exit 2, resumable) — `state` already proves the registry stays durable across a crash mid-flip;
@@ -431,6 +456,7 @@ within M2: `config` ✅ → `state` ✅ → **`isolate`** → `resolve`.
 | GIT-FETCH | make `Fetch` a no-op (return nil without running `git fetch`) → the remote-tracking ref stays at the old tip → `TestFetchAdvancesRemoteTrackingOnly` RED |
 | GIT-DIVERGED | swap the two `rev-list --left-right --count` columns in `DivergedCounts` (read ahead from `fields[1]`, behind from `fields[0]`) → `TestDivergedCountsAheadBehind` RED |
 | GIT-WORKTREE | materialize via a standalone `git clone <ssotDir> <path>` instead of `git worktree add --detach` in `AddWorktree` → the result checks out `main` (not detached) and has its own `.git` dir + object store (common-dir ≠ SSOT) → `TestAddWorktreeIsDetachedLinkedAndShared` RED on all three assertions (proves the guard verifies genuine linked-worktree sharing, not just a checkout) |
+| GIT-OWNED-REF | flip the namespace `refs/wi/`→`refs/heads/` in `ownedRef` → the marker becomes a stray branch: `refs/wi/owned/` is empty while `refs/heads/` grows a second ref → `TestOwnedRefMarksOwnershipUnderRefsWi` RED on both the "lives under refs/wi at the sha" and "no stray branch" assertions (the round-trip stays GREEN, isolating the decision-#2 namespace property; a no-op `CreateOwnedRef` additionally reddens the absent→present round-trip) |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |
@@ -483,6 +509,18 @@ within M2: `config` ✅ → `state` ✅ → **`isolate`** → `resolve`.
   comment or this guard's own prose can't false-positive; detection is import-of-`os/exec` + belt-key
   string-literal, which is stricter and simpler than tracing `RunNetwork` reachability and needs no
   caller allowlist. Recorded here + in the `nonetwork_test.go` header.
+
+- **#2 Marker-ref mechanism — RESOLVED 2026-06-30** (one of the 7 §7 open decisions). The
+  evidence-positive ownership marker reclamation requires (DESIGN §7.1) is a **git ref**
+  `refs/wi/owned/<task>/<repo>`, chosen over a git note/reflog AND over a `.wi/index` backref. A ref
+  gives **atomic creation** (a single `update-ref`) and **gc-protection** (a ref keeps its commit
+  reachable) while living under `refs/wi/*`, NOT `refs/heads/*` — so the marker is never a branch and
+  the pristine SSOT (DESIGN §5) never grows a stray branch. The `.wi/index` backref alternative was
+  rejected: it would be a second, non-atomic source of ownership truth that could drift from git's own
+  ref store and is not gc-aware (git wouldn't protect the referenced objects from a `gc --prune`).
+  Implemented as `git.CreateOwnedRef(ctx, ssotDir, task, repo, sha)` (write) + `git.OwnedRefSHA(...)`
+  (read, returning `(sha, exists, err)` with a clean absent case), guard `GIT-OWNED-REF`. Recorded here
+  + DESIGN §7.1 (already specified the ref) + PLAN §7 #2 (now struck through).
 
 - **#1 `capabilities[]` + warning-code token sets — RESOLVED 2026-06-29.** Capabilities v0 =
   `{help-json, resolve-block, dry-run, partial-success}` (pinned in `Capabilities()`). Warning-code
