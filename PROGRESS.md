@@ -9,16 +9,16 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** **M2 in progress** (domain command core: `config`, `state`, `isolate`, `resolve`).
-  `internal/config` read+validate, `internal/state` per-isolate registry record, the two `internal/git`
-  isolate primitives (`AddWorktree` + `CreateOwnedRef`/`OwnedRefSHA`), AND now **`internal/isolate.New`**
-  — the N-repo orchestration that drives `AddWorktree` + `CreateOwnedRef` + `state.UpdateRepoStage` per
-  repo under the `isolate-state:<task>` lock, stop-on-first-fail with durable, not-rolled-back completed
-  repos (DESIGN §6.3) — all landed and green. **Next: `resolve`** (the path bundle that projects an
-  isolate's repo paths into the `resolve` envelope block) — which COMPLETES M2 and unlocks M3
-  (`cli`/`help`/`suggest` + `cmd/wi` → MVP end-to-end). A `isolate.New` resume refinement (skip repos
-  already `StageCreated` on re-run) and likely state follow-ons (namespaced KV + `cas`) remain, pulled in
-  when a command needs them.
+- **Milestone:** **M2 COMPLETE** — the domain command core is fully landed and green: `internal/config`
+  (manifest read+validate), `internal/state` (per-isolate runtime registry + durable partial success),
+  `internal/isolate.New` (N-repo orchestration under the `isolate-state:<task>` lock, stop-on-first-fail
+  with durable, not-rolled-back completed repos, DESIGN §6.3), and `internal/resolve.Bundle` (the pure,
+  zero-I/O path-bundle projector behind `wi resolve`). The two `internal/git` isolate primitives
+  (`AddWorktree` + `CreateOwnedRef`/`OwnedRefSHA`) underpin isolate. **Next: M3 BEGINS** — `internal/cli`
+  (flag/arg parsing + the one-envelope-out dispatcher mapping domain results/errors to the closed
+  exit-code set), `help`, `suggest`, then `cmd/wi` (the binary) → MVP end-to-end. Deferred enrichments
+  pulled in when a command needs them: `isolate.New` resume (skip repos already `StageCreated`), per-repo
+  base persisted in `state` (populates `resolve`'s `branch`), and state KV + `cas`.
   M0 + M1 complete: contract spine, layout, opid, clock, testenv, lockfs, lock, `gitexec` runner+belt,
   full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch / DivergedCounts), complete
   `internal/mirror`, and both DESIGN §2 architecture invariants (INV-NO-LLM + INV-NO-NETWORK).
@@ -425,31 +425,58 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `go build/vet/test` GREEN. **Deferred:** `isolate.New` resume (on re-run, skip repos already
   `StageCreated` rather than re-adding and failing) is a small follow-on once `resolve`/CLI land.
 
-## Next unit (pick this on the next firing) — M2 continues
+- **M2 · `internal/resolve` · `Bundle` (the path-bundle projector) — COMPLETES M2** — `resolve.go` +
+  `resolve_test.go`: the data behind `wi resolve <task>` (and the `resolve` block isolate responses embed,
+  DESIGN §3.1, §map line 166). `Bundle(l, rec)` is a **PURE projection** of a `layout.Layout` + a
+  persisted `state.IsolateRecord` — **zero I/O** (no FS reads, no git, no network — stronger than mirror's
+  offline read path), so it is trivially offline. Every path comes from `internal/layout` (the sole path
+  owner — resolve assembles nothing): `isolate_root`=`TaskDir` (`isolas/<task>`), `state_dir`=`StateDir`
+  (`.wi/state`), `log`=`LogDir` (`.wi/log`); per repo (iterating `rec.Repos`, the isolate's actual
+  contents, in recorded order) `worktree`=`Isolate` (`isolas/<task>/<repo>`) and `mirror`=`Repo`
+  (`repos/<repo>`, the SSOT clone / local mirror of origin). The CLI owns `state.Load` + the
+  `ErrNoRecord`→`not_found` mapping; `Bundle` takes the loaded record so it stays a total, testable
+  function. Guard `RESOLVE-BUNDLE`: a 2-repo record projects to the exact hand-written golden paths
+  (built independently of the layout accessors, so a mis-wire is caught), in order; an empty record yields
+  a non-nil empty `Repos` (marshals as `[]`); a traversing repo name surfaces as a validation error.
+  **Two mutants demonstrated:** wire `mirror` to the worktree path instead of `layout.Repo` → both repos'
+  Mirror reddens (proves resolve distinguishes the `isolas/<task>/<repo>` worktree from the `repos/<repo>`
+  SSOT clone); drop a repo from the loop → count/second-repo reddens (proves every recorded repo is
+  projected). Both reverted → full `go build/vet/test` GREEN. **Decision #R** (resolve field semantics;
+  v0 `branch` empty because worktrees are detached) recorded below. **M2 is now COMPLETE** (config +
+  state + isolate + resolve); next is M3 — the CLI surface.
 
-M2 (DESIGN §map: `config`, `state`, `isolate`, `resolve`) is the domain command core: committed
-manifest + runtime registry + isolate create/remove/repair + the resolve path bundle. Build order
-within M2: `config` ✅ → `state` ✅ → `isolate` ✅ → **`resolve`** (the last M2 unit).
+## Next unit (pick this on the next firing) — M3 BEGINS (the CLI surface → MVP)
 
-- **M2 · `internal/resolve` · resolve path bundle (the last M2 unit, then M2 is COMPLETE).**
-  `wi resolve <task>` (and the data behind `isolate new`'s own response) projects an existing isolate's
-  per-repo worktree paths into the envelope's additive `resolve` block (`contract.ResolveBlock` /
-  `ResolveRepo`, already declared in `envelope.go`). Smallest cohesive unit: a pure projector that, given
-  a `layout.Layout` + a loaded `state.IsolateRecord` (via `state.Load`, so a never-created task →
-  `ErrNoRecord` → the CLI maps to a not-found error/`suggest`), emits each repo's resolved
-  `isolas/<task>/<repo>` absolute path + its recorded stage, WITHOUT dialing git or mutating anything
-  (read-only, offline — like `mirror`'s read path). Decide whether the worktree-existence check (stat the
-  path) belongs here or stays a CLI concern; lean toward: resolve reports what the registry says + the
-  computed path, and flags a repo whose path is missing on disk (registry says `created` but worktree
-  gone) so the agent sees drift. Fitness ideas: a `RESOLVE-PROJECTS` guard (a 2-repo created isolate →
-  block lists both with the exact `layout.Isolate` paths + stages; mutant = emit the SSOT `repos/<repo>`
-  path instead of the `isolas/<task>/<repo>` worktree path, or drop a repo). Honor: read-only, no network,
-  paths come only from `layout` (never hand-assembled). **M2 completing unlocks M3** (`cli`/`help`/
-  `suggest` + `cmd/wi` → MVP end-to-end).
-- Deferred isolate follow-on: `isolate.New` **resume** — on a re-run after a partial, skip repos already
-  `StageCreated` in the loaded record (Load-or-create the record instead of always Store-ing fresh)
-  rather than re-adding a worktree that already exists and failing. Small, pull in once `resolve`/CLI
-  exist to drive it end-to-end.
+M3 (DESIGN §3, IMPLEMENTATION_PLAN §M3 + Wave B) wires the green domain core through the uniform
+pipeline into the runnable `wi` binary: `internal/cli` (parse → dispatch → **one** envelope out →
+mapped exit), `help`, `suggest`, then `cmd/wi`, with CI + `.goreleaser.yaml` + Homebrew tap. The hard
+part is the contract plumbing (one well-formed envelope per invocation, JSON default, the closed
+exit-code set, text as a lossless projection), NOT arg parsing — so build the contract spine of the
+CLI first, bottom-up, smallest cohesive unit each firing.
+
+- **NEXT — M3 · the central `error.kind → exit-code` mapper (`SHAPE-FAIL-MATRIX`).** The smallest,
+  most foundational M3 unit and a Wave-B write-first guard. A pure function mapping every
+  `contract.ErrorKind` to its `contract.ExitCode` per the DESIGN §3 failure matrix (exit 2 `partial`;
+  exit 4 `dirty_worktree`/`conflict`/`already_exists`; exit 5 `needs_approval`; exit 6 `lock_held` +
+  `mirror_stale`-on-land; etc.), plus the success exit 0. Likely lives in a new `internal/cli/exit`
+  package (or the `exitcontract` package Wave A names — the single chokepoint so there are no bare
+  `os.Exit` literals). Guard `SHAPE-FAIL-MATRIX`: an INDEPENDENT literal kind↔exit table (a second
+  source, like the enum double-entry) asserts every kind maps to the documented code AND the map is
+  total over `contract.AllErrorKinds()` (no kind unmapped, no extra). Mutant: perturb one pairing (e.g.
+  `lock_held`→4 instead of 6) → the matrix test reddens on that row; and/or drop a kind from the map →
+  totality check reddens. Pure, zero-I/O, no new deps.
+- **Then** the one-envelope emitter/assembler (build a `contract.Envelope` from a command result +
+  op_id + capabilities; marshal once to stdout; `SHAPE-ONE-ENVELOPE`), then the `--format text`
+  lossless projection (`SHAPE-TEXT-PROJECTION`), then the parse→dispatch tree + the central
+  error→envelope→exit wiring, then per-command handlers (`init`/`repo add`/`sync`/`isolate new`/
+  `resolve`/`isolate rm`), then `cmd/wi` main, then CI/release. **Open architectural decision to rule at
+  the dispatch unit:** cobra (named in the PLAN Wave-B text) vs hand-rolled stdlib `flag` — given the
+  established zero-dep posture (decisions #6, #C) and wi's small, fixed command surface, lean stdlib
+  `flag` + a tiny hand-rolled subcommand switch unless a concrete need for cobra emerges; record the
+  ruling then.
+- Deferred follow-ons (pull in when a command drives them): `isolate.New` **resume** (on re-run skip
+  repos already `StageCreated`); per-repo **base persisted in `state`** (lets `resolve` populate
+  `branch` instead of v0's empty); state **KV + `cas`** (`--expected __ABSENT__`).
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -491,6 +518,7 @@ within M2: `config` ✅ → `state` ✅ → `isolate` ✅ → **`resolve`** (the
 | STATE-PERSIST | make `Store` divert the write (`p+".mutant"`) so `Load` can't find it → `TestRecordRoundTrips` RED; or make `UpdateRepoStage` skip its unknown-repo error (`found := true`) so flipping a non-existent repo wrongly succeeds → `TestUpdateRepoStageFlipsOneRepo` RED |
 | STATE-DURABLE | replace `lockfs.WriteFileAtomic` with `os.WriteFile` in `Store` (keep `lockfs` referenced so the assertion, not the compiler, reddens) → the injected `WI_FAULT=lockfs.before_rename` no longer aborts so the interrupted flip lands → `TestDurablePartialSuccess` RED |
 | ISOLATE-NEW | drop the stop-on-first-fail `return` in `isolate.New` (turn it into `continue`) → the loop materializes the repo AFTER the failed one → `TestNewStopsOnFirstFailWithDurablePartialSuccess` RED on the 3 "db not attempted" assertions (result stage, durable stage, on-disk worktree); or skip the upfront all-pending `state.Store` → the first repo's `UpdateRepoStage` finds no record (`state: no isolate record`) and no durable registry exists to resume from → both `TestNewMaterializesAllReposComplete` + `TestNewStopsOnFirstFail…` RED |
+| RESOLVE-BUNDLE | wire per-repo `mirror` to the worktree path (`mirror := worktree`) instead of `layout.Repo` in `resolve.Bundle` → the SSOT mirror equals the worktree, reddening both repos' `Mirror` assertions in `TestBundleProjectsRecordPaths` (proves Bundle distinguishes the `isolas/<task>/<repo>` worktree from the `repos/<repo>` SSOT clone); or `continue` on one repo (drop it from the loop) → the projected `Repos` count/second-repo assertions RED (proves every recorded repo is projected, in order) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
@@ -525,6 +553,22 @@ within M2: `config` ✅ → `state` ✅ → `isolate` ✅ → **`resolve`** (the
   they land with their feature at a documented bump. **Deferred:** the AST-preserving *edit* path (for
   `repo add`, DESIGN §line 204) and trailing-comma tolerance are a separate writer unit; this unit is
   read+validate only. Recorded in the `internal/config` package doc.
+
+- **#R `resolve` block field semantics — RESOLVED 2026-06-30** (not one of the 7 §7 rulings; the
+  schema + `envelope.go` declare the `resolve` block's fields as plain strings with NO field-level
+  intent). `wi resolve <task>` is a **PURE, zero-I/O projection** of a `layout.Layout` + a loaded
+  `state.IsolateRecord` — no config dependency, no git, no network, not even a filesystem read (stronger
+  than `mirror`'s offline read path). Field mapping: top-level `isolate_root` = `layout.TaskDir`,
+  `state_dir` = `layout.StateDir`, `log` = `layout.LogDir` (v0: the dir — no per-task log writer exists
+  yet); per repo `worktree` = `layout.Isolate` (the `isolas/<task>/<repo>` linked worktree), `mirror` =
+  `layout.Repo` (the `repos/<repo>` SSOT clone), `branch` = **`""`** because v0 isolate worktrees are
+  DETACHED (DESIGN §5 — no working branch to report). Every path is sourced from `internal/layout` (the
+  sole path owner), never hand-assembled; the CLI owns `state.Load` + mapping `ErrNoRecord` → a
+  `not_found` envelope, so `Bundle` stays a total testable function. **Deferred:** (a) populating
+  `branch` once a per-repo base is persisted in the state record; (b) drift detection (registry says
+  `created` but the worktree is gone on disk) — the contract has no field for it and `doctor`/drift is
+  M4, so `Bundle` does not stat paths. Guard `RESOLVE-BUNDLE`. Recorded in the `internal/resolve` package
+  doc.
 
 - **#N INV-NO-NETWORK egress allowlist — RESOLVED 2026-06-30** (not one of the 7 §7 rulings; the
   enforcement form of DESIGN §2 #3). The architecture guard permits `os/exec` import + `GIT_ALLOW_PROTOCOL`
