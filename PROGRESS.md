@@ -56,8 +56,16 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `isolate.New`, and maps `StatusComplete`→created / `StatusPartial`→the durable `(result,
   *CommandError{partial})` carrying per-repo `repos[]` (#D) / `*lock.HeldError`→lock_held; the first
   handler needing a `*git.Git` (added `Deps.Git`, wired in `BuildRegistry`). Guard `CMD-ISOLATE-NEW`.
-  What remains for MVP: the rest of
-  the per-command handlers (`sync`/`repo add`/`isolate rm`), each a `Command` returning a
+  **The fourth handler — `wi sync [<repo>…]` — has now landed too, with its domain core:** the
+  `internal/sync` package (`sync.Run` — per-repo, under `repo:<name>`,
+  `EnsureClone`→`Fetch`→`FastForwardBaseRef`→`mirror.Store`, CONTINUE-on-fail = decision #S; guard
+  `SYNC-RUN`; the first `internal/` package to drive `gitexec.RunNetwork` end-to-end), and the thin
+  `cmd_sync` handler over it (no operands → all declared repos; named → a subset; undeclared → not_found;
+  missing manifest → not_found+`wi init`; reads each manifest URL into the `RepoSpec`; projects per-repo
+  `synced`/`noop` + freshness; `StatusPartial`→durable `(result, *CommandError{partial, Action:synced})`;
+  per-repo `error.kind` deferred to the gitexec classifier = decision #K). Added a `Clock` field to `Deps`.
+  Guard `CMD-SYNC`. What remains for MVP: the last two
+  per-command handlers (`repo add`/`isolate rm`), each a `Command` returning a
   `*Result`/`*CommandError` over the green M0–M2 core (never an envelope, never an exit code) with a
   `BuildRegistry` factory binding its deps + validating its args; then `cmd/wi` main (build the real registry + `clock.System`, call `Dispatch`, the
   single `os.Exit` via `exitcontract.Exit`); then CI + `.goreleaser.yaml` + Homebrew tap. Deferred
@@ -762,11 +770,26 @@ cobra). **The entire generic CLI pipeline — argv → dispatch → outcome → 
 mapped exit — is now complete and green.** What remains for MVP is the per-command handlers that plug
 real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 
-- **DONE (this iteration):** `internal/sync` — the **sync domain core** `sync.Run` (guard `SYNC-RUN`).
-  Built as its own domain package (mirroring `internal/isolate`) rather than inline in the handler, so the
-  orchestration — per-repo, under `repo:<name>`, `EnsureClone`→`Fetch`→`FastForwardBaseRef`→`mirror.Store`,
-  CONTINUE-on-fail — is hermetically testable below the envelope machinery. The first `internal/` package
-  to drive `gitexec.RunNetwork` (clone+fetch) end-to-end. The thin `cmd_sync` handler is NEXT.
+- **DONE (this iteration):** `cmd_sync.go` — the **`wi sync [<repo>…]` handler** (guard `CMD-SYNC`), the
+  thin envelope projection over the now-green `sync.Run` core. Added a `Clock` field to `Deps` (sync is the
+  first handler that timestamps a snapshot) + the `"sync"` `BuildRegistry` line binding
+  `d.Layout`/`d.Git`/`d.Clock`. `newSyncCommand` does NO arg validation (no operands = all declared repos;
+  named operands checked against the manifest in `Run`). `Run` loads the manifest (missing →
+  not_found+`wi init`, malformed → usage — decision #H), `selectRepos` resolves operands (none → every
+  `cfg.Repo` in declaration order; first undeclared → not_found before any dial), maps to
+  `[]sync.RepoSpec{Name,URL,Base}` (proving the manifest URL is read — isolate new ignores it), drives
+  `sync.Run`, and projects each outcome → `RepoResult{Action:synced, Branch, SHA:Snapshot.LocalBaseSHA,
+  Mirror, Freshness}` with `StatusPartial`→durable `(result, *CommandError{partial, Action:synced})`
+  mirroring `cmd_isolate_new` (#D). **Per-repo-kind question settled:** every per-repo failure projects to
+  `kind=internal` for now (matching `projectRepoOutcome`'s precedent), with typed refinement
+  (`*git.NonFastForwardError`→conflict, `*lock.HeldError`→lock_held) DEFERRED to the gitexec stderr→kind
+  classifier so both sibling projections gain it uniformly rather than diverging — see decision #K.
+- **DONE (prior iteration, this run):** `internal/sync` — the **sync domain core** `sync.Run` (guard
+  `SYNC-RUN`). Built as its own domain package (mirroring `internal/isolate`) rather than inline in the
+  handler, so the orchestration — per-repo, under `repo:<name>`,
+  `EnsureClone`→`Fetch`→`FastForwardBaseRef`→`mirror.Store`, CONTINUE-on-fail — is hermetically testable
+  below the envelope machinery. The first `internal/` package to drive `gitexec.RunNetwork` (clone+fetch)
+  end-to-end.
 - **DONE (prior iteration):** `isolate new <task> <repo>…` — the marquee handler — guard
   `CMD-ISOLATE-NEW`; added `Deps.Git`. Resolves each requested repo against the manifest → `RepoSpec`
   (undeclared → not_found, missing manifest → not_found+`wi init`, malformed → usage = decision #H),
@@ -789,27 +812,20 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   → exit 64). Guard each with its own fitness test asserting ONLY the domain mapping (the generic
   `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/exit wiring), following
   `CMD-RESOLVE`/`CMD-INIT`/`CMD-ISOLATE-NEW`.
-  **Suggested next: the `cmd_sync.go` handler** — the thin envelope projection over the now-green
-  `sync.Run` core (the domain orchestration landed this iteration). Plan: `newSyncCommand(l, g, clk, args)`
-  factory takes 0+ repo names (none → all declared repos; a named repo not in the manifest → not_found —
-  resolved against `config.Load` BEFORE any dial, exactly like `isolate new`); add a `Clock` field to
-  `Deps` (sync is the first handler needing the clock for the snapshot timestamp) and the `"sync"`
-  `BuildRegistry` line binding `d.Layout`/`d.Git`/`d.Clock`. `syncCmd.Run`: `config.Load(l.Config())` —
-  missing manifest → not_found+`wi init`, malformed → usage (decision #H, same two-way split); map the
-  requested names (or all `cfg.Repos`) → `[]sync.RepoSpec{Name, URL, Base}`; call `sync.Run`; project the
-  `Result` onto `Result{Action:synced, Repos:[…]}` (a `projectSyncOutcome` mapping each `sync.RepoOutcome`
-  → `contract.RepoResult{Repo, Action:synced|noop, SHA:Snapshot.LocalBaseSHA, Mirror, Freshness:&Snapshot.Freshness()}`,
-  a per-repo `Error` on the failed repo), with `StatusPartial`→durable `(result, *CommandError{partial,
-  Action:synced})` mirroring `cmd_isolate_new`'s projection. **OPEN per-repo-kind question to settle in the
-  handler:** a `*git.NonFastForwardError` per-repo failure — map to `kind=conflict` (lean) vs a fresh kind;
-  a `*lock.HeldError` per-repo → `kind=lock_held`; everything else → `internal` (refine once the gitexec
-  stderr→kind classifier lands). The generic `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/
-  exit wiring, so guard `CMD-SYNC` asserts ONLY the domain mapping (drive THROUGH `BuildRegistry`'s factory,
-  hermetic `testenv`+git): synced repo → `synced` Result with the freshness block; unknown repo →
-  not_found; partial → durable `(result, *CommandError{partial})`. Then `repo add` (the deferred
-  AST-preserving config edit path lands HERE — read+mutate+atomically rewrite `wi.config.jsonc`, preserving
-  comments/formatting; lock `project-registry`), `isolate rm` (evidence-positive reclamation via
-  `refs/wi/owned/<task>/<repo>` — HARD BLOCK on an unexplained orphan, never auto-prune; DESIGN §7.1).
+  **Suggested next: the `cmd_repo_add.go` handler** (`wi repo add <name> <url> [--base <branch>]`) — the
+  unit where the deferred **AST-preserving config edit path** finally lands. Plan: a new
+  `config.Add(path, Repo)` (or `config`-package editor) that READS `wi.config.jsonc`, inserts the new repo
+  object into the `repos` array, and ATOMICALLY rewrites the file **preserving comments and formatting**
+  (the hand-rolled JSONC stripper is read-only — the edit path must NOT round-trip through
+  `encoding/json`, which would drop comments; insert textually into the existing byte stream). Take the
+  `project-registry` lock for the duration (registry mutation, serializes concurrent `repo add`s). Refuse
+  a duplicate name → `already_exists`; a missing manifest → not_found+`wi init`; a malformed manifest →
+  usage. The factory validates `<name>` through `layout.ValidateSegment` (a path segment) at parse time and
+  requires exactly `<name> <url>` (+ optional `--base`). Project onto `Result{Action:created, …}` (no
+  network, no repos[]). Guard `CMD-REPO-ADD` asserts: a clean add appends + preserves a sentinel comment;
+  a duplicate name → `already_exists`; the manifest is byte-stable except the inserted block. Then
+  `isolate rm` (evidence-positive reclamation via `refs/wi/owned/<task>/<repo>` — HARD BLOCK on an
+  unexplained orphan, never auto-prune; DESIGN §7.1).
 - **Then** `cmd/wi/main.go` — the single process entry: discover the root → build `Deps` +
   `clock.System`, `BuildRegistry`, call `cli.Dispatch`, and make the SOLE `os.Exit` via
   `exitcontract.Exit(code)`. Then CI + `.goreleaser.yaml` + Homebrew tap. Completing this chain = full
@@ -871,6 +887,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | RUN-PIPELINE | in `cli.envelopeFor` drop the durable-partial result-merge (`if false && r != nil { env.Repos = r.Repos … }`) → a partial no longer carries its per-repo detail → `TestExecutePartialCarriesReposAndExitsTwo` RED ("got 0 repos"); or make `Execute` ignore `ExitFor` and `return contract.ExitOK` → every non-zero-exit assertion (CommandError→3, partial→2, internal→70) RED |
 | CMD-ISOLATE-NEW | in `isolateNewCmd.Run`, on `res.Status == isolate.StatusPartial` return `(result, nil)` instead of `(result, *CommandError{Kind:partial})` → a partial is mis-reported as a clean success (no error, exit 0) → `TestIsolateNewDurablePartial` RED (`want *cli.CommandError, got <nil>`); or drop the unknown-repo `!ok` not_found branch (skip the `cfg.Lookup` check) → `TestIsolateNewUnknownRepoIsNotFound` RED (no error / wrong kind) |
 | SYNC-RUN | drop the `g.FastForwardBaseRef` call in `syncOne` (`if false {…}`, keep the snapshot built from `originSHA`) → after the origin advances the on-disk base ref is never moved → `TestSyncFastForwardsToNewOriginTip` RED (on-disk base frozen at the seed tip, not the new origin tip), while the fresh-materialize + continue-on-fail tests stay GREEN (isolates the mutant to the advance path); secondary: turn the per-repo loop's continue-on-fail into break/return-on-first-error → `TestSyncContinuesOnFailureAndReportsPartial` RED (the reachable repo after the failed one is never synced) |
+| CMD-SYNC | in `syncCmd.Run`, on `res.Status == syncpkg.StatusPartial` return `(result, nil)` instead of `(result, *CommandError{Kind:partial})` → a partial sync is mis-reported as a clean success (no error, exit 0) → `TestSyncHandlerDurablePartial` RED (`want *cli.CommandError, got <nil>`), while `TestSyncHandlerSyncsAllDeclaredRepos` stays GREEN (isolates the mutant to the partial-mapping path); alternate: drop the unknown-repo `!ok` not_found branch in `selectRepos` → `TestSyncHandlerUnknownRepoIsNotFound` RED (no error / wrong kind) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
@@ -910,6 +927,21 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   Status/Repos. Recorded in the `internal/sync` package doc; the `cmd_sync` handler will project
   `StatusPartial` onto a durable `(result, *CommandError{partial, Action:synced})` exactly as
   `cmd_isolate_new` does (decision #D).
+- **#K per-repo `Error.Kind` projection — RESOLVED 2026-06-30** (not a §7 ruling; forced by building
+  `cmd_sync`, where a continue-on-fail partial surfaces a per-repo `error` for each failed repo). **Every
+  per-repo failure projects to `kind=internal` for now, in BOTH sibling projections
+  (`projectRepoOutcome` for isolate new, `projectSyncOutcome` for sync) — typed refinement is DEFERRED to
+  the gitexec stderr→kind classifier, not done ad-hoc per handler.** Two of sync's per-repo failures ARE
+  cleanly typed today (`*git.NonFastForwardError` → semantically `conflict`, `*lock.HeldError` →
+  `lock_held`) and tempting to classify inline. Rejected because: (a) the gitexec stderr→kind classifier
+  is the single designated home for per-repo kind derivation and will cover ALL cases (including the
+  network/`remote_error` ones the type system can't reach) uniformly — a partial ad-hoc classification now
+  would create a two-tier scheme the classifier later has to un-pick; (b) the per-repo `error.kind` is
+  INFORMATIONAL detail nested in `repos[]` — it does NOT drive the exit code (the top-level `partial`
+  → exit 2 does), so mislabeling it `internal` is a fidelity gap, not a contract violation; (c) it keeps
+  the two sibling projections identical, so the classifier fixes both in one move. The deferred-follow-ons
+  list tracks "gitexec stderr→kind classifier"; when it lands, both projections route per-repo errors
+  through it and this entry is discharged.
 - **#F CLI arg-parsing library — RESOLVED 2026-06-30** (an open architectural decision from the PLAN
   stack/Wave-B text, which named `cobra` as a candidate and listed it among the `go.mod` pins; recorded
   as a new resolved item in PLAN §7). **Hand-rolled stdlib parser, NOT cobra** (no new dependency). `internal/cli.Dispatch` does its own parsing: a forgiving single-pass global-flag
