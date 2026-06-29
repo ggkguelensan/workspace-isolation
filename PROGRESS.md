@@ -9,7 +9,11 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** **M2 COMPLETE; M3 IN PROGRESS** — domain command core fully landed and green
+- **Milestone:** **M2 COMPLETE; M3 NEARLY COMPLETE — the `wi` binary runs end-to-end.** All six MVP
+  commands plus `cmd/wi/main.go` now land green; the entire `init→repo add→sync→isolate new→resolve→
+  isolate rm` surface is reachable through a runnable, smoke-verified binary. The ONLY remaining MVP
+  (M0–M3) work is the release scaffolding: CI + `.goreleaser.yaml` + Homebrew tap. (Detail below.)
+  Domain command core fully landed and green
   (`internal/config` manifest read+validate, `internal/state` per-isolate runtime registry + durable
   partial success, `internal/isolate.New` N-repo orchestration under the `isolate-state:<task>` lock /
   stop-on-first-fail with durable not-rolled-back completed repos DESIGN §6.3, `internal/resolve.Bundle`
@@ -110,6 +114,26 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 - **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); in Wave B domain code (M2).
 
 ## Done
+
+- **M3 · `cmd/wi/main.go` — the single process entry; the `wi` BINARY now runs end-to-end** (`main.go` +
+  `main_test.go`, guard `CMD-MAIN`). The ONLY `main` package and the ONLY `os.Exit` site in the tree:
+  `main()` does nothing but `exitcontract.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr))` — all wiring
+  lives in the testable `run(ctx, args, stdout, stderr) contract.ExitCode` seam (never terminates the
+  process). `run` (1) discovers the root from cwd via `workspaceRoot` = `os.Getwd`→`layout.Resolve`
+  (decision #G, both local syscalls — no network), (2) builds the REAL `Deps{Layout, Git:
+  git.New(gitexec.New()), Clock: clock.System{}}` and `BuildRegistry` over them, (3) hands argv to
+  `cli.Dispatch`, which emits EXACTLY ONE envelope and returns the mapped code — propagated UNCHANGED.
+  Two faults above Dispatch each still emit one envelope: an unresolvable root → `startupFailure` (mints
+  an op_id like Dispatch does, emits a JSON `internal` envelope, exit 70); an envelope-WRITE failure
+  (Dispatch's Go-error return — no envelope to show) → one line on stderr + exit 70. Guards (hermetic via
+  `t.TempDir`+`t.Chdir`, Go 1.26): the happy path reaches the REAL init handler — one `created` success
+  envelope, exit 0, AND `.wi/` actually scaffolded on disk (a stub registry / misresolved root would not
+  create it); and exit-code PROPAGATION — an unknown command exits 64 (the registered mutant `return
+  ExitOK` reddens here). **Smoke-verified with the built binary** in a fresh temp workspace: `wi init`→
+  exit 0 (one JSON envelope), `wi resolve ghost`→not_found/exit 3, `wi --format text init` (reinit)→
+  already_exists/exit 4 (lossless text projection), `wi bogus`→usage/exit 64. **The full
+  `init→repo add→sync→isolate new→resolve→isolate rm` command surface is now reachable through a runnable
+  `wi`.** Only CI + `.goreleaser.yaml` + Homebrew tap remain for MVP M0–M3.
 
 - **M3 · `wi isolate rm <task> [<repo>…]` handler — the LAST MVP command** (`cmd_isolate_rm.go` +
   `cmd_isolate_rm_test.go`, guard `CMD-ISOLATE-RM`; one line in `BuildRegistry`). The thin teardown seam
@@ -960,15 +984,21 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   line. The `isolate rm` triplet completed this firing: (a) `internal/git` `RemoveWorktree`/`DeleteOwnedRef`
   (`GIT-RECLAIM`), (b) `internal/isolate.Remove` (`ISOLATE-REMOVE`/`ISOLATE-REMOVE-TEARDOWN`), (c) the thin
   `cmd_isolate_rm.go` handler (`CMD-ISOLATE-RM`, decision #RD).
-- **NEXT — `cmd/wi/main.go`** — the single process entry and the ONLY `main` package in the tree:
-  resolve the root via `layout.Resolve(cwd)` (decision #G), build `Deps{Layout, Git: git.New(gitexec…),
-  Clock: clock.System{}}` + `BuildRegistry(deps)`, call `cli.Dispatch(ctx, os.Stdout, clock.System{}, reg,
-  os.Args[1:])`, and make the SOLE `os.Exit` via `exitcontract.Exit(code)`. The whole pipeline beneath it
-  is already proven by `DISPATCH-ROUTES`/`RUN-PIPELINE` + the six `CMD-*` guards, so `main` itself is thin
-  wiring — its fitness is an end-to-end smoke (build the binary, run `wi init` in a temp dir, assert one
-  JSON envelope on stdout + exit 0), or a `func run(args, w) int` seam unit-tested without the real
-  `os.Exit`. Then CI + `.goreleaser.yaml` + Homebrew tap. Completing this chain = full MVP (M0–M3) green =
-  a STOP condition.
+- **DONE — `cmd/wi/main.go`** (guard `CMD-MAIN`, see Done): the single process entry / only `os.Exit`
+  site, wiring cwd→layout→real `Deps`→`BuildRegistry`→`Dispatch` through the testable `run` seam. The `wi`
+  binary now runs the full command surface end-to-end (smoke-verified).
+- **NEXT (and the LAST MVP unit) — release scaffolding: CI + `.goreleaser.yaml` + Homebrew tap.** This is
+  the M3 tail in IMPLEMENTATION_PLAN. Smallest-cohesive-unit decomposition, one per firing: (a) a GitHub
+  Actions **CI workflow** (`.github/workflows/ci.yml`) running `go build ./... && go test ./... && go vet`
+  (+ `gofmt -l` gate) on push/PR — the same green gate every firing already enforces locally, now
+  mechanized; (b) **`.goreleaser.yaml`** (cross-compile `cmd/wi` for darwin/linux × amd64/arm64, archives,
+  checksums, a `builds`+`archives`+`release` block) — note goreleaser config is DATA, not Go, so its
+  "fitness" is `goreleaser check` in CI rather than a Go test; (c) the **Homebrew tap** stanza
+  (`brews:`/a formula template) so `brew install` works. OPEN per §7: the exact release trigger (tag-push
+  vs manual) + tap repo name are owner-flavored — adopt the documented recommendation (tag-push `v*`,
+  tap `ggkguelensan/homebrew-tap`) and record it. Completing (a)–(c) green = full MVP (M0–M3) = a STOP
+  condition (CI is a process artifact, not a Go fitness function, so this is the one MVP unit whose
+  "green" is the workflow passing, not a `go test` guard — flag clearly when reached).
 - Deferred follow-ons (pull in when a command drives them): `isolate.New` **resume** (on re-run skip
   repos already `StageCreated`); per-repo **base persisted in `state`** (lets `resolve` populate
   `branch` instead of v0's empty); state **KV + `cas`** (`--expected __ABSENT__`).
@@ -1033,6 +1063,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | ISOLATE-REMOVE | drop the ahead-of-base gate in `reclaimRepo` (`if false && head != marker`) → a worktree carrying a local commit (clean tree, HEAD moved past the creation marker) is no longer a HARD BLOCK; its clean tree lets `git worktree remove` succeed, so the local work is wrongly reclaimed → `TestRemoveReclaimsCleanBlocksAheadOfBase` RED on every "web intact" assertion (outcome `Removed:true` not blocked, worktree dir gone, marker cleared, registry no longer retains web) — pins the evidence-positive "not ahead of base" gate (DESIGN §7.1, decision #RM); secondary: skip the marker-existence/clean gates likewise → an unowned or dirty orphan is reclaimed |
 | ISOLATE-REMOVE-TEARDOWN | in `isolate.Remove`'s `len(rec.Repos)==0` branch replace `state.Delete` with `state.Store(stateDir, rec)` (keep an empty-repos husk instead of deleting) → a fully-reclaimed isolate's record survives → `TestRemoveAllCleanDeletesRecord` RED (`state.Load` returns a record, want `state.ErrNoRecord`) — pins that full teardown removes the registry entry so a later `isolate rm` correctly reports not_found |
 | CMD-ISOLATE-RM | in `isolateRmCmd.Run`, on the mixed outcome (`removed > 0` with blocks) return `(result, nil)` instead of `(result, *CommandError{Kind:partial, Action:removed})` → a partial teardown is mis-reported as a clean success (no error, exit 0) → `TestIsolateRmDurablePartialBlocksOrphan` RED (`want *cli.CommandError, got <nil>`), while complete-teardown + all-blocked stay GREEN (isolates the mutant to the partial-mapping path); alternate: in `projectRemoveOutcome` map an orphan hard-block to `Kind:internal` (or drop the `Code:"orphan_unexplained"`) → same test RED on the repos[] `web.Error.Kind == conflict` / `Code == orphan_unexplained` assertions — pins the loud `orphan_unexplained` surface (DESIGN §7.1) riding in repos[] not Blocked[] (decision #RD) |
+| CMD-MAIN | in `run` (cmd/wi) `_ = code; return contract.ExitOK` instead of `return code` → run swallows Dispatch's computed exit and always exits 0 → `TestRunUnknownCommandExitsUsage` RED (got 0, want 64), while `TestRunInitScaffoldsWorkspace` stays GREEN (init already exits 0) — isolates the mutant to exit-code propagation; alternate: hand `cli.Dispatch` an empty `Registry{}` instead of `BuildRegistry(deps)` → every command is unknown → `TestRunInitScaffoldsWorkspace` RED (no `.wi/` scaffolded, ok:false/usage not created) — pins that the REAL registry over a cwd-resolved root is wired |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
