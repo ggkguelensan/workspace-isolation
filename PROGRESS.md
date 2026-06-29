@@ -9,16 +9,22 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** **M2 COMPLETE** — the domain command core is fully landed and green: `internal/config`
-  (manifest read+validate), `internal/state` (per-isolate runtime registry + durable partial success),
-  `internal/isolate.New` (N-repo orchestration under the `isolate-state:<task>` lock, stop-on-first-fail
-  with durable, not-rolled-back completed repos, DESIGN §6.3), and `internal/resolve.Bundle` (the pure,
-  zero-I/O path-bundle projector behind `wi resolve`). The two `internal/git` isolate primitives
-  (`AddWorktree` + `CreateOwnedRef`/`OwnedRefSHA`) underpin isolate. **Next: M3 BEGINS** — `internal/cli`
-  (flag/arg parsing + the one-envelope-out dispatcher mapping domain results/errors to the closed
-  exit-code set), `help`, `suggest`, then `cmd/wi` (the binary) → MVP end-to-end. Deferred enrichments
-  pulled in when a command needs them: `isolate.New` resume (skip repos already `StageCreated`), per-repo
-  base persisted in `state` (populates `resolve`'s `branch`), and state KV + `cas`.
+- **Milestone:** **M2 COMPLETE; M3 IN PROGRESS** — domain command core fully landed and green
+  (`internal/config` manifest read+validate, `internal/state` per-isolate runtime registry + durable
+  partial success, `internal/isolate.New` N-repo orchestration under the `isolate-state:<task>` lock /
+  stop-on-first-fail with durable not-rolled-back completed repos DESIGN §6.3, `internal/resolve.Bundle`
+  the pure zero-I/O path-bundle projector behind `wi resolve`; the two `internal/git` isolate primitives
+  `AddWorktree` + `CreateOwnedRef`/`OwnedRefSHA` underpin isolate). **M3 (the CLI surface → MVP) has
+  begun:** `internal/exitcontract` landed — the single exit chokepoint owning the compiled
+  `error.kind → exit-code` table (`ExitCodeFor`, guard `SHAPE-FAIL-MATRIX`) and the sole `os.Exit`
+  wrapper (`Exit`). **Next M3 units (bottom-up):** the one-envelope emitter/assembler
+  (`SHAPE-ONE-ENVELOPE`), the `--format text` lossless projection (`SHAPE-TEXT-PROJECTION`), the
+  parse→dispatch tree + central error→envelope→exit wiring, per-command handlers
+  (`init`/`repo add`/`sync`/`isolate new`/`resolve`/`isolate rm`), `cmd/wi`, then CI + `.goreleaser.yaml`
+  + Homebrew tap. Open decision to rule at the dispatch unit: cobra (PLAN text) vs hand-rolled stdlib
+  `flag` — lean stdlib given the zero-dep posture (#6, #C), record then. Deferred enrichments pulled in
+  when a command needs them: `isolate.New` resume (skip repos already `StageCreated`), per-repo base
+  persisted in `state` (populates `resolve`'s `branch`), state KV + `cas`.
   M0 + M1 complete: contract spine, layout, opid, clock, testenv, lockfs, lock, `gitexec` runner+belt,
   full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch / DivergedCounts), complete
   `internal/mirror`, and both DESIGN §2 architecture invariants (INV-NO-LLM + INV-NO-NETWORK).
@@ -26,6 +32,31 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M3/A+B · `internal/exitcontract` — the exit chokepoint + failure matrix** (`exitcontract.go` +
+  `exitcontract_test.go`). The single authority between a command's typed outcome and the process exit
+  code (DESIGN §3.2, PLAN Wave A). `ExitCodeFor(contract.ErrorKind) contract.ExitCode` is the compiled
+  §3.2 failure matrix (usage→64, not_found→3, dirty_worktree/conflict/already_exists→4, needs_approval→5,
+  lock_held/mirror_stale→6, partial→2, internal→70), failing SAFE to `ExitInternal` for an unmapped kind;
+  `MappedKinds()` exposes coverage for the totality check; `Exit(code)` is the SOLE `os.Exit` wrapper so
+  there is exactly one termination point (the no-bare-`os.Exit` architecture guard, a later unit, will
+  allowlist only this site). Resolves decision **#X** (`remote_error` → 70). Guard `SHAPE-FAIL-MATRIX`
+  (`exitcontract_test.go`): an INDEPENDENT literal copy of the §3.2 table asserts every pairing; a
+  separate totality test asserts the table covers EXACTLY `contract.AllErrorKinds()` and every produced
+  code is in `contract.AllExitCodes()`; plus an unknown-kind-fails-to-internal test. Both mutants
+  demonstrated RED-then-reverted: (1) `KindLockHeld`→`ExitRefused` reddened only the matrix value test;
+  (2) dropping `KindInternal` (code collides with the default) left the value test GREEN but reddened the
+  totality test — proving the two checks are non-redundant. Full `go build ./… && go vet ./… && go test
+  ./…` GREEN (17 packages).
+- **M2/B · `internal/resolve` — pure path-bundle projector** (`resolve.go` + `resolve_test.go`).
+  `Bundle(layout.Layout, state.IsolateRecord) (contract.ResolveBlock, error)` is a PURE, zero-I/O
+  projection (no config, no git, no network, no filesystem read) answering "given a task, where is
+  everything?": `isolate_root`=TaskDir, `state_dir`=StateDir, `log`=LogDir, and per repo
+  `worktree`=Isolate (`isolas/<task>/<repo>`), `mirror`=Repo (`repos/<repo>` SSOT clone), `branch`=`""`
+  (v0 worktrees are DETACHED, DESIGN §5). Every path sourced from `internal/layout`, never hand-assembled;
+  the CLI owns `state.Load` + `ErrNoRecord`→`not_found`. Resolves decision **#R**. Guard `RESOLVE-BUNDLE`:
+  a 2-repo record projects to exact hand-written golden paths (independent join), + empty-record→non-nil
+  empty slice + traversing-name→validation error. Mutants demonstrated: `mirror := worktree`→both Mirror
+  assertions RED; drop a repo→count RED. **M2 turns COMPLETE.**
 - **M0/A · contract enums** — `internal/contract/enums.go`: closed sets `Action` (6),
   `ErrorKind` (11), `ExitCode` (9), `Capability` (10 vocab / 4 advertised) + `SchemaVersion`.
   Guard `SHAPE-ENUM-DOUBLE-ENTRY` (`enums_test.go`): independent literal copies; drift /
@@ -519,6 +550,7 @@ CLI first, bottom-up, smallest cohesive unit each firing.
 | STATE-DURABLE | replace `lockfs.WriteFileAtomic` with `os.WriteFile` in `Store` (keep `lockfs` referenced so the assertion, not the compiler, reddens) → the injected `WI_FAULT=lockfs.before_rename` no longer aborts so the interrupted flip lands → `TestDurablePartialSuccess` RED |
 | ISOLATE-NEW | drop the stop-on-first-fail `return` in `isolate.New` (turn it into `continue`) → the loop materializes the repo AFTER the failed one → `TestNewStopsOnFirstFailWithDurablePartialSuccess` RED on the 3 "db not attempted" assertions (result stage, durable stage, on-disk worktree); or skip the upfront all-pending `state.Store` → the first repo's `UpdateRepoStage` finds no record (`state: no isolate record`) and no durable registry exists to resume from → both `TestNewMaterializesAllReposComplete` + `TestNewStopsOnFirstFail…` RED |
 | RESOLVE-BUNDLE | wire per-repo `mirror` to the worktree path (`mirror := worktree`) instead of `layout.Repo` in `resolve.Bundle` → the SSOT mirror equals the worktree, reddening both repos' `Mirror` assertions in `TestBundleProjectsRecordPaths` (proves Bundle distinguishes the `isolas/<task>/<repo>` worktree from the `repos/<repo>` SSOT clone); or `continue` on one repo (drop it from the loop) → the projected `Repos` count/second-repo assertions RED (proves every recorded repo is projected, in order) |
+| SHAPE-FAIL-MATRIX | perturb one pairing in `exitcontract.exitByKind` (e.g. `KindLockHeld`→`ExitRefused`/4 instead of `ExitLocked`/6) → `TestExitCodeForMatchesFailureMatrix` RED on that kind's row vs the independent §3.2 literal copy; or drop a kind whose code collides with the defensive default (e.g. remove `KindInternal`, code 70 == `ExitCodeFor`'s unmapped default) → the value test stays GREEN but `TestExitCodeForIsTotalOverAllKinds` RED (MappedKinds no longer covers `AllErrorKinds`), proving the totality check is non-redundant with the value check |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
@@ -569,6 +601,20 @@ CLI first, bottom-up, smallest cohesive unit each firing.
   `created` but the worktree is gone on disk) — the contract has no field for it and `doctor`/drift is
   M4, so `Bundle` does not stat paths. Guard `RESOLVE-BUNDLE`. Recorded in the `internal/resolve` package
   doc.
+
+- **#X `remote_error` exit-code mapping — RESOLVED 2026-06-30** (not one of the 7 §7 rulings; DESIGN
+  §3.2's exit-code table assigns codes to 10 of the 11 error kinds but leaves `remote_error` without a
+  dedicated code). **`remote_error` → exit 70 (`ExitInternal`)**, the catch-all failure bucket it shares
+  with `internal`. Rationale: the closed exit-code set is deliberately COARSER than the kind set —
+  `dirty_worktree`/`conflict`/`already_exists` already collapse onto 4, and `lock_held`/`mirror_stale`
+  onto 6 — so the precise "remote vs internal" distinction lives in the envelope's `kind` field while the
+  exit code is the bucket a shell branches on. A remote/transport failure has no slot among the
+  refusal (4), lock (6), not-found (3), usage (64), partial (2) or approval (5) codes, so 70 (general
+  non-specific failure) is the only consistent home. Rejected minting a new exit code (the set is frozen
+  at M0 by `SHAPE-FINGERPRINT`/`contract.lock.json`; a new code would be a contract break, not an
+  additive change). `ExitCodeFor` additionally fails-safe to 70 for any *unmapped* kind, so an
+  unforeseen future kind degrades to the same general-failure bucket rather than crashing. Recorded in
+  the `internal/exitcontract` package doc + guard `SHAPE-FAIL-MATRIX`.
 
 - **#N INV-NO-NETWORK egress allowlist — RESOLVED 2026-06-30** (not one of the 7 §7 rulings; the
   enforcement form of DESIGN §2 #3). The architecture guard permits `os/exec` import + `GIT_ALLOW_PROTOCOL`
