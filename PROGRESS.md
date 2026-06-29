@@ -28,15 +28,23 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `SHAPE-ASSEMBLE` + `SHAPE-DRYRUN-EXIT0`. And `cli.RenderText` landed — the `--format text` lossless,
   path-scoped projection of the same assembled struct `Emit` serializes (no re-read of git/state; guard
   `SHAPE-TEXT-PROJECTION` proves losslessness via an independent reflection walk over string leaves;
-  decision **#T**). **The pure contract spine of the CLI (assemble → serialize json|text → exit) is now
-  complete and green.** **Next M3 units (bottom-up):** the parse→dispatch tree + central
-  error→envelope→exit wiring (the Runner: `Command` iface → typed `*Result` → assemble → `Emit`/
-  `RenderText` → `ExitFor`), per-command handlers (`init`/`repo add`/`sync`/`isolate new`/`resolve`/
-  `isolate rm`), `cmd/wi`, then CI + `.goreleaser.yaml`
-  + Homebrew tap. Open decision to rule at the dispatch unit: cobra (PLAN text) vs hand-rolled stdlib
-  `flag` — lean stdlib given the zero-dep posture (#6, #C), record then. Deferred enrichments pulled in
-  when a command needs them: `isolate.New` resume (skip repos already `StageCreated`), per-repo base
-  persisted in `state` (populates `resolve`'s `branch`), state KV + `cas`.
+  decision **#T**). And the `internal/cli` Runner EXECUTE-CORE landed — `Result` (typed domain outcome) +
+  `Command` (`Run(ctx) (*Result, error)`) + `CommandError` (typed kind+hints; non-`*CommandError`→
+  `internal`) + `Format`/`Render` (json→`Emit` / text→`RenderText`) + `Execute` (run → `envelopeFor`
+  (Success/Failure + threads every additive block; a partial carries `repos[]` onto the top-level
+  `error.kind=partial`) → `Render` → `ExitFor`), the SOLE assembler+serializer+exit-deriver so every
+  command emits one envelope and exits identically; guard `RUN-PIPELINE`. **The pure contract spine of the
+  CLI (assemble → serialize json|text → exit) AND the outcome→envelope→exit Runner core are now complete
+  and green** — what remains is the dispatch front-end that feeds them. **Next M3 units (top of the
+  pipeline, then commands):** the DISPATCH layer — argv → (command-string, global flags `--format`/
+  `--dry-run`, command args) → look up a `Command` in a registry → mint `op_id` (`opid.New` via the clock)
+  → build `Meta` → `Execute`; then per-command handlers (`init`/`repo add`/`sync`/`isolate new`/`resolve`/
+  `isolate rm`), each returning a `*Result`/`*CommandError` over the green M0–M2 core; then `cmd/wi` main
+  (single `os.Exit` via `exitcontract.Exit`); then CI + `.goreleaser.yaml` + Homebrew tap. Open decision to
+  rule at the dispatch unit (call it **#F**): cobra (PLAN text) vs hand-rolled stdlib `flag` — lean stdlib
+  given the zero-dep posture (#6, #C), record then. Deferred enrichments pulled in when a command needs
+  them: `isolate.New` resume (skip repos already `StageCreated`), per-repo base persisted in `state`
+  (populates `resolve`'s `branch`), state KV + `cas`.
   M0 + M1 complete: contract spine, layout, opid, clock, testenv, lockfs, lock, `gitexec` runner+belt,
   full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch / DivergedCounts), complete
   `internal/mirror`, and both DESIGN §2 architecture invariants (INV-NO-LLM + INV-NO-NETWORK).
@@ -44,6 +52,31 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M3/B · `internal/cli` Runner execute-core — `Result`/`Command`/`CommandError` + `Format`/`Render` +
+  `Execute`** (`run.go` + `run_test.go`). The single wiring point that turns a command's typed outcome
+  into exactly one envelope + a process exit code (DESIGN §3, §4). `Result` is the typed domain outcome a
+  handler returns (Action + Repos + the additive Resolve/Planned/Blocked + Warnings/Next) — a handler
+  returns plain data and NEVER assembles the wire shape or picks a code. `Command` is `Run(ctx) (*Result,
+  error)`, constructed by the (next) dispatcher with its args/deps already bound; its return convention is
+  documented: `(result,nil)`=success, `(nil,*CommandError)`=classified failure, `(nil,plainError)`=
+  internal, `(result,*CommandError{Kind:partial})`=durable partial. `CommandError` is the typed error
+  that selects a failure envelope's `error.kind` + operator hints (repo/help/did_you_mean); a non-
+  `*CommandError` maps to `kind=internal` (an unclassified failure is a bug, surfaced not hidden). `Format`
+  (`json`|`text`) is a CLI presentation concern owned by `internal/cli` (NOT a wire enum — contract keeps
+  those), and `Render(w, env, format)` dispatches json→`Emit` / text→`RenderText` over the SAME assembled
+  struct. `Execute(ctx, w, m, format, cmd)` runs the command, maps `(*Result|error)`→Envelope via the
+  unexported `envelopeFor` (Success/Failure + threads every additive block; a partial threads the result's
+  per-repo detail ONTO the failure so "what completed" survives next to the top-level `error.kind=partial`,
+  decision #D), serializes via `Render`, and returns `ExitFor(env)` — so every command, whatever the
+  outcome, emits one envelope and exits the same way. A returned Go error is reserved for an INFRASTRUCTURE
+  write failure (→ `ExitInternal`); a domain failure rides inside the emitted envelope. Guard `RUN-PIPELINE`
+  (`run_test.go`, fake `Command`): drives all six outcome classes end-to-end through the real pipeline —
+  success (blocks threaded, exit 0), `CommandError` (kind+hints preserved, matrix exit), plain error
+  (kind=internal, exit 70), durable partial (ok:false + `kind=partial` BUT `repos[]` carried, exit 2),
+  `--format text` dispatch (not JSON, shows `FAILED`+kind), dry-run blocked-verdict (exit-neutral, exit 0).
+  Mutant demonstrated RED-then-reverted: drop the partial result-merge (`if false && r != nil`) → the
+  partial loses its per-repo detail → `TestExecutePartialCarriesReposAndExitsTwo` RED. Full `go build ./… &&
+  go vet ./… && go test ./…` GREEN (19 packages).
 - **M3/B · `internal/cli.RenderText` — the `--format text` lossless projection** (`text.go` +
   `text_test.go`). `RenderText(io.Writer, contract.Envelope) error` is a PURE, path-scoped projection of
   the SAME assembled struct the JSON path (`Emit`) serializes — "no extra facts, no dropped facts"
@@ -550,35 +583,34 @@ CLI first, bottom-up, smallest cohesive unit each firing.
 
 Done so far in M3 (bottom-up): `exitcontract` (the `error.kind→exit-code` matrix `ExitCodeFor` + the
 sole `os.Exit` wrapper, `SHAPE-FAIL-MATRIX`), `cli.Emit` (one-envelope serialization, `SHAPE-ONE-ENVELOPE`),
-the `cli` ASSEMBLER (`Meta` + `Success`/`Failure` + `ExitFor`, `SHAPE-ASSEMBLE`/`SHAPE-DRYRUN-EXIT0`), and
-`cli.RenderText` (the `--format text` lossless projection, `SHAPE-TEXT-PROJECTION`). **The pure contract
-spine of the CLI (assemble → serialize json|text → exit) is now complete and green** — the next units
-turn that spine into a runnable binary, top-down from the dispatch entry point.
+the `cli` ASSEMBLER (`Meta` + `Success`/`Failure` + `ExitFor`, `SHAPE-ASSEMBLE`/`SHAPE-DRYRUN-EXIT0`),
+`cli.RenderText` (the `--format text` lossless projection, `SHAPE-TEXT-PROJECTION`), and the Runner
+EXECUTE-CORE (`Result`/`Command`/`CommandError` + `Format`/`Render` + `Execute`→`envelopeFor`→`ExitFor`,
+`RUN-PIPELINE`). **The pure contract spine AND the outcome→envelope→exit Runner core are now complete and
+green** — what remains is the dispatch front-end that feeds `Execute`, then the real commands.
 
-- **NEXT — M3 · the Runner (parse → dispatch → assemble → emit/render → exit).** The uniform pipeline
-  every command flows through (DESIGN §3, §4). Shape: a `Command` interface (e.g. `Run(ctx, env) (*Result,
-  error)` where `Result` is typed domain data — action + repos + optional resolve/planned/blocked/
-  warnings/next), a dispatcher that parses `argv` into `(command-string, global flags incl. `--format`/
-  `--dry-run`, command args)` and routes to the right `Command`, then the SINGLE wiring point that:
-  mints the `op_id` (`opid.New` via the clock), builds `Meta{OpID, Command, DryRun}`, invokes the handler,
-  maps its `*Result`→envelope via `Success` (or a returned typed error→`Failure` via the stderr/kind
-  classifier), threads everything, serializes through `Emit` (json, default) or `RenderText` (text), and
-  returns `ExitFor(env)` to the caller. Handlers NEVER assemble an envelope or compute an exit code — they
-  return domain data or a typed error; the Runner is the sole assembler. Build the smallest cohesive slice
-  first: the dispatch + wiring with ONE trivial handler (or a table-driven dispatch test using a fake
-  `Command`), so the parse→assemble→emit→exit path is guarded before any real command exists. Likely guard
-  `RUN-PIPELINE` / `DISPATCH-ROUTES`: a fake command returning known `*Result` produces exactly the
-  expected envelope on the writer + the matching exit code; an unknown subcommand → a `usage` envelope →
-  exit 64; `--format text` routes to `RenderText`. **Open architectural decision to rule HERE:** cobra
-  (named in the PLAN Wave-B text) vs hand-rolled stdlib `flag` — given the established zero-dep posture
-  (decisions #6, #C) and wi's small, fixed command surface, lean stdlib `flag` + a tiny hand-rolled
-  subcommand switch unless a concrete need for cobra emerges; record the ruling (call it #F) when this
-  unit lands.
+- **NEXT — M3 · the DISPATCH layer (argv → chosen Command + Meta → Execute).** The front half of the
+  Runner, sitting on top of the green `Execute` core. Shape: parse `argv` into `(command-string, global
+  flags `--format`/`--dry-run`, command args)`, look up the named subcommand in a registry (a constructor
+  per command that binds parsed args + deps and returns a `Command`), mint the `op_id` (`opid.New` via the
+  clock), build `Meta{OpID, Command, DryRun}`, and call `Execute`. Likely a `Main(args []string, stdout
+  io.Writer, clk clock.Clock, …) contract.ExitCode` (the entry `cmd/wi` calls before the single
+  `exitcontract.Exit`). Build the smallest cohesive slice first: dispatch + flag parsing guarded with a
+  fake registry / fake `Command`, so the argv→Meta→Execute path is proven before any real command exists.
+  Likely guard `DISPATCH-ROUTES`: a known subcommand routes to its `Command` and produces the expected
+  envelope+exit; an UNKNOWN subcommand → a `usage` envelope (`error.kind=usage`) → exit 64 (with a
+  `did_you_mean` suggestion if cheap); `--format text` reaches `RenderText`; `--dry-run` threads into
+  `Meta.DryRun`; a minted `op_id` satisfies `opid.Valid`. Mutant: route every name to one command (ignore
+  the parsed name) → the wrong-command / unknown-name assertion RED; or skip `op_id` minting (empty) → the
+  `opid.Valid` assertion RED. **Open architectural decision to rule HERE (record as #F):** cobra (named in
+  the PLAN Wave-B text) vs hand-rolled stdlib `flag` — given the established zero-dep posture (decisions
+  #6, #C) and wi's small, fixed command surface, lean stdlib `flag` + a tiny hand-rolled subcommand switch
+  unless a concrete need for cobra emerges; record the ruling when this unit lands.
 - **Then** the per-command handlers, one cohesive unit each (`init` → `repo add` → `sync` → `isolate new`
-  → `resolve` → `isolate rm`), every one returning domain data over the green M0–M2 core (config/state/
-  git/mirror/isolate/resolve), never an envelope. Then `cmd/wi` main (the single `os.Exit`, via
-  `exitcontract.Exit`, calling the Runner). Then CI + `.goreleaser.yaml` + Homebrew tap. Completing this
-  chain = full MVP (M0–M3) green = a STOP condition.
+  → `resolve` → `isolate rm`), every one a `Command` returning a `*Result` (or a `*CommandError`) over the
+  green M0–M2 core (config/state/git/mirror/isolate/resolve), never an envelope. Then `cmd/wi` main (the
+  single `os.Exit`, via `exitcontract.Exit`, calling the dispatch entry). Then CI + `.goreleaser.yaml` +
+  Homebrew tap. Completing this chain = full MVP (M0–M3) green = a STOP condition.
 - Deferred follow-ons (pull in when a command drives them): `isolate.New` **resume** (on re-run skip
   repos already `StageCreated`); per-repo **base persisted in `state`** (lets `resolve` populate
   `branch` instead of v0's empty); state **KV + `cas`** (`--expected __ABSENT__`).
@@ -629,6 +661,7 @@ turn that spine into a runnable binary, top-down from the dispatch entry point.
 | SHAPE-ASSEMBLE | in `cli.Success` set `e.OK=false` (break the ok ⟺ error==nil coupling) → `TestSuccessEnvelopeCoupling` RED; or have the shared `spine` omit `Capabilities`/`SchemaVersion` (leave them zero) → `assertCommonFields` reddens in BOTH `TestSuccessEnvelopeCoupling` + `TestFailureEnvelopeCoupling` |
 | SHAPE-DRYRUN-EXIT0 | make `cli.ExitFor` return a refusal code when `len(env.Blocked)>0` (treat a would-block verdict as a refusal) → `TestExitForBlockedVerdictsAreExitNeutral` RED (blocked must be exit-neutral); the companion assertion that a genuine usage error on a `--dry-run` still maps to 64 guards against the over-correction (a blanket `if env.DryRun { return ExitOK }` would wrongly swallow it) |
 | SHAPE-TEXT-PROJECTION | drop ANY field from `cli.RenderText`/its helpers (e.g. comment out the `worktree` line in `renderRepo`) → that field's unique sentinel leaf is absent from the render → `TestRenderTextIsLossless` RED, naming the exact dropped fact (the independent `collectStringLeaves` reflection walk enumerates every envelope string leaf; the hand-written renderer can't silently omit one). Non-vacuity is inline: ≥25 leaves must be found and a never-present sentinel must NOT match |
+| RUN-PIPELINE | in `cli.envelopeFor` drop the durable-partial result-merge (`if false && r != nil { env.Repos = r.Repos … }`) → a partial no longer carries its per-repo detail → `TestExecutePartialCarriesReposAndExitsTwo` RED ("got 0 repos"); or make `Execute` ignore `ExitFor` and `return contract.ExitOK` → every non-zero-exit assertion (CommandError→3, partial→2, internal→70) RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
