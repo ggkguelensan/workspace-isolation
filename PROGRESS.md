@@ -9,11 +9,12 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** M1 in progress (git verbs / SSOT posture). M0 complete; `gitexec` runner+belt,
-  full `internal/git` (resolve / ff / EnsureClone / IsClean / **Fetch / DivergedCounts**), and
-  `internal/mirror` (cached freshness snapshot + offline read/classify) landed. Remaining M1: the
-  `internal/mirror` **fetch orchestration** (`Fetch`/`Refresh`: dial via `git.Fetch`, recompute behind
-  via `git.DivergedCounts`, `Store` a fresh `Snapshot`) + the module-wide `INV-NO-NETWORK` arch test.
+- **Milestone:** M1 nearly complete (git verbs / SSOT posture). M0 complete; `gitexec` runner+belt,
+  full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch / DivergedCounts), and **complete
+  `internal/mirror`** (cached freshness read/classify + `Refresh` fetch orchestration) landed. The
+  SSOT/mirror layer is done. Remaining M1: the module-wide `INV-NO-NETWORK` arch test in
+  `internal/invariants` (git-child egress belt asserted across all offline command paths), which closes
+  M1 → M2.
 - **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); into Wave B domain code
 
 ## Done
@@ -263,23 +264,36 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   RED (and `GIT-FETCH` stays green, so the swap is attributable to `DivergedCounts`). Reverted → GREEN.
   The Git-struct doc now names `EnsureClone`+`Fetch` as the only two dialing verbs.
 
+- **M1 · `internal/mirror` · `Refresh` (the fetch orchestration)** — `fetch.go` + `fetch_test.go`:
+  the one network step of the freshness layer, composing the git verbs. `Refresh(ctx, g, clk,
+  mirrorsDir, repo, dir, base)`: `g.Fetch(dir, "origin")` (the dial), resolve `refs/heads/<base>`
+  (local_base_sha) + `refs/remotes/origin/<base>` (origin_base_sha), `g.DivergedCounts` behind column,
+  build `Snapshot{FetchedAt: clk.Now().UTC() RFC3339, ...}`, `Store`, return it. It is the ONLY part of
+  `mirror` that touches git/network, so it takes `*git.Git`+`clock.Clock`; placed in a SEPARATE
+  `fetch.go` so `mirror.go`'s "this file imports no git" doc stays literally true (the read path
+  Load/Freshness is still Runner-free and cannot dial). Refresh does NOT advance the base ref — only the
+  remote-tracking ref moves, so the SSOT tree stays pristine. Guard `MIRROR-FETCH` (testenv origin at
+  C0, EnsureClone'd mirror, push C1 to origin, Refresh): behind==1 so `Freshness().Stale`, origin_base
+  == C1, local_base == C0 (unmoved), fetched_at == injected fake-clock instant, `git.IsClean` holds, and
+  the returned snapshot equals what `Load` reads back. Mutant (skip `g.Fetch`, classify against the
+  stale tracking ref) confirmed RED on behind/stale/origin_base, reverted to GREEN. **`internal/mirror`
+  is now complete** (Snapshot/Freshness/Store/Load read+classify + Refresh fetch).
+
 ## Next unit (pick this on the next firing)
 
-- **M1 · `internal/mirror` · the fetch ORCHESTRATION (composes the now-landed git verbs).** The two
-  raw verbs (`git.Fetch` = the dial, `git.DivergedCounts` = offline behind count) are in and guarded;
-  this unit wires them into `mirror`. Add `Refresh(ctx, g *git.Git, clk clock.Clock, mirrorsDir, repo,
-  dir, base) (Snapshot, error)` (exact signature TBD): `g.Fetch(dir, "origin")` → resolve
-  `refs/heads/<base>` (local_base_sha) and `refs/remotes/origin/<base>` (origin_base_sha) →
-  `behind = g.DivergedCounts(dir, refs/heads/<base>, refs/remotes/origin/<base>)` (the right column) →
-  build `Snapshot{FetchedAt: clk.Now() in RFC3339 UTC, …}` → `Store`. **Note:** this is the first part
-  of `mirror` that touches git, so it takes a `*git.Git`+`clock.Clock` (unlike the pure read path) —
-  keep the read functions Runner-free; put orchestration in a new `mirror/fetch.go` so `mirror.go`'s
-  "this file imports no git" doc stays literally true. Guard `MIRROR-FETCH` (testenv origin + EnsureClone'd
-  mirror, push C1 to origin, Refresh): returned/stored snapshot has `behind > 0` and `Freshness().Stale`
-  true, `local_base_sha` == base tip (unmoved), `origin_base_sha` == C1, and `git.IsClean(dir)` holds.
-  Mutant: have `Refresh` skip the `g.Fetch` call (classify against the stale tracking ref) → behind
-  stays 0 → stale RED. After this, the module-wide **`INV-NO-NETWORK`** arch test in
-  `internal/invariants` (git-child belt asserted across all offline command paths) closes M1.
+- **M1 · `internal/invariants` · `INV-NO-NETWORK` (module-wide architecture test).** The unit-level
+  half is already proven at the gitexec chokepoint (`GITEXEC-OFFLINE-BELT`); this is the architecture
+  tripwire that the belt is actually the ONLY way git is ever launched on offline paths. Approach
+  (mirror the `INV-NO-LLM` pattern in this package — a source-scanning arch test, no network needed):
+  assert that **`gitexec` is the sole package that constructs `exec.Command("git", …)`** (or otherwise
+  spawns a git child), and that **only `RunNetwork` is reachable from network-permitted verbs** while
+  every other git call goes through the belt-applying `Run`. Concretely: walk the `internal/` tree
+  (go/parser or a token scan), flag any `exec.Command`/`exec.CommandContext` whose first arg is `"git"`
+  outside `internal/gitexec`, and flag any use of `GIT_ALLOW_PROTOCOL` outside gitexec. Guard
+  `INV-NO-NETWORK`; non-vacuity: the scanner must flag a synthetic `exec.Command("git", "fetch")`
+  planted in a non-gitexec package (same self-test shape as `TestNoLLMScannerIsNonVacuous`). Decide the
+  exact scope rule (AST vs token; whether `RunNetwork` callers need an allowlist) at implementation
+  time and record it. **This closes M1.** Then M1 → M2 (`config`, `state`, `isolate`, `resolve`).
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -310,6 +324,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | GIT-CLEAN | make `IsClean` ignore `StatusPorcelain` and always return `true` → an untracked file no longer reads as drift → `TestIsCleanReflectsWorkingTree` RED |
 | GIT-FETCH | make `Fetch` a no-op (return nil without running `git fetch`) → the remote-tracking ref stays at the old tip → `TestFetchAdvancesRemoteTrackingOnly` RED |
 | GIT-DIVERGED | swap the two `rev-list --left-right --count` columns in `DivergedCounts` (read ahead from `fields[1]`, behind from `fields[0]`) → `TestDivergedCountsAheadBehind` RED |
+| MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |
 
