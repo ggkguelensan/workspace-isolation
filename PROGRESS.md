@@ -9,8 +9,8 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** M0 building blocks complete (contract spine + layout + opid + clock + testenv +
-  lockfs + lock) → starting M1 (git child-process layer)
+- **Milestone:** M1 in progress (git child-process layer). M0 building blocks complete (contract
+  spine + layout + opid + clock + testenv + lockfs + lock); `gitexec` runner+belt landed.
 - **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); into Wave B domain code
 
 ## Done
@@ -183,16 +183,36 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   (§7.3) stays a separate M4 unit. **M0 building blocks are now complete** (contract spine + layout +
   opid + clock + testenv + lockfs + lock).
 
+- **M1 · `internal/gitexec` (runner + egress belt)** — `gitexec.go` + `gitexec_test.go`: the single
+  chokepoint that launches every git child process (DESIGN §4, §2.3). `Runner` (New = inherit env;
+  NewWithEnv = explicit hermetic base) with `Run` (OFFLINE — overlays `GIT_ALLOW_PROTOCOL=none` so git
+  refuses every transport, the no-hidden-network belt; + `GIT_TERMINAL_PROMPT=0`) and `RunNetwork` (the
+  narrow online opt-in for fetch/clone, prompt still disabled). Captures `Result{Args,Stdout,Stderr,
+  ExitCode}`; non-zero exit → typed `*ExitError` carrying the full Result (so the later stderr→kind
+  classifier reads it without re-running git); start failure → plain wrapped error. `setEnv` overlays
+  keys by replace-not-append so git never sees a duplicate key. testenv gained `GitEnv()` to feed the
+  hermetic base. Guards: `GITEXEC-OFFLINE-BELT` (two-sided, fully hermetic via a local `file://` remote:
+  `ls-remote` is REFUSED with "transport 'file' not allowed" through `Run` but SUCCEEDS through
+  `RunNetwork`, so the refusal is attributable to the belt) + `GITEXEC-CAPTURE` (stdout floor via `git
+  version`; exit-error surfaced for an unknown subcommand). Mutants confirmed: drop the belt → offline
+  `ls-remote` succeeds → `TestOfflineRefusesTransport` RED; swallow the non-zero exit → `TestRunSurfaces
+  ExitError` RED. Reverted → GREEN. **Note:** this is the unit-level half of `INV-NO-NETWORK`; the
+  module-wide architecture test (git-child belt asserted across all offline command paths) lands later
+  in `internal/invariants`.
+
 ## Next unit (pick this on the next firing)
 
-- **M1 · `internal/gitexec`** — the single typed wrapper around the `git` child process (DESIGN §M1,
-  §2.3). All git invocation funnels through here: build `*exec.Cmd` with the hermetic env discipline
-  (no prompts, no implicit network on offline paths), capture stdout/stderr/exit-code, return a typed
-  result/error. This is the chokepoint the no-hidden-network invariant is enforced at, and the seam the
-  later `git`/`mirror` packages build on. Guard: an offline-classified command makes ZERO network dials
-  (assert via a git transcript/`GIT_TRACE` or a deliberately-unreachable remote that must NOT be
-  contacted); mutant = let a network-touching arg through the offline path. Pairs with `internal/git`
-  (porcelain helpers incl. the SSOT `FastForwardBaseRef` update-ref-only path) and `internal/mirror`.
+- **M1 · `internal/git` (typed verbs on gitexec) — start with the SSOT keystone.** Build the
+  deterministic typed git verbs on top of `gitexec.Runner` (DESIGN §4 line 171, §5). The keystone is
+  `FastForwardBaseRef` — the SOLE base-ref-mutation path (DESIGN §5): on the detached-HEAD SSOT clone,
+  `git merge-base --is-ancestor <cur> <new>` (ff-safety) then `git update-ref refs/heads/<base> <new>`
+  — **no checkout, no merge**, so it works on the bare/detached SSOT and both v0 `sync` and v1 `land`
+  reuse it with zero rework. Guard `GIT-FF-ONLY`: a true fast-forward advances the ref; a
+  **non-fast-forward** (divergent/older target) is REFUSED and the ref is unchanged (evidence: ref SHA
+  before == after); mutant = drop the `--is-ancestor` precheck (or use `update-ref` unconditionally) →
+  the non-ff case wrongly advances → RED. Use `testenv` to build a tiny SSOT with a base + a divergent
+  commit. Likely also a small `RevParse`/`ResolveRef` helper to read a ref SHA for the assertion. Other
+  verbs (`EnsureClone`, status/dirty checks) follow as their own units; `internal/mirror` after.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -216,6 +236,8 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | LOCK-KEYS | change a kind prefix (`repo:`→`repository:`, …) or the `.lock` suffix in `internal/lock/keys.go` → `TestCanonicalKeyStrings` / `TestKeyPathDerivation` RED |
 | LOCK-ORDER | make `orderedUnique` leave input order intact (no-op comparator) or skip the dedup → `TestOrderedUniqueIsTotalOrderAndDedups` RED |
 | LOCK-MUTEX | treat a refused `TryLock` (`!ok`) as acquired → `TestAcquireRefusesOverlap` RED; or skip `h.Release()` rollback on refusal → `TestAcquireReleasesOnPartialFailure` RED |
+| GITEXEC-OFFLINE-BELT | drop `GIT_ALLOW_PROTOCOL=none` from `Run`'s overlay → an offline `ls-remote file://…` succeeds instead of being refused → `TestOfflineRefusesTransport` RED (unit-level half of INV-NO-NETWORK) |
+| GITEXEC-CAPTURE | make `run` swallow a non-zero exit (return `nil` instead of `*ExitError`) → `TestRunSurfacesExitError` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 

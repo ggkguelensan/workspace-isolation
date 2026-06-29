@@ -82,6 +82,15 @@ func hermeticEnv() []string {
 	)
 }
 
+// GitEnv returns a copy of the hermetic environment applied to git invocations,
+// for tests that drive git through another package (e.g. internal/gitexec) and
+// need the same isolation as Git.
+func (e *Env) GitEnv() []string {
+	out := make([]string, len(e.env))
+	copy(out, e.env)
+	return out
+}
+
 // Git runs `git <args...>` in dir under the hermetic environment, fails the test
 // on a non-zero exit (surfacing stderr), and returns trimmed stdout.
 func (e *Env) Git(t *testing.T, dir string, args ...string) string {
