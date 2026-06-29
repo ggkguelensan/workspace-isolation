@@ -64,7 +64,14 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   missing manifest → not_found+`wi init`; reads each manifest URL into the `RepoSpec`; projects per-repo
   `synced`/`noop` + freshness; `StatusPartial`→durable `(result, *CommandError{partial, Action:synced})`;
   per-repo `error.kind` deferred to the gitexec classifier = decision #K). Added a `Clock` field to `Deps`.
-  Guard `CMD-SYNC`. What remains for MVP: the last two
+  Guard `CMD-SYNC`. **The deferred AST-preserving config EDIT path has now landed** (`internal/config`
+  `edit.go`): `config.Add(path, name, url, base)` splices a new repo object into the existing `repos`
+  array as raw TEXT — preserving every comment/whitespace byte — rather than round-tripping through
+  encoding/json (which the read path's `stripJSONC` proves would drop comments); validates name via
+  `ValidateSegment` + non-empty url BEFORE any read, refuses a duplicate with the new `ErrDuplicateRepo`
+  sentinel, omits the base field when `base==""` (inherit `defaults.base`), re-Parses its own output as a
+  belt before the atomic `lockfs.WriteFileAtomic`. Guard `CONFIG-ADD`. This unblocks `wi repo add`, whose
+  thin handler is the next unit. What remains for MVP: the last two
   per-command handlers (`repo add`/`isolate rm`), each a `Command` returning a
   `*Result`/`*CommandError` over the green M0–M2 core (never an envelope, never an exit code) with a
   `BuildRegistry` factory binding its deps + validating its args; then `cmd/wi` main (build the real registry + `clock.System`, call `Dispatch`, the
@@ -79,6 +86,25 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M3 · `internal/config.Add` — the AST-preserving manifest EDIT path** (`edit.go` + `edit_test.go`).
+  The deferred WRITE half of `internal/config` (companion to the `CONFIG-PARSE` read path), and the
+  primitive `wi repo add` is built on. `Add(path, name, url, base) error` appends a repo declaration by
+  **splicing a raw object literal into the existing `repos` array as text**, leaving every other byte
+  (comments, whitespace, key order) untouched — deliberately NOT a `Parse → mutate → Marshal` round-trip,
+  which `stripJSONC` proves would discard every comment the user wrote. Mechanics: `findReposArray` locates
+  the top-level `repos` array's `[`/`]` by tracking object depth + string/comment state (so a brace inside
+  a string/comment never moves the cursor, and the key is matched only at object depth 1);
+  `lastElementEnd` finds the insertion point just past the last element's closing brace (comma-prefixed
+  insert) or reports an empty array (no-comma insert after `[`); `lineIndent` aligns the new line under
+  the closing bracket. Validation (`ValidateSegment` on name, non-empty url) runs BEFORE any read so a bad
+  request never touches the file; a duplicate name returns the new `ErrDuplicateRepo` sentinel (→
+  `already_exists`); `base==""` OMITS the base field so the repo inherits `defaults.base` (Add never
+  writes the resolved default); the rewrite is re-`Parse`d as a belt before the atomic
+  `lockfs.WriteFileAtomic`, so a splicing bug can never persist a corrupt manifest. Guard `CONFIG-ADD`
+  (clean add preserves all comments + existing repos and re-parses with the new repo; inherited-base
+  omission; empty-array insert; duplicate refusal leaves the file byte-for-byte intact; unsafe name and
+  missing manifest both refuse before write). Mutant demonstrated: `data = stripJSONC(data)` before the
+  splice → comments vanish but structure stays valid → RED isolated to the comment-survival assertions.
 - **M2/B · `internal/sync` — the sync domain core (materialize + advance + record freshness)**
   (`sync.go` + `sync_test.go`). The orchestration core behind `wi sync`, built as its own domain package
   for symmetry with `internal/isolate` (the other materializing command) and hermetic testability — the
@@ -812,18 +838,17 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   → exit 64). Guard each with its own fitness test asserting ONLY the domain mapping (the generic
   `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/exit wiring), following
   `CMD-RESOLVE`/`CMD-INIT`/`CMD-ISOLATE-NEW`.
-  **Suggested next: the `cmd_repo_add.go` handler** (`wi repo add <name> <url> [--base <branch>]`) — the
-  unit where the deferred **AST-preserving config edit path** finally lands. Plan: a new
-  `config.Add(path, Repo)` (or `config`-package editor) that READS `wi.config.jsonc`, inserts the new repo
-  object into the `repos` array, and ATOMICALLY rewrites the file **preserving comments and formatting**
-  (the hand-rolled JSONC stripper is read-only — the edit path must NOT round-trip through
-  `encoding/json`, which would drop comments; insert textually into the existing byte stream). Take the
-  `project-registry` lock for the duration (registry mutation, serializes concurrent `repo add`s). Refuse
-  a duplicate name → `already_exists`; a missing manifest → not_found+`wi init`; a malformed manifest →
-  usage. The factory validates `<name>` through `layout.ValidateSegment` (a path segment) at parse time and
-  requires exactly `<name> <url>` (+ optional `--base`). Project onto `Result{Action:created, …}` (no
-  network, no repos[]). Guard `CMD-REPO-ADD` asserts: a clean add appends + preserves a sentinel comment;
-  a duplicate name → `already_exists`; the manifest is byte-stable except the inserted block. Then
+  **Suggested next: the `cmd_repo_add.go` handler** (`wi repo add <name> <url> [--base <branch>]`). The
+  AST-preserving config edit path it needs — `config.Add(path, name, url, base)` — **has now landed**
+  (guard `CONFIG-ADD`; textual splice into the `repos` array, comment-preserving, `ErrDuplicateRepo`,
+  base-omitted-when-empty, atomic write + re-parse belt), so this unit is now a THIN handler over it.
+  Plan: take the `project-registry` lock for the duration (registry mutation, serializes concurrent
+  `repo add`s); call `config.Add`; map `ErrDuplicateRepo` → `already_exists`, `fs.ErrNotExist` →
+  not_found+`wi init`, any other Parse error → usage. The factory validates `<name>` through
+  `layout.ValidateSegment` (a path segment) at parse time and requires exactly `<name> <url>` (+ optional
+  `--base`). Project onto `Result{Action:created, …}` (no network, no repos[]). Guard `CMD-REPO-ADD`
+  asserts: a clean add returns `created` and the manifest now re-parses with the repo; a duplicate name →
+  `already_exists` leaving the file intact; an unsafe name → usage. Then
   `isolate rm` (evidence-positive reclamation via `refs/wi/owned/<task>/<repo>` — HARD BLOCK on an
   unexplained orphan, never auto-prune; DESIGN §7.1).
 - **Then** `cmd/wi/main.go` — the single process entry: discover the root → build `Deps` +
@@ -888,6 +913,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CMD-ISOLATE-NEW | in `isolateNewCmd.Run`, on `res.Status == isolate.StatusPartial` return `(result, nil)` instead of `(result, *CommandError{Kind:partial})` → a partial is mis-reported as a clean success (no error, exit 0) → `TestIsolateNewDurablePartial` RED (`want *cli.CommandError, got <nil>`); or drop the unknown-repo `!ok` not_found branch (skip the `cfg.Lookup` check) → `TestIsolateNewUnknownRepoIsNotFound` RED (no error / wrong kind) |
 | SYNC-RUN | drop the `g.FastForwardBaseRef` call in `syncOne` (`if false {…}`, keep the snapshot built from `originSHA`) → after the origin advances the on-disk base ref is never moved → `TestSyncFastForwardsToNewOriginTip` RED (on-disk base frozen at the seed tip, not the new origin tip), while the fresh-materialize + continue-on-fail tests stay GREEN (isolates the mutant to the advance path); secondary: turn the per-repo loop's continue-on-fail into break/return-on-first-error → `TestSyncContinuesOnFailureAndReportsPartial` RED (the reachable repo after the failed one is never synced) |
 | CMD-SYNC | in `syncCmd.Run`, on `res.Status == syncpkg.StatusPartial` return `(result, nil)` instead of `(result, *CommandError{Kind:partial})` → a partial sync is mis-reported as a clean success (no error, exit 0) → `TestSyncHandlerDurablePartial` RED (`want *cli.CommandError, got <nil>`), while `TestSyncHandlerSyncsAllDeclaredRepos` stays GREEN (isolates the mutant to the partial-mapping path); alternate: drop the unknown-repo `!ok` not_found branch in `selectRepos` → `TestSyncHandlerUnknownRepoIsNotFound` RED (no error / wrong kind) |
+| CONFIG-ADD | after `os.ReadFile` in `config.Add`, strip comments before splicing (`data = stripJSONC(data)`) → the rewrite is still valid JSON containing every repo but the comments are gone → `TestAddAppendsPreservingComments` + `TestAddIntoEmptyArray` RED on the comment-survival assertions, while the repo-presence/re-parse assertions stay GREEN (isolates the mutant to the AST-preserving property — proving the edit is genuinely comment-preserving, not merely "produces valid JSON"); secondary: drop the `,` separator in the non-empty splice (`",\n"`→`"\n"`) → two adjacent objects with no separator → the post-rewrite Parse belt rejects it → `TestAddAppendsPreservingComments` RED (Add returns an error) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
