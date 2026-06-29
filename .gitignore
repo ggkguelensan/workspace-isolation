@@ -1,0 +1,12 @@
+# wi machine runtime state — never committed (see DESIGN.md §1)
+.wi/
+
+# session-local Claude Code state
+.claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json
+
+# Go build artifacts
+/wi
+/dist/
+*.out
+*.test

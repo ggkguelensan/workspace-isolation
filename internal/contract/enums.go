@@ -1,0 +1,118 @@
+// Package contract is the SOLE owner of wi's wire contract: the closed enums,
+// exit codes, capability vocabulary, and (in later units) the Envelope wire
+// type. Every other package imports these constants; none redefine them.
+//
+// See DESIGN.md §3 for the locked specification.
+package contract
+
+// SchemaVersion is the wire-contract version embedded in every envelope.
+// Bump (minor for additive, major for breaking) on any envelope shape change;
+// the contract.lock.json drift guard fails CI if the shape moves without it.
+const SchemaVersion = "1.0"
+
+// Action is the closed set of mutation outcomes reported in Envelope.Action.
+type Action string
+
+const (
+	ActionCreated Action = "created"
+	ActionRemoved Action = "removed"
+	ActionSynced  Action = "synced"
+	ActionLanded  Action = "landed"
+	ActionRead    Action = "read"
+	ActionNoop    Action = "noop"
+)
+
+// AllActions returns the closed Action vocabulary in canonical order.
+func AllActions() []Action {
+	return []Action{
+		ActionCreated, ActionRemoved, ActionSynced,
+		ActionLanded, ActionRead, ActionNoop,
+	}
+}
+
+// ErrorKind is the closed set of machine-branchable error categories.
+// Agents branch on ErrorKind and ExitCode, NEVER on Error.Message text.
+type ErrorKind string
+
+const (
+	KindUsage         ErrorKind = "usage"
+	KindNotFound      ErrorKind = "not_found"
+	KindDirtyWorktree ErrorKind = "dirty_worktree"
+	KindConflict      ErrorKind = "conflict"
+	KindLockHeld      ErrorKind = "lock_held"
+	KindMirrorStale   ErrorKind = "mirror_stale"
+	KindNeedsApproval ErrorKind = "needs_approval"
+	KindAlreadyExists ErrorKind = "already_exists"
+	KindPartial       ErrorKind = "partial"
+	KindRemoteError   ErrorKind = "remote_error"
+	KindInternal      ErrorKind = "internal"
+)
+
+// AllErrorKinds returns the closed ErrorKind vocabulary in canonical order.
+func AllErrorKinds() []ErrorKind {
+	return []ErrorKind{
+		KindUsage, KindNotFound, KindDirtyWorktree, KindConflict,
+		KindLockHeld, KindMirrorStale, KindNeedsApproval, KindAlreadyExists,
+		KindPartial, KindRemoteError, KindInternal,
+	}
+}
+
+// ExitCode is the closed set of process exit codes. See DESIGN.md §3.2.
+type ExitCode int
+
+const (
+	ExitOK          ExitCode = 0   // success — including noop and every --dry-run
+	ExitPartial     ExitCode = 2   // durable, resumable partial success
+	ExitNotFound    ExitCode = 3   // not_found
+	ExitRefused     ExitCode = 4   // dirty_worktree / conflict / already_exists
+	ExitNeedsApprov ExitCode = 5   // needs_approval (reachable once hooks ship, v2)
+	ExitLocked      ExitCode = 6   // lock_held, or mirror_stale on the land path
+	ExitUsage       ExitCode = 64  // usage error
+	ExitInternal    ExitCode = 70  // internal error
+	ExitInterrupted ExitCode = 130 // interrupted (SIGINT)
+)
+
+// AllExitCodes returns the closed ExitCode set in canonical (ascending) order.
+func AllExitCodes() []ExitCode {
+	return []ExitCode{
+		ExitOK, ExitPartial, ExitNotFound, ExitRefused, ExitNeedsApprov,
+		ExitLocked, ExitUsage, ExitInternal, ExitInterrupted,
+	}
+}
+
+// Capability is the closed vocabulary advertised in Envelope.Capabilities.
+// Capabilities advertises ONLY wired commands — see Capabilities().
+type Capability string
+
+const (
+	CapHelpJSON        Capability = "help-json"
+	CapResolveBlock    Capability = "resolve-block"
+	CapDryRun          Capability = "dry-run"
+	CapPartialSuccess  Capability = "partial-success"
+	CapLand            Capability = "land"
+	CapLandAtomic      Capability = "land-atomic"
+	CapStateKV         Capability = "state-kv"
+	CapPorts           Capability = "ports"
+	CapHooks           Capability = "hooks"
+	CapRemoteDiscovery Capability = "remote-discovery"
+)
+
+// AllCapabilities returns the full closed Capability vocabulary in canonical
+// order. This is the vocabulary, NOT the set advertised at runtime: Capabilities()
+// returns only the subset backed by a wired command in the current build.
+func AllCapabilities() []Capability {
+	return []Capability{
+		CapHelpJSON, CapResolveBlock, CapDryRun, CapPartialSuccess,
+		CapLand, CapLandAtomic, CapStateKV, CapPorts, CapHooks, CapRemoteDiscovery,
+	}
+}
+
+// Capabilities returns the capabilities advertised by the CURRENT build — only
+// those backed by a wired command. v0 (M0–M3) lights the first four; land* is
+// added at M4, ports/hooks at M5. This keeps the "capability ⇒ backing command"
+// invariant true so an agent never branches on a capability that does nothing.
+func Capabilities() []Capability {
+	return []Capability{
+		CapHelpJSON, CapResolveBlock, CapDryRun, CapPartialSuccess,
+	}
+}
