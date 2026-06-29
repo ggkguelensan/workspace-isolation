@@ -66,3 +66,21 @@ jobs:
 
       - name: go test
         run: go test ./...
+
+  # goreleaser config is release DATA, not Go — it has no `go test` guard. Its fitness is
+  # `goreleaser check`, run here on every push/PR so a malformed or deprecated `.goreleaser.yaml`
+  # fails CI just like a broken test would. `check` only validates the config (no build, no
+  # network, no tags), so this job is fast and needs neither the Go toolchain nor git history.
+  goreleaser-config:
+    name: goreleaser check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: goreleaser check
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2" # pin the major; never auto-upgrade (PLAN §6)
+          args: check

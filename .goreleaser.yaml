@@ -1,0 +1,78 @@
+# goreleaser config for the `wi` binary (schema v2; pinned major `~> v2`, never auto-upgraded —
+# PLAN §6). This is release DATA, not Go: its fitness is `goreleaser check` (run in CI and locally),
+# NOT a `go test` guard. Sub-unit (b) of M3 release scaffolding — the build/archive/checksum/release
+# core. The Homebrew `brews:` block (sub-unit c) and the tag-push release workflow land next.
+#
+# Decision #GR (recorded in PROGRESS.md): cross-compile cmd/wi for {darwin,linux} × {amd64,arm64},
+# reproducible (CGO off + -trimpath + mod_timestamp), tar.gz archives + a sha256 checksums file.
+# Version stamping via -X is intentionally omitted: cmd/wi/main.go declares no version/commit/date
+# vars yet, so referencing them would inject into non-existent symbols — deferred to a `wi version`
+# unit that adds the vars first.
+version: 2
+
+project_name: wi
+
+before:
+  hooks:
+    # Keep the module graph tidy and pre-download deps before the matrix build fans out.
+    - go mod tidy
+    - go mod download
+
+builds:
+  - id: wi
+    main: ./cmd/wi
+    binary: wi
+    env:
+      - CGO_ENABLED=0 # static, pure-Go (INV-NO-LLM/zero-cgo posture); reproducible across hosts
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath # strip local paths from the binary → reproducible builds
+    ldflags:
+      - -s -w # drop symbol table + DWARF; smaller release binaries
+    mod_timestamp: "{{ .CommitTimestamp }}" # deterministic file mtimes for byte-stable archives
+
+archives:
+  - id: wi
+    ids:
+      - wi
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE* # glob; harmless if absent until a license lands
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  # `goreleaser build/release --snapshot` (no git tag) needs a synthetic version.
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^style:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: ggkguelensan
+    name: workspace-isolation
+  draft: false
+  prerelease: auto # a v*-rc / pre-release tag is published as a prerelease
+  mode: replace
