@@ -10,8 +10,9 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 ## Current position
 
 - **Milestone:** **M2 in progress** (domain command core: `config`, `state`, `isolate`, `resolve`).
-  `internal/config` read+validate half landed and green. **Next: `internal/state`** (registry per-repo
-  + namespaced KV + cas), then `isolate` (worktree + marker ref), then `resolve` (path bundle).
+  `internal/config` read+validate AND `internal/state` per-isolate registry record landed and green.
+  **Next: `internal/isolate`** (N-repo worktree add + wi-owned marker ref), then `resolve` (path bundle).
+  Likely state follow-ons (namespaced KV + `cas`) remain, pulled in when a command needs them.
   M0 + M1 complete: contract spine, layout, opid, clock, testenv, lockfs, lock, `gitexec` runner+belt,
   full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch / DivergedCounts), complete
   `internal/mirror`, and both DESIGN §2 architecture invariants (INV-NO-LLM + INV-NO-NETWORK).
@@ -323,30 +324,56 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   hand-rolled stripper + stdlib, zero new deps) recorded below. The AST-preserving *edit* path (for
   `repo add`) and trailing-comma tolerance are deferred to the writer unit.
 
+- **M2 · `internal/state` (runtime registry — per-isolate record)** — `state.go` + `state_test.go`:
+  the SOLE owner of the `.wi/state/` runtime registry (DESIGN §map line 168). `IsolateRecord{Task, OpID,
+  Repos []RepoRecord}` with `RepoRecord{Repo, Stage}` is the durable entry for one isolate;
+  `NewIsolateRecord(task, opID, repos)` builds every declared repo at `StagePending`. Persistence mirrors
+  `internal/mirror` exactly: flat `<stateDir>/<task>.json`, task name routed through the shared
+  `layout.ValidateSegment("task", …)` traversal chokepoint, `Store` = `json.MarshalIndent`+`\n`+the single
+  atomic writer `lockfs.WriteFileAtomic` (§6.2), `Load` with `fs.ErrNotExist`→`ErrNoRecord` (the
+  "isolate never created" sentinel, like mirror's `ErrNoSnapshot`). **`UpdateRepoStage(stateDir, task,
+  repo, stage)`** is the durable-partial-success operation (DESIGN §6.3): load → flip exactly the named
+  repo's stage (unknown repo is an error) → atomic re-store, called **after each worktree add** so a crash
+  mid-multi-repo leaves a registry reflecting EXACTLY the completed repos. Takes no Runner and dials
+  nothing (pure local persistence, like mirror); the caller holds the `isolate-state:<task>` lock around
+  the load-modify-store. Guards: `STATE-PERSIST` (Store/Load round-trip with all-pending fresh start,
+  missing→`ErrNoRecord`, unsafe task name rejected, `UpdateRepoStage` flips one repo + errors on unknown
+  repo, flat-`<task>.json` path) + `STATE-DURABLE` (an `UpdateRepoStage` interrupted in the atomic
+  writer's pre-rename crash window via `WI_FAULT=lockfs.before_rename` MUST fail and leave the PRIOR
+  durable record intact — the completed flip survives, the interrupted one neither applies nor tears the
+  file). **Three mutants demonstrated:** `Store` diverts the write (`p+".mutant"`) → `Load` can't find it
+  → `TestRecordRoundTrips` RED; `UpdateRepoStage` skips its unknown-repo error (`found := true`) →
+  flipping a non-existent repo wrongly succeeds → `TestUpdateRepoStageFlipsOneRepo` RED; `Store` swaps the
+  atomic writer for `os.WriteFile` (lockfs kept referenced so the *assertion* reddens, not the compiler) →
+  the injected pre-rename crash no longer aborts so the interrupted flip lands → `TestDurablePartialSuccess`
+  RED. All reverted → full `go build/vet/test` GREEN. **Decision #S** (Stage is a state-owned typed string,
+  not a contract enum) recorded below.
+
 ## Next unit (pick this on the next firing) — M2 continues
 
 M2 (DESIGN §map: `config`, `state`, `isolate`, `resolve`) is the domain command core: committed
 manifest + runtime registry + isolate create/remove/repair + the resolve path bundle. Build order
-within M2: `config` ✅ → **`state`** → `isolate` → `resolve`.
+within M2: `config` ✅ → `state` ✅ → **`isolate`** → `resolve`.
 
-- **NEXT: M2 · `internal/state` · runtime registry (read+write start).** `internal/state` is the SOLE
-  owner of the `.wi/state/` runtime registry + namespaced KV + `cas` (DESIGN §map line 168). It records
-  what isolates exist and each isolate's per-repo stage, written incrementally so a multi-repo op that
-  fails partway leaves a registry reflecting EXACTLY the completed repos (DESIGN §6 durable partial
-  success; `state.UpdateRepoStage` is called **after each worktree add**, line 252). Start with the
-  smallest cohesive unit: the per-isolate registry record type + atomic load/store via
-  `lockfs.WriteFileAtomic` (the §6.2 single-writer; mirror's `Store`/`Load` is the precedent), keyed by
-  task name through `layout.ValidateSegment`. The `cas` (compare-and-swap, `--expected __ABSENT__`
-  sentinel — DESIGN §line 321) and the namespaced KV are likely follow-on units; `UpdateRepoStage`
-  (incremental per-repo stage flip) is the partial-success-critical operation and may be its own unit
-  with a crash-injection (`WI_FAULT`) guard that kills mid-multi-repo and asserts the registry equals the
-  completed set (PLAN §line 185). Decide the record shape (task → {repos: {repo → stage}}; stage vocab —
-  likely `pending|completed`, confirm against `landstate`'s separate `pending|landed|blocked` so the two
-  don't get conflated) at impl time and record. Closed stage enums belong to `internal/contract` if they
-  surface in the envelope — check before defining locally.
-- Then **`isolate`** (N-repo worktree add + wi-owned marker ref `refs/wi/owned/<task>/<repo>`,
-  decision #2; writes each RepoRecord incrementally), **`resolve`** (path bundle). M2 completing unlocks
-  M3 (`cli`/`help`/`suggest` + `cmd/wi` → MVP end-to-end).
+- **NEXT: M2 · `internal/isolate` · isolate create (the partial-success-critical command core).**
+  `isolate new <task> [repos…]` materializes one worktree per declared repo off the SSOT base, recording
+  progress in `internal/state` as it goes. Build order within the unit, smallest cohesive first: (1) the
+  single-repo worktree-add verb on `internal/git` (`git worktree add --detach <isolas/<task>/<repo>>
+  <base-tip>` into the per-isolate tree, offline `Run`), then (2) the **wi-owned marker ref**
+  `refs/wi/owned/<task>/<repo>` (decision #2 — evidence-positive ownership for reclamation; create via
+  `update-ref` in the SSOT clone), then (3) the N-repo orchestration that writes `state.NewIsolateRecord`
+  (all pending) BEFORE adding any worktree and calls `state.UpdateRepoStage(…, StageCreated)` **after each**
+  add. The orchestration is **stop-on-first-fail with durable, not-rolled-back completed repos** (DESIGN
+  §6.3 durable partial success, exit 2, resumable) — the `state` package already proves the registry stays
+  durable across a crash mid-flip; isolate just has to drive it in the right order under the
+  `isolate-state:<task>` lock. Honor SSOT invariants: the worktree adds come off `refs/heads/<base>` but
+  NEVER move it (only `git.FastForwardBaseRef` advances a base ref); no checkout/dirt in `repos/`.
+  Fitness ideas: a worktree-add guard (worktree exists + detached at base tip + marker ref present) and a
+  partial-success guard (inject a `WI_FAULT` crash on the 2nd repo's add → registry shows repo 1
+  `StageCreated`, repos 2..N `StagePending`, exit 2). Likely state follow-ons (namespaced KV + `cas` with
+  the `--expected __ABSENT__` sentinel, DESIGN §line 321) get pulled in when isolate/land needs them.
+- Then **`resolve`** (path bundle — projects an isolate's repo paths into the `resolve` envelope block).
+  M2 completing unlocks M3 (`cli`/`help`/`suggest` + `cmd/wi` → MVP end-to-end).
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -383,6 +410,8 @@ within M2: `config` ✅ → **`state`** → `isolate` → `resolve`.
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |
 | CONFIG-PARSE | make `stripJSONC` a no-op (`return src`) → the golden manifest's comments become JSON syntax errors → `TestParseAcceptsGolden` RED; drop `dec.DisallowUnknownFields()` → the 3 unknown-key cases parse cleanly → `TestParseRejectsInvalid` RED |
+| STATE-PERSIST | make `Store` divert the write (`p+".mutant"`) so `Load` can't find it → `TestRecordRoundTrips` RED; or make `UpdateRepoStage` skip its unknown-repo error (`found := true`) so flipping a non-existent repo wrongly succeeds → `TestUpdateRepoStageFlipsOneRepo` RED |
+| STATE-DURABLE | replace `lockfs.WriteFileAtomic` with `os.WriteFile` in `Store` (keep `lockfs` referenced so the assertion, not the compiler, reddens) → the injected `WI_FAULT=lockfs.before_rename` no longer aborts so the interrupted flip lands → `TestDurablePartialSuccess` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
@@ -393,6 +422,18 @@ within M2: `config` ✅ → **`state`** → `isolate` → `resolve`.
   in the spec). The `stale` bool and the count are non-redundant — the count is `,omitempty` (absent at
   0), so `stale` is the stable field agents branch on. Never-fetched repo → `mirror.ErrNoSnapshot` →
   the `mirror_freshness` block is omitted entirely (≠ "fresh"). Recorded in DESIGN §5.
+
+- **#S `internal/state` stage vocabulary ownership — RESOLVED 2026-06-30** (not one of the 7 §7
+  rulings; the spec names the registry but fixes no stage type). The per-repo isolate `Stage`
+  (`StagePending` → `StageCreated`) is a small typed-string vocabulary **owned by `internal/state`, NOT a
+  closed `internal/contract` enum.** Rationale: the contract owns only the closed *wire* enums, and the
+  envelope's `RepoResult.Stage` is already an intentionally free-form `string` projection (confirmed in
+  `envelope.go`) — so a closed contract enum would over-constrain a field the contract deliberately left
+  open. The v0 isolate lifecycle is `pending → created`; the land-phase vocabulary
+  (`pending|landed|blocked`) is a SEPARATE `landstate` concern for v1 and is deliberately not conflated
+  with the isolate-materialization stage. If a stage value ever needs to surface as a *closed* envelope
+  enum, it moves to `internal/contract` then (per the standing "closed enums live in contract" rule).
+  Recorded in the `internal/state` package doc.
 
 - **#C `wi.config.jsonc` parser + manifest schema — RESOLVED 2026-06-30** (not one of the 7 §7 rulings;
   DESIGN names the file `.jsonc` and "repos, defaults, policy" but fixes no field-level schema or parser
