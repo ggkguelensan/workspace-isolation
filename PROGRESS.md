@@ -33,18 +33,28 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   retyped `string`→`WarningCode`. Extended `SHAPE-ENUM-DOUBLE-ENTRY` (`wantWarningCodes` +
   `TestWarningCodeDoubleEntry` + uniqueness). Real-source mutant (`"stray_mutant"`) confirmed RED,
   reverted → GREEN. Staleness deliberately NOT a warning — it lives in `mirror_freshness.stale`.
+- **M0/A · Envelope JSON Schema SSOT** — `schema/envelope.schema.json` (draft 2020-12,
+  `additionalProperties:false`, all 11 top-level keys `required` incl. `error`, closed enums for
+  action/capability/error.kind/warning.code, `schema_version` const `"1.0"`). Embedded via new
+  `package schema` (`schema/schema.go`, `//go:embed`) for the future `wi schema` command + test use.
+  First external dep: `santhosh-tekuri/jsonschema/v6` (test-only import; benign transitive
+  `x/text`,`regexp2`). Guard `SHAPE-SCHEMA` (`internal/contract/schema_test.go`): both goldens
+  validate; a 7-case malformed corpus (extra key, missing `error`, bad enums, wrong version, null
+  repos) is rejected; + non-vacuity proof that the validator still accepts the known-good golden.
+  Mutant (top-level `additionalProperties:true`) confirmed RED on `TestSchemaRejectsInvalid`,
+  reverted → GREEN. **Decision:** reserved additive blocks (`land_state`/`ports`/`hooks`/`tethers`)
+  are NOT pre-declared — added to schema+struct together at their milestone (minor bump) so the
+  upcoming `SHAPE-FINGERPRINT` schema↔struct tripwire stays exact.
 
 ## Next unit (pick this on the next firing)
 
-- **M0/A · Envelope JSON Schema SSOT** — `schema/envelope.schema.json` (draft 2020-12,
-  `additionalProperties:false`) as the published shape SSOT + `SHAPE-SCHEMA` validation guard
-  (validate the golden success/error envelopes against the schema; needs
-  `santhosh-tekuri/jsonschema` v6 — first external dep). The schema must mirror the locked
-  field set and `required` must list all 11 top-level keys incl. `error`.
-- Then: `SHAPE-FINGERPRINT` (sha256 schema↔struct tripwire so neither side drifts silently)
-  + `testdata/contract.lock.json`.
-- Before the schema locks: settle open decision #1 (warning-code vocabulary starter set), since
-  `Warning.Code` needs a closed enum to validate against. **DONE** — see WarningCode above.
+- **M0/A · SHAPE-FINGERPRINT + contract.lock.json** — a sha256 tripwire over (schema bytes +
+  struct shape + `SchemaVersion`) so neither the schema nor the Go struct can drift without the
+  other. Add `SchemaFingerprint`/`ContractVersion` consts to `internal/contract`; freeze the lock
+  in `testdata/contract.lock.json` via `TestContractFrozen`. Mutant: change a struct tag or a
+  schema enum without updating the lock → RED. This closes the Wave-A contract spine.
+- Then begin the remaining M0 packages: `internal/layout` (paths + `.wi/` bootstrap),
+  `internal/lockfs` (atomic writes — needs open decision #6), `internal/lock`, `cli/opid`.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -52,6 +62,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 |-------|--------|
 | SHAPE-ENUM-DOUBLE-ENTRY | add/reorder a value in any `All*()` without editing the `want*()` literal copy |
 | SHAPE-ENVELOPE-INVARIANTS | add `,omitempty` to `Envelope.Error`, or drop the nil→`[]` coercion for repos/capabilities/warnings/next in `MarshalJSON` |
+| SHAPE-SCHEMA | set top-level `additionalProperties:true` (or drop `error` from `required`, or widen a closed enum) in `schema/envelope.schema.json` → `TestSchemaRejectsInvalid` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 

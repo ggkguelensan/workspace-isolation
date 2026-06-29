@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ggkguelensan/workspace-isolation/schema/envelope.schema.json",
+  "title": "wi envelope",
+  "description": "The single wire type every wi command emits, exactly one per invocation. This schema is the SOURCE OF TRUTH for envelope shape; the Go contract.Envelope struct is built to satisfy it and kept in lockstep by the SHAPE-FINGERPRINT tripwire. Reserved additive blocks (land_state/ports/hooks/tethers) are intentionally NOT declared here; they are added to schema AND struct together at their milestone as a minor version bump, so this schema stays an exact mirror of the current struct.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "capabilities",
+    "op_id",
+    "command",
+    "ok",
+    "action",
+    "dry_run",
+    "repos",
+    "warnings",
+    "next",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Wire-contract version this envelope conforms to. const because this document describes exactly v1.0; a bump ships a new schema.",
+      "const": "1.0"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/capability" }
+    },
+    "op_id": {
+      "description": "Operation id. Format is enforced by the opid package + its own test, NOT by this schema (fixtures use simple ids), so this is an unconstrained string here.",
+      "type": "string"
+    },
+    "command": { "type": "string" },
+    "ok": { "type": "boolean" },
+    "action": { "$ref": "#/$defs/action" },
+    "dry_run": { "type": "boolean" },
+    "repos": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/repoResult" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/warning" }
+    },
+    "next": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "error": {
+      "description": "null on success (never omitted); an error object on failure.",
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/error" }
+      ]
+    },
+    "resolve": { "$ref": "#/$defs/resolveBlock" },
+    "planned": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/planItem" }
+    },
+    "blocked": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/blockItem" }
+    }
+  },
+  "$defs": {
+    "action": {
+      "type": "string",
+      "enum": ["created", "removed", "synced", "landed", "read", "noop"]
+    },
+    "capability": {
+      "type": "string",
+      "enum": [
+        "help-json", "resolve-block", "dry-run", "partial-success",
+        "land", "land-atomic", "state-kv", "ports", "hooks", "remote-discovery"
+      ]
+    },
+    "errorKind": {
+      "type": "string",
+      "enum": [
+        "usage", "not_found", "dirty_worktree", "conflict", "lock_held",
+        "mirror_stale", "needs_approval", "already_exists", "partial",
+        "remote_error", "internal"
+      ]
+    },
+    "warningCode": {
+      "type": "string",
+      "enum": ["hydrate_skipped", "base_behind_ssot"]
+    },
+    "repoResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "action"],
+      "properties": {
+        "repo": { "type": "string" },
+        "action": { "$ref": "#/$defs/action" },
+        "branch": { "type": "string" },
+        "worktree": { "type": "string" },
+        "mirror": { "type": "string" },
+        "sha": { "type": "string" },
+        "stage": { "type": "string" },
+        "main_state": { "type": "string" },
+        "mirror_freshness": { "$ref": "#/$defs/mirrorFreshness" },
+        "error": { "$ref": "#/$defs/error" }
+      }
+    },
+    "mirrorFreshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stale"],
+      "properties": {
+        "stale": { "type": "boolean" },
+        "fetched_at": { "type": "string" },
+        "behind_origin_as_of_fetch": { "type": "integer" }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "$ref": "#/$defs/warningCode" },
+        "message": { "type": "string" },
+        "repo": { "type": "string" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "message"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/errorKind" },
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "repo": { "type": "string" },
+        "help": { "type": "string" },
+        "did_you_mean": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "resolveBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["isolate_root", "state_dir", "log", "repos"],
+      "properties": {
+        "isolate_root": { "type": "string" },
+        "state_dir": { "type": "string" },
+        "log": { "type": "string" },
+        "repos": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/resolveRepo" }
+        }
+      }
+    },
+    "resolveRepo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "worktree", "mirror", "branch"],
+      "properties": {
+        "repo": { "type": "string" },
+        "worktree": { "type": "string" },
+        "mirror": { "type": "string" },
+        "branch": { "type": "string" }
+      }
+    },
+    "planItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action"],
+      "properties": {
+        "repo": { "type": "string" },
+        "action": { "type": "string" },
+        "detail": { "type": "string" }
+      }
+    },
+    "blockItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reason"],
+      "properties": {
+        "repo": { "type": "string" },
+        "kind": { "$ref": "#/$defs/errorKind" },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}
