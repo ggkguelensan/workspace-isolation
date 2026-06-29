@@ -9,14 +9,13 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** **M1 COMPLETE** (git verbs / SSOT posture / no-network invariant). M0 complete;
-  `gitexec` runner+belt, full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch /
-  DivergedCounts), complete `internal/mirror` (cached freshness read/classify + `Refresh` fetch
-  orchestration), and the module-wide `INV-NO-NETWORK` architecture test (`internal/invariants`) all
-  landed and green. The SSOT/mirror layer and both DESIGN §2 architecture invariants (INV-NO-LLM +
-  INV-NO-NETWORK) are done. **Next: M2** — the domain command core (`config`, `state`, `isolate`,
-  `resolve`).
-- **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); into Wave B domain code (M2)
+- **Milestone:** **M2 in progress** (domain command core: `config`, `state`, `isolate`, `resolve`).
+  `internal/config` read+validate half landed and green. **Next: `internal/state`** (registry per-repo
+  + namespaced KV + cas), then `isolate` (worktree + marker ref), then `resolve` (path bundle).
+  M0 + M1 complete: contract spine, layout, opid, clock, testenv, lockfs, lock, `gitexec` runner+belt,
+  full `internal/git` (resolve / ff / EnsureClone / IsClean / Fetch / DivergedCounts), complete
+  `internal/mirror`, and both DESIGN §2 architecture invariants (INV-NO-LLM + INV-NO-NETWORK).
+- **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); in Wave B domain code (M2).
 
 ## Done
 
@@ -300,31 +299,54 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   IsNonVacuous` RED (a blind scanner is a silent false negative). Both reverted → full `go build/vet/test`
   GREEN. **M1 is now COMPLETE** (gitexec belt + full git verbs + mirror + INV-NO-NETWORK).
 
-## Next unit (pick this on the next firing) — M2 begins
+- **M2 · `internal/config` (manifest read + validate) — M2 BEGINS** — `config.go` + `config_test.go`:
+  the SOLE owner of the committed manifest `<root>/wi.config.jsonc` (DESIGN §1 line 19, §map line 167),
+  read+validate half. `Parse([]byte) (Config, error)` strips JSONC comments then decodes with
+  `encoding/json` under `DisallowUnknownFields` (closed key set — unknown key at ANY level is a hard
+  error), requires exactly one JSON value (`dec.More()` guard), and validates each repo: non-empty
+  `name` routed through the shared `layout.ValidateSegment("repo", …)` traversal chokepoint (names become
+  `repos/<name>` segments), non-empty `url`, and an **effective base** = the repo's own `base` else
+  `defaults.base` (a repo with neither is rejected); duplicate names rejected. `Load(path)` wraps
+  `os.ReadFile`+`Parse` and surfaces a missing file as `fs.ErrNotExist` (so the CLI can branch to suggest
+  `wi init`). Resolved `Config{Defaults, Repos}` exposes effective bases so downstream never re-applies
+  the default; `Config.Lookup(name)`. `stripJSONC` is a hand-rolled state machine (normal/string/line-
+  comment/block-comment, honoring `\\` escapes so a `//` inside a JSON string survives, preserving
+  newlines for decoder error positions). Guard `CONFIG-PARSE`: golden manifest (comments + an inherited
+  base + an explicit base) → expected typed `Config`; an 11-case reject corpus (unknown key at
+  top/defaults/repo level, missing name/url, no-base-anywhere, duplicate, traversing name, malformed
+  JSON, trailing content, comments-only); empty-manifest accept floor (`{"repos":[]}` and `{}`); `Load`
+  round-trip + missing→`fs.ErrNotExist`. **Two mutants demonstrated:** `stripJSONC`→no-op (`return src`)
+  → comment becomes a JSON syntax error → `TestParseAcceptsGolden` RED; drop `DisallowUnknownFields` →
+  all 3 unknown-key cases parse cleanly → `TestParseRejectsInvalid` RED. (The "unknown repo key" case was
+  strengthened with a valid `base` so it isolates `DisallowUnknownFields` rather than tripping the
+  missing-base rule.) Both reverted → full `go build/vet/test` GREEN. **Decision #C** (JSONC parser =
+  hand-rolled stripper + stdlib, zero new deps) recorded below. The AST-preserving *edit* path (for
+  `repo add`) and trailing-comma tolerance are deferred to the writer unit.
+
+## Next unit (pick this on the next firing) — M2 continues
 
 M2 (DESIGN §map: `config`, `state`, `isolate`, `resolve`) is the domain command core: committed
 manifest + runtime registry + isolate create/remove/repair + the resolve path bundle. Build order
-within M2: **`config` first** (everything downstream reads the manifest), then `state` (the registry +
-namespaced KV + cas), then `isolate`, then `resolve`.
+within M2: `config` ✅ → **`state`** → `isolate` → `resolve`.
 
-- **NEXT: M2 · `internal/config` · parse + validate `wi.config.jsonc` (read half).** `internal/config`
-  is the SOLE owner of the committed declarative manifest at `<root>/wi.config.jsonc` (DESIGN §1 line 19,
-  §map line 167: "parse/validate/AST-preserving edit of wi.config.jsonc (owns ONLY the file)"). Start
-  with the smallest cohesive unit: a typed `Config` (repos + defaults/policy) + a `Parse`/`Load` that
-  reads the JSONC manifest and validates it (closed/known keys, required fields, repo-name validity via
-  the shared `layout.ValidateSegment` chokepoint — repo names become path segments). **Open decision to
-  settle at impl time + record:** the JSONC parser — DESIGN says the file is `.jsonc` (JSON-with-comments)
-  and that `repo add` is a *pure, AST-preserving* manifest edit (§ line 204), so the eventual writer must
-  preserve comments/formatting. Decide whether to (a) take a JSONC dep (e.g. `tidwall/jsonc` to strip
-  comments for the read path + a separate AST-preserving writer later) or (b) hand-roll, weighing it
-  against the zero-new-deps posture established for lockfs (decision #6) and the INV-NO-LLM surface. The
-  AST-preserving *edit* half (for `repo add`) is a SEPARATE later unit — this unit is read+validate only.
-  Guard `CONFIG-PARSE` (golden manifest → expected typed `Config`; a malformed/unknown-key/bad-repo-name
-  corpus rejected; accept floor). Non-vacuity mutant: make validation always-accept (or the parser ignore
-  a field) → the reject corpus / golden RED.
-- Then **`state`** (registry per-repo + KV + `cas`; `UpdateRepoStage` after each worktree add for durable
-  partial success, DESIGN §line 252), **`isolate`** (worktree add + wi-owned marker ref), **`resolve`**
-  (path bundle). M2 completing unlocks M3 (`cli`/`help`/`suggest` + `cmd/wi` → MVP end-to-end).
+- **NEXT: M2 · `internal/state` · runtime registry (read+write start).** `internal/state` is the SOLE
+  owner of the `.wi/state/` runtime registry + namespaced KV + `cas` (DESIGN §map line 168). It records
+  what isolates exist and each isolate's per-repo stage, written incrementally so a multi-repo op that
+  fails partway leaves a registry reflecting EXACTLY the completed repos (DESIGN §6 durable partial
+  success; `state.UpdateRepoStage` is called **after each worktree add**, line 252). Start with the
+  smallest cohesive unit: the per-isolate registry record type + atomic load/store via
+  `lockfs.WriteFileAtomic` (the §6.2 single-writer; mirror's `Store`/`Load` is the precedent), keyed by
+  task name through `layout.ValidateSegment`. The `cas` (compare-and-swap, `--expected __ABSENT__`
+  sentinel — DESIGN §line 321) and the namespaced KV are likely follow-on units; `UpdateRepoStage`
+  (incremental per-repo stage flip) is the partial-success-critical operation and may be its own unit
+  with a crash-injection (`WI_FAULT`) guard that kills mid-multi-repo and asserts the registry equals the
+  completed set (PLAN §line 185). Decide the record shape (task → {repos: {repo → stage}}; stage vocab —
+  likely `pending|completed`, confirm against `landstate`'s separate `pending|landed|blocked` so the two
+  don't get conflated) at impl time and record. Closed stage enums belong to `internal/contract` if they
+  surface in the envelope — check before defining locally.
+- Then **`isolate`** (N-repo worktree add + wi-owned marker ref `refs/wi/owned/<task>/<repo>`,
+  decision #2; writes each RepoRecord incrementally), **`resolve`** (path bundle). M2 completing unlocks
+  M3 (`cli`/`help`/`suggest` + `cmd/wi` → MVP end-to-end).
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -360,6 +382,7 @@ namespaced KV + cas), then `isolate`, then `resolve`.
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |
+| CONFIG-PARSE | make `stripJSONC` a no-op (`return src`) → the golden manifest's comments become JSON syntax errors → `TestParseAcceptsGolden` RED; drop `dec.DisallowUnknownFields()` → the 3 unknown-key cases parse cleanly → `TestParseRejectsInvalid` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
@@ -370,6 +393,18 @@ namespaced KV + cas), then `isolate`, then `resolve`.
   in the spec). The `stale` bool and the count are non-redundant — the count is `,omitempty` (absent at
   0), so `stale` is the stable field agents branch on. Never-fetched repo → `mirror.ErrNoSnapshot` →
   the `mirror_freshness` block is omitted entirely (≠ "fresh"). Recorded in DESIGN §5.
+
+- **#C `wi.config.jsonc` parser + manifest schema — RESOLVED 2026-06-30** (not one of the 7 §7 rulings;
+  DESIGN names the file `.jsonc` and "repos, defaults, policy" but fixes no field-level schema or parser
+  choice). **Parser:** hand-rolled JSONC comment stripper + stdlib `encoding/json` with
+  `DisallowUnknownFields`, **zero new deps** — consistent with decision #6 (zero-dep posture) and keeping
+  INV-NO-LLM trivially green; a JSONC library was rejected for the read path. **Schema (v0, minimal,
+  closed):** top-level `{ defaults?, repos? }`; `defaults` = `{ base }`; each repo = `{ name, url, base? }`
+  with effective base = repo `base` else `defaults.base`. Following the SHAPE-SCHEMA precedent (don't
+  pre-declare reserved blocks), `policy` and a manifest `version` field are NOT added speculatively —
+  they land with their feature at a documented bump. **Deferred:** the AST-preserving *edit* path (for
+  `repo add`, DESIGN §line 204) and trailing-comma tolerance are a separate writer unit; this unit is
+  read+validate only. Recorded in the `internal/config` package doc.
 
 - **#N INV-NO-NETWORK egress allowlist — RESOLVED 2026-06-30** (not one of the 7 §7 rulings; the
   enforcement form of DESIGN §2 #3). The architecture guard permits `os/exec` import + `GIT_ALLOW_PROTOCOL`
