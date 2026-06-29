@@ -113,3 +113,116 @@ func TestFastForwardRefusesNonFastForward(t *testing.T) {
 		t.Errorf("base ref moved to %s on a refused non-ff; must stay %s", after, before)
 	}
 }
+
+// Guard GIT-CLONE-DETACHED — the SSOT clone lifecycle (DESIGN §5).
+//
+// EnsureClone lazily materializes an absent SSOT clone and leaves it in the
+// SSOT posture: a DETACHED HEAD sitting at refs/heads/<base>'s tip, with the
+// base branch ref present (it is the ref FastForwardBaseRef advances) but NOT
+// checked out, so advancing the ref via update-ref never disturbs a working
+// tree. Cloning is the one network-permitted verb, so it routes through
+// gitexec.RunNetwork; a second call on an existing clone is a noop — no
+// re-clone, no network.
+//
+// Non-vacuity: clone without detaching (leave <base> checked out) → HEAD's
+// abbrev-ref is the branch name, not "HEAD" → TestEnsureCloneDetachesAtBaseTip
+// RED.
+
+func TestEnsureCloneDetachesAtBaseTip(t *testing.T) {
+	env := testenv.New(t)
+	origin := env.SeedOrigin(t, "acme")
+	originURL := "file://" + origin
+	dir := filepath.Join(env.Root, "ssot")
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	if err := g.EnsureClone(ctx, dir, originURL, testenv.DefaultBranch); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+
+	// SSOT posture: HEAD is detached (no branch is checked out). git reports the
+	// literal "HEAD" for the abbrev-ref of a detached HEAD.
+	if got := env.Git(t, dir, "rev-parse", "--abbrev-ref", "HEAD"); got != "HEAD" {
+		t.Errorf("HEAD abbrev-ref = %q, want %q (detached, no branch checked out)", got, "HEAD")
+	}
+	// ...but it sits exactly at the base ref's tip, and the base ref exists (it
+	// is what FastForwardBaseRef later advances).
+	baseTip := env.Git(t, dir, "rev-parse", "refs/heads/"+testenv.DefaultBranch)
+	headSHA := env.Git(t, dir, "rev-parse", "HEAD")
+	if headSHA != baseTip {
+		t.Errorf("HEAD = %s, want it detached at the base tip %s", headSHA, baseTip)
+	}
+}
+
+func TestEnsureCloneIsIdempotent(t *testing.T) {
+	env := testenv.New(t)
+	origin := env.SeedOrigin(t, "acme")
+	originURL := "file://" + origin
+	dir := filepath.Join(env.Root, "ssot")
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	if err := g.EnsureClone(ctx, dir, originURL, testenv.DefaultBranch); err != nil {
+		t.Fatalf("EnsureClone (first): %v", err)
+	}
+
+	// A sentinel a re-clone could not preserve: git clone refuses a non-empty
+	// target dir, and would never leave a stray file behind. Its survival proves
+	// the second call was a true noop.
+	sentinel := filepath.Join(dir, ".wi-sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	if err := g.EnsureClone(ctx, dir, originURL, testenv.DefaultBranch); err != nil {
+		t.Fatalf("EnsureClone (second, existing clone): %v", err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("sentinel gone after the second EnsureClone (%v); it re-cloned instead of no-op", err)
+	}
+}
+
+// Guard GIT-CLEAN — the SSOT-pristine predicate (DESIGN §5).
+//
+// IsClean reports whether dir's working tree and index are completely
+// unmodified (porcelain status empty) — INCLUDING the absence of untracked
+// files, since a stray turd in the SSOT clone is exactly the drift the pristine
+// invariant forbids. Two-sided: a fresh clone is clean; any change (here, one
+// untracked file) makes it dirty.
+//
+// Non-vacuity: make IsClean ignore the porcelain output and always return true
+// → the dirtied case of TestIsCleanReflectsWorkingTree RED.
+
+func TestIsCleanReflectsWorkingTree(t *testing.T) {
+	env := testenv.New(t)
+	origin := env.SeedOrigin(t, "acme")
+	dir := filepath.Join(env.Root, "ssot")
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	if err := g.EnsureClone(ctx, dir, "file://"+origin, testenv.DefaultBranch); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+
+	clean, err := g.IsClean(ctx, dir)
+	if err != nil {
+		t.Fatalf("IsClean (fresh): %v", err)
+	}
+	if !clean {
+		t.Errorf("fresh clone IsClean = false, want true (pristine)")
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "turd.txt"), []byte("dirt"), 0o644); err != nil {
+		t.Fatalf("write turd: %v", err)
+	}
+	clean, err = g.IsClean(ctx, dir)
+	if err != nil {
+		t.Fatalf("IsClean (dirty): %v", err)
+	}
+	if clean {
+		t.Errorf("clone with an untracked file IsClean = true, want false (not pristine)")
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/ggkguelensan/workspace-isolation/internal/gitexec"
@@ -37,6 +38,64 @@ func (g *Git) ResolveRef(ctx context.Context, dir, ref string) (string, error) {
 		return "", fmt.Errorf("git: resolve ref %q in %s: %w", ref, dir, err)
 	}
 	return strings.TrimSpace(res.Stdout), nil
+}
+
+// EnsureClone lazily materializes the SSOT clone for originURL at dir, left in
+// wi's SSOT posture: a detached HEAD at refs/heads/<base>'s tip (DESIGN §5).
+// The base branch ref is created (it is the ref FastForwardBaseRef advances)
+// but is NOT left checked out, so later ref advances never disturb a working
+// tree. If dir is already a git repo, EnsureClone is a noop — it never
+// re-clones and performs no network I/O. Cloning is the one network-permitted
+// verb in wi, so it (and only it) routes through gitexec.RunNetwork; the detach
+// step is local.
+func (g *Git) EnsureClone(ctx context.Context, dir, originURL, base string) error {
+	if g.isRepo(ctx, dir) {
+		return nil
+	}
+	// Clone only the base branch, so refs/heads/<base> exists locally at the
+	// origin's base tip. The clone creates dir, so it runs from the current
+	// working directory (empty cmd dir) with an explicit target.
+	if _, err := g.r.RunNetwork(ctx, "", "clone", "--branch", base, "--", originURL, dir); err != nil {
+		return fmt.Errorf("git: clone %s (branch %s) into %s: %w", originURL, base, dir, err)
+	}
+	// Detach HEAD at the freshly checked-out base tip so no branch is checked
+	// out; refs/heads/<base> remains in place for FastForwardBaseRef to advance.
+	if _, err := g.r.Run(ctx, dir, "switch", "--detach"); err != nil {
+		return fmt.Errorf("git: detach HEAD in %s: %w", dir, err)
+	}
+	return nil
+}
+
+// isRepo reports whether dir is an existing git repository. It guards the dir's
+// existence first so git is never spawned in a missing directory (which would
+// be an opaque start failure rather than a clean "not a repo").
+func (g *Git) isRepo(ctx context.Context, dir string) bool {
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return false
+	}
+	_, err := g.r.Run(ctx, dir, "rev-parse", "--git-dir")
+	return err == nil
+}
+
+// StatusPorcelain returns `git status --porcelain` output for dir (machine
+// format, stable across git versions). Empty output means a pristine tree.
+func (g *Git) StatusPorcelain(ctx context.Context, dir string) (string, error) {
+	res, err := g.r.Run(ctx, dir, "status", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("git: status %s: %w", dir, err)
+	}
+	return res.Stdout, nil
+}
+
+// IsClean reports whether dir's working tree and index are completely
+// unmodified, including the absence of untracked files. This is the
+// SSOT-pristine check (DESIGN §5): any drift at all is not clean.
+func (g *Git) IsClean(ctx context.Context, dir string) (bool, error) {
+	out, err := g.StatusPorcelain(ctx, dir)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) == "", nil
 }
 
 // NonFastForwardError reports that advancing Base to New would not be a

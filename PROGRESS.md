@@ -10,7 +10,8 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 ## Current position
 
 - **Milestone:** M1 in progress (git verbs / SSOT posture). M0 complete; `gitexec` runner+belt and
-  `git.FastForwardBaseRef` (the SSOT keystone) landed.
+  `git.FastForwardBaseRef` (the SSOT keystone) landed. `internal/git` now complete (resolve / ff /
+  EnsureClone / IsClean); next is `internal/mirror`.
 - **Wave:** A complete (modulo `NORM-CORRECT`, deferred to Wave B); into Wave B domain code
 
 ## Done
@@ -211,23 +212,34 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `testenv` SSOT): a true fast-forward advances the ref; a divergent sibling commit is REFUSED with the
   ref SHA unchanged (before==after). Mutant (drop the `--is-ancestor` precheck → unconditional
   update-ref) confirmed `TestFastForwardRefusesNonFastForward` RED (divergent target advances, no
-  error). Reverted → GREEN. Remaining M1 verbs (`EnsureClone`, dirty/status checks) follow as their own
-  units; then `internal/mirror`.
+  error). Reverted → GREEN.
+
+- **M1 · `internal/git` · `EnsureClone` + SSOT-pristine predicate** — `git.go` + `git_test.go`:
+  completes the SSOT clone lifecycle on top of the keystone. `EnsureClone(dir, originURL, base)` lazily
+  materializes an absent clone in the SSOT posture — `clone --branch <base>` (via the network-only
+  `gitexec.RunNetwork`, the ONE permitted dial) then a local `switch --detach`, so refs/heads/<base>
+  exists at the origin's base tip but is NOT checked out (advancing it via update-ref never touches a
+  working tree). Idempotent: an existing repo (guarded `os.Stat` dir + `rev-parse --git-dir`) is a noop
+  — no re-clone, no network. `StatusPorcelain`/`IsClean` are the SSOT-pristine check — `git status
+  --porcelain`, clean iff empty, so even an UNTRACKED turd counts as drift. Guards: `GIT-CLONE-DETACHED`
+  (fresh clone → HEAD abbrev-ref is `"HEAD"` AND HEAD == refs/heads/<base> tip; a sentinel file survives
+  a second call, proving no re-clone) + `GIT-CLEAN` (two-sided: fresh clone clean, one untracked file
+  dirty). Mutants confirmed: skip the `switch --detach` → HEAD abbrev-ref is `"main"` →
+  `TestEnsureCloneDetachesAtBaseTip` RED; make `IsClean` always return true →
+  `TestIsCleanReflectsWorkingTree` RED on the dirtied case. Reverted → GREEN. **`internal/git` is now
+  complete** (ResolveRef / FastForwardBaseRef / EnsureClone / StatusPorcelain / IsClean).
 
 ## Next unit (pick this on the next firing)
 
-- **M1 · `internal/git` · `EnsureClone` + working-tree status verbs.** Add the two verbs the SSOT
-  lifecycle needs next: (1) `EnsureClone(ctx, dir, originURL, base)` — lazily create an absent SSOT
-  clone **detached at the base tip** (DESIGN §5 line 203: `wi sync --repo r` clones on first use;
-  `repo add` stays a pure manifest edit), idempotent if `dir` already a valid clone. Cloning is the
-  ONE place network is allowed → must use `gitexec.RunNetwork` (everything else stays offline). Guard:
-  a fresh clone lands on a **detached HEAD** at `refs/heads/<base>`'s tip (assert `rev-parse
-  --symbolic-full-name HEAD` is detached / `HEAD` == base tip but no branch checked out); second call
-  is a noop (no re-clone). Mutant = clone without detaching (leave base checked out) → detached-HEAD
-  assertion RED. (2) A dirty/clean predicate (`IsClean`/`StatusPorcelain`) for the SSOT-pristine
-  invariant. Use `testenv.SeedOrigin` as the clone source (local `file://`, but clone is the network
-  verb so route via `RunNetwork`). After these, `internal/mirror` (cached freshness, never dials on
-  read paths).
+- **M1 · `internal/mirror` (cached freshness, never dials on read paths).** With `internal/git`
+  complete, build the mirror/freshness layer that feeds `mirror_freshness` in the envelope (DESIGN §5):
+  a fetch path (the ONLY dialing path — `gitexec.RunNetwork`) that records a cached freshness snapshot
+  (`behind_origin_as_of_fetch`, fetch timestamp, base SHA) to `.wi/mirrors/<repo>` via
+  `lockfs.WriteFileAtomic`, and READ paths that classify `main_state`/freshness purely from that cached
+  state + the LOCAL clone, performing ZERO network dials (the no-hidden-network invariant on read).
+  Start with the cached-snapshot value type + its (offline) read/classify path and a guard that read
+  never dials (drive it through the offline `Run` belt so any accidental dial is physically refused);
+  the fetch/update-snapshot path follows as its own unit. Test-first with a `testenv` origin + clone.
 
 ## Mutant registry (guard → mutant that must turn it RED)
 
@@ -254,6 +266,8 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 | GITEXEC-OFFLINE-BELT | drop `GIT_ALLOW_PROTOCOL=none` from `Run`'s overlay → an offline `ls-remote file://…` succeeds instead of being refused → `TestOfflineRefusesTransport` RED (unit-level half of INV-NO-NETWORK) |
 | GITEXEC-CAPTURE | make `run` swallow a non-zero exit (return `nil` instead of `*ExitError`) → `TestRunSurfacesExitError` RED |
 | GIT-FF-ONLY | drop the `merge-base --is-ancestor` precheck in `FastForwardBaseRef` (update-ref unconditionally) → a divergent target advances the base ref → `TestFastForwardRefusesNonFastForward` RED (missing error + moved ref) |
+| GIT-CLONE-DETACHED | skip the `switch --detach` in `EnsureClone` (leave `<base>` checked out) → HEAD abbrev-ref is the branch name, not `"HEAD"` → `TestEnsureCloneDetachesAtBaseTip` RED |
+| GIT-CLEAN | make `IsClean` ignore `StatusPorcelain` and always return `true` → an untracked file no longer reads as drift → `TestIsCleanReflectsWorkingTree` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
