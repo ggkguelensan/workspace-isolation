@@ -22,6 +22,7 @@ type Deps struct {
 // command is one line here plus its cmd_<name>.go handler — no change to Dispatch.
 func BuildRegistry(d Deps) Registry {
 	return Registry{
+		"init":    func(args []string) (Command, error) { return newInitCommand(d.Layout, args) },
 		"resolve": func(args []string) (Command, error) { return newResolveCommand(d.Layout, args) },
 	}
 }

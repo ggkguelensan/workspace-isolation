@@ -45,8 +45,12 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   handler is now plugged into it:** `wi resolve` (pure read — `state.Load`→`not_found`-on-`ErrNoRecord`,
   else `resolve.Bundle`→`Result{Action:read}`) + the `Deps`/`BuildRegistry` seam (the dep-bound factory
   map `cmd/wi` hands to `Dispatch`); guard `CMD-RESOLVE`, establishing the handler→`Result`/`CommandError`
-  contract every remaining command follows. What remains for MVP: the rest of the per-command handlers
-  (`init`/`repo add`/`sync`/`isolate new`/`isolate rm`), each a `Command` returning a
+  contract every remaining command follows. **The second handler — `wi init` — has now landed too:** it
+  scaffolds a workspace at the resolved root (Bootstrap the `.wi/` subtree, then write a starter
+  `wi.config.jsonc` LAST as an `O_EXCL` commit point; re-init → `already_exists` leaving the manifest
+  intact), resolving the config WRITE path (decision #C, minimal starter-emitter) and the root-discovery
+  decision (#G: root = cwd, init takes no operand). Guard `CMD-INIT`. What remains for MVP: the rest of
+  the per-command handlers (`isolate new`/`sync`/`repo add`/`isolate rm`), each a `Command` returning a
   `*Result`/`*CommandError` over the green M0–M2 core (never an envelope, never an exit code) with a
   `BuildRegistry` factory binding its deps + validating its args; then `cmd/wi` main (build the real registry + `clock.System`, call `Dispatch`, the
   single `os.Exit` via `exitcontract.Exit`); then CI + `.goreleaser.yaml` + Homebrew tap. Deferred
@@ -60,6 +64,29 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **M3/B · `wi init` handler — workspace scaffold** (`cmd_init.go` + `BuildRegistry` line +
+  `cmd_init_test.go`). The second per-command handler and the first WRITE command (resolves decision #C's
+  deferred write path with a minimal starter-manifest emitter; the AST-preserving `repo add` edit path
+  stays deferred to its own unit). `newInitCommand(l, args)` takes NO positional operand — init DEFINES
+  the workspace at the resolved root (decision **#G**: root = cwd, the layout `cmd/wi` resolves at
+  startup; a surplus arg → `*CommandError{Kind:usage}`; an explicit `--root`/`-C` override + parent
+  walk-up are deferred, both additive/contract-neutral). `initCmd.Run` Bootstraps the `.wi/` runtime
+  subtree (idempotent) THEN writes the `starterManifest` (a commented empty-but-valid JSONC skeleton)
+  LAST as the commit point — an `O_EXCL` create, so the manifest's presence reliably marks a completed
+  init and a re-init refuses cleanly with `already_exists` (→ exit 4) rather than clobbering a real
+  manifest; Bootstrap precedes the write so a Bootstrap failure leaves no manifest and a retry starts
+  clean. No git, no network. Guard `CMD-INIT` (`cmd_init_test.go`, real `layout.Resolve`'d but
+  NOT-Bootstrapped temp root — the analog of an uninitialized cwd, driven THROUGH `BuildRegistry`'s
+  factory): a fresh dir → a `created` Result whose written manifest ROUND-TRIPS through the real
+  `config.Load` (init's emitter dogfoods the config reader so they cannot drift) + the `.wi/state`
+  subtree exists (Bootstrap ran), with paths INDEPENDENTLY derived (scheme literals joined over the root,
+  not via `l.Config()`/`l.StateDir()`); a re-init → `*CommandError{Kind:already_exists}` with the
+  existing manifest preserved byte-for-byte; factory arg validation (any operand → usage, none → a
+  runnable Command). Mutant demonstrated RED-then-reverted: open the manifest with `O_TRUNC` instead of
+  `O_EXCL` (clobber-on-reinit) → a re-init silently rewrites the manifest and returns `created` (no
+  `fs.ErrExist`→`already_exists`) → `TestInitOnExistingProjectIsAlreadyExists` RED (got a result/nil
+  error, want `*cli.CommandError`). Reverted → full `go build ./… && go vet ./… && go test ./…` GREEN
+  (20 packages).
 - **M3/B · first per-command handler — `wi resolve` + the `Deps`/`BuildRegistry` seam** (`cmd_resolve.go`
   + `cmd_registry.go` + `cmd_resolve_test.go`). The first real `Command` plugged into the green generic
   pipeline, plus the registry-builder seam `cmd/wi` will use. `Deps{Layout}` carries the
@@ -654,24 +681,23 @@ cobra). **The entire generic CLI pipeline — argv → dispatch → outcome → 
 mapped exit — is now complete and green.** What remains for MVP is the per-command handlers that plug
 real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 
-- **DONE (this iteration):** `resolve` (pure read) + the `Deps`/`BuildRegistry` seam — guard
+- **DONE (this iteration):** `init` (scaffold a workspace) — guard `CMD-INIT`; resolves decision #G
+  (root = cwd, init takes no operand). Bootstraps `.wi/` then writes a starter `wi.config.jsonc` LAST
+  (O_EXCL commit point); re-init → `already_exists` leaving the manifest byte-for-byte intact.
+- **DONE (prior iteration):** `resolve` (pure read) + the `Deps`/`BuildRegistry` seam — guard
   `CMD-RESOLVE`. The handler→`Result`/`CommandError` contract pattern is now established for the rest.
-- **NEXT — M3 · the remaining per-command handlers, one cohesive unit each** (`init` → `repo add` →
+- **NEXT — M3 · the remaining per-command handlers, one cohesive unit each** (`repo add` →
   `sync` → `isolate new` → `isolate rm`). Each is a `Command` (`Run(ctx) (*Result, error)`) doing its
   domain work over the green M0–M2 core (config/state/git/mirror/isolate) and returning a typed
   `*Result` (or `*CommandError`) — NEVER an envelope, never an exit code (the pipeline owns both) — plus
   one line in `BuildRegistry` and a factory that parses+validates its args (→ `*CommandError{Kind:usage}`
   → exit 64). Guard each with its own fitness test asserting ONLY the domain mapping (the generic
-  `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/exit wiring), following `CMD-RESOLVE`.
-  Suggested next: **`init`** — `layout.Resolve`+`Bootstrap` over a target dir (cwd or arg) + write a
-  starter `wi.config.jsonc`, `ActionCreated`; `already_exists` if a project is already there. NOTE `init`
-  needs the config WRITE path, deferred by decision #C (read-only so far) — so it pulls in a minimal
-  config writer (a starter-manifest emitter is enough; the AST-preserving `repo add` edit path can stay
-  deferred to its own unit). `init` also forces the **root-discovery** decision (cwd vs `--root` vs
-  walk-up) since it DEFINES the root — rule + record it then (lean: target = cwd, overridable by an
-  explicit arg/flag; walk-up deferred). Then the heavier `isolate new` (drive `isolate.New`, map its
-  `StatusPartial` → a durable `*CommandError{Kind:partial}` carrying `repos[]`), `sync`, `repo add`,
-  `isolate rm`.
+  `RUN-PIPELINE`/`DISPATCH-ROUTES` already prove the envelope/exit wiring), following `CMD-RESOLVE`/`CMD-INIT`.
+  Suggested next: **`isolate new <task> <repo>…`** — the marquee handler: drive `isolate.New` over the
+  config-resolved repos, map its `StatusPartial` → a durable `*CommandError{Kind:partial}` carrying the
+  per-repo `repos[]` (decision #D), `StatusComplete` → `Result{Action:created, Repos:…}`. It is the first
+  handler to read `config.Load` (the manifest init writes) + needs the clock/git in `Deps`. Then `sync`,
+  `repo add` (the deferred AST-preserving config edit path lands HERE), `isolate rm`.
 - **Then** `cmd/wi/main.go` — the single process entry: discover the root → build `Deps` +
   `clock.System`, `BuildRegistry`, call `cli.Dispatch`, and make the SOLE `os.Exit` via
   `exitcontract.Exit(code)`. Then CI + `.goreleaser.yaml` + Homebrew tap. Completing this chain = full
@@ -727,11 +753,24 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | SHAPE-DRYRUN-EXIT0 | make `cli.ExitFor` return a refusal code when `len(env.Blocked)>0` (treat a would-block verdict as a refusal) → `TestExitForBlockedVerdictsAreExitNeutral` RED (blocked must be exit-neutral); the companion assertion that a genuine usage error on a `--dry-run` still maps to 64 guards against the over-correction (a blanket `if env.DryRun { return ExitOK }` would wrongly swallow it) |
 | SHAPE-TEXT-PROJECTION | drop ANY field from `cli.RenderText`/its helpers (e.g. comment out the `worktree` line in `renderRepo`) → that field's unique sentinel leaf is absent from the render → `TestRenderTextIsLossless` RED, naming the exact dropped fact (the independent `collectStringLeaves` reflection walk enumerates every envelope string leaf; the hand-written renderer can't silently omit one). Non-vacuity is inline: ≥25 leaves must be found and a never-present sentinel must NOT match |
 | CMD-RESOLVE | in `resolveCmd.Run` drop the `errors.Is(err, state.ErrNoRecord)` branch (`if false && …`) → a missing isolate falls through as a plain error → maps to kind=internal not not_found → `TestResolveMissingIsolateIsNotFound` RED (got `*errors.errorString`, want `*cli.CommandError{not_found}`); or make `newResolveCommand` accept any arg count (skip `len(args)!=1`) → `TestResolveFactoryValidatesArgs` RED |
+| CMD-INIT | in `initCmd.Run` open the manifest with `O_TRUNC` instead of `O_EXCL` (clobber-on-reinit) → a re-init silently rewrites the manifest and returns `ActionCreated` (no `fs.ErrExist`→`already_exists`) → `TestInitOnExistingProjectIsAlreadyExists` RED (got a result + nil error, want `*cli.CommandError{already_exists}`, and the manifest is no longer preserved); or make `newInitCommand` accept any arg count (skip `len(args)!=0`) → `TestInitFactoryRejectsArgs` RED |
 | DISPATCH-ROUTES | in `cli.resolveCommand` ignore the parsed name and always return a fixed real command (`return "init", positional, true`) → an unknown name wrongly runs a real command (exit 0 not 64) → `TestDispatchRoutesUnknownToUsage` RED, and the 2-token name is mis-stamped with its args dropped → `TestDispatchRoutesTwoTokenCommand` RED; or skip the `op_id` mint (leave `Meta.OpID` empty) → `TestDispatchMintsOpID` RED (`opid.Valid("")` fails on both the success and usage paths) |
 | RUN-PIPELINE | in `cli.envelopeFor` drop the durable-partial result-merge (`if false && r != nil { env.Repos = r.Repos … }`) → a partial no longer carries its per-repo detail → `TestExecutePartialCarriesReposAndExitsTwo` RED ("got 0 repos"); or make `Execute` ignore `ExitFor` and `return contract.ExitOK` → every non-zero-exit assertion (CommandError→3, partial→2, internal→70) RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
+- **#G root discovery — RESOLVED 2026-06-30** (not one of the 7 §7 rulings; DESIGN pins no
+  root-discovery mechanism, and `wi init` forces it because it DEFINES the root). **Root = the current
+  working directory.** `cmd/wi` resolves the layout once at startup via `layout.Resolve(cwd)` and hands
+  it to every command through `Deps.Layout`; `wi init` therefore takes NO positional dir operand — it
+  scaffolds the workspace at that resolved root (Bootstrap + starter manifest). Rationale: cwd is the
+  universal zero-config default; agents invoke `wi` from the workspace root; an explicit override and
+  walk-up both add ambiguity better deferred. **Deferred (additive, contract-neutral):** a global
+  `--root <dir>`/`-C <dir>` override (lives in `Dispatch.parseGlobals`, applies uniformly to ALL
+  commands — the documented overridability mechanism), and parent-directory walk-up (which ancestor is
+  the project? — resolve explicitly later, e.g. by the presence of `wi.config.jsonc`). Recorded here +
+  in the `cmd_init.go`/`newInitCommand` doc comments; the `cmd/wi` main (a later unit) implements the
+  `layout.Resolve(cwd)` startup path.
 - **#F CLI arg-parsing library — RESOLVED 2026-06-30** (an open architectural decision from the PLAN
   stack/Wave-B text, which named `cobra` as a candidate and listed it among the `go.mod` pins; recorded
   as a new resolved item in PLAN §7). **Hand-rolled stdlib parser, NOT cobra** (no new dependency). `internal/cli.Dispatch` does its own parsing: a forgiving single-pass global-flag
