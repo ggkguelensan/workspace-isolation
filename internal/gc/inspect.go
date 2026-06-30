@@ -75,7 +75,7 @@ func Inspect(ctx context.Context, l layout.Layout, g *git.Git) ([]Candidate, err
 			if !re.IsDir() {
 				continue
 			}
-			cand, err := observeCandidate(ctx, l, g, task, re.Name(), live)
+			cand, err := observeCandidate(ctx, l, g, task, re.Name(), live[cellKey{task, re.Name()}])
 			if err != nil {
 				return nil, err
 			}
@@ -108,10 +108,12 @@ func liveSet(l layout.Layout) (map[cellKey]bool, error) {
 
 // observeCandidate reads the four reclamation signals for one on-disk worktree cell and
 // returns the Candidate for Classify. It never moves a ref or dirties a worktree — it
-// reads the marker ref, the worktree HEAD, and `git status`, and joins the precomputed
-// live set. The worktree path is resolved through layout.Isolate so a maliciously-named
+// reads the marker ref, the worktree HEAD, and `git status`; liveCell (whether a live
+// registry record claims this cell) is supplied by the caller, which holds the relevant
+// liveness read (Inspect a workspace snapshot, Collect this task's record under its
+// lock). The worktree path is resolved through layout.Isolate so a maliciously-named
 // task/repo directory is rejected loudly (ValidateSegment) rather than swept.
-func observeCandidate(ctx context.Context, l layout.Layout, g *git.Git, task, repo string, live map[cellKey]bool) (Candidate, error) {
+func observeCandidate(ctx context.Context, l layout.Layout, g *git.Git, task, repo string, liveCell bool) (Candidate, error) {
 	ssot, err := l.Repo(repo)
 	if err != nil {
 		return Candidate{}, err
@@ -134,7 +136,7 @@ func observeCandidate(ctx context.Context, l layout.Layout, g *git.Git, task, re
 		Task:      task,
 		Repo:      repo,
 		HasMarker: hasMarker,
-		Live:      live[cellKey{task, repo}],
+		Live:      liveCell,
 		Clean:     clean,
 	}
 	// AheadOfBase only has meaning relative to the marker's recorded base (the v0
