@@ -115,10 +115,32 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   verified via `GOOS=linux go build ./...` + `GOOS=linux go vet ./internal/lock/` (typechecks the linux
   classifier AND its test — can't RUN on the darwin host, so its RED is reasoned, not observed). `gofmt`/`go
   build ./...`/`go test ./...` all GREEN (24 packages) + linux cross-compile/vet clean.
-  NEXT M4 unit: the break ORCHESTRATION (HEAL-3) that composes the two gates — `FSTrustworthy(LocksDir)`
-  AND `ReadHolder`→`ProvenDead` (an unknown holder, i.e. a `ReadHolder` error, is NEVER broken) — into a
-  single "is this contended lock safe to break?" decision, then the `lock ls`/`lock break` commands and
-  wiring the decision into `Acquire`'s `HeldError` path.
+  (12) ✅ **this firing** — the **read-only break decision** `AssessBreak(locksDir, key) (BreakDecision,
+  error)` (guard `LOCK-SAFE-TO-BREAK`, `internal/lock/assess_unix.go`), composing the two independent gates
+  from units (10)+(11) into the single HEAL-3 verdict (DESIGN §7.3 / §7.4). It is side-effect free: statfs's
+  `locksDir` (`FSTrustworthy`) and reads the lock body (`ReadHolder`→`ProvenDead`), taking NO flock and
+  writing nothing — exactly how a contender that lost the TryLock race inspects the holder it could not
+  displace. The verdict `BreakDecision{Safe,FSTrustworthy,HolderKnown,Holder,ProvenDead,Reason}` is
+  **conjunctive and fail-safe**: `Safe` is true ONLY when the fs is flock-trustworthy AND the holder is
+  known AND `ProvenDead` reports it gone. The three refusal limbs: an **unknown holder** (a `ReadHolder`
+  error — body-less/unparseable — is folded to `HolderKnown=false`, NOT a hard error) is never breakable; a
+  holder **not provably dead** (live/foreign-host/unknown-boot) is never breakable; an **untrustworthy fs**
+  is never breakable. Only a genuine I/O fault (statfs, or boot-id/hostname during liveness) returns an
+  error. `Reason` is a human diagnostic for the envelope/`lock ls`, deliberately NOT a closed wire enum
+  (internal/contract owns those) — the CLI maps the structured bool fields to whatever sub-code it needs.
+  Test-first (real RED→GREEN on the darwin host): three deterministic cases over `t.TempDir()` (trustworthy
+  apfs) — unknown holder (no body), live holder (`CurrentHolder` = this process), proven-dead holder (same
+  host, boot-mismatched id). Mutant = drop the `ProvenDead` conjunct (`Safe = FSTrustworthy && HolderKnown`)
+  → ONLY the live-holder case reddened (Safe=true while this process is alive — the dangerous "steal a live
+  peer's lock" direction), unknown + dead cases stayed green, proving the test isolates exactly that
+  conjunct. `gofmt`/`go build ./...`/`go test ./...` all GREEN (24 packages) + linux cross-compile/vet clean.
+  NEXT M4 unit: the **`lock` command surface** that surfaces unit (12)'s decision — `lock ls` (read-only:
+  enumerate the locks dir, `AssessBreak` each key, emit one envelope listing each holder + its Safe verdict
+  + Reason; takes no flock) is the smaller, purely-additive next step. Then `lock break` (the ACTION: gate on
+  `Safe`, and only then displace the stale lock — under flock-on-a-persistent-file the break is unlink+
+  recreate; exit 6 lock_held when not Safe). Finally, wiring `AssessBreak`→auto-break into `Acquire`'s
+  `*HeldError` path so a contended-but-stale lock self-heals transparently. Keep each as its own unit; the
+  CLI envelope/exit mapping is internal/contract's to extend (new sub-codes for the `lock` subcommands).
 
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
@@ -1387,6 +1409,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | ISOLATE-RM-STAMP (M4) | drop the `held.Stamp(opID)` call in `isolate.Remove` (the pre-wiring state) → the isolate-state lock is re-acquired but never re-stamped → its body still carries the op id `isolate.New` stamped during setup → `lock.ReadHolder(LocksDir, IsolateState(task))` returns `OpID == "op_new_for_rm_stamp"`, not the Remove op id → `TestRemoveStampsHolderOnIsolateLock` RED. Confirmed RED before green (`OpID = "op_new_for_rm_stamp", want "op_remove_stamp"`). The 4th/final acquire site; the RE-stamp angle (a fresh op overwrites the prior holder, not just an empty→full transition) proves the stamp fires in `Remove` specifically, not merely as leftover from `New`. Needed the only external signature change among the four — `opID` threaded through `Remove` + its `cmd_isolate_rm` caller + 4 test callers (DESIGN §6 / §7.3) |
 | LOCK-PROVEN-DEAD (M4) | in `ProvenDead` drop the boot-mismatch limb (`if h.BootID != bootID { return true }`), falling through to the same-boot pid check for every same-host holder → a different-boot holder whose pid happens to be a LIVE process this boot (reboot + pid reuse) reads as NOT dead → `TestProvenDead` RED on the reboot case (`different-boot, live pid = false, want true`). Confirmed RED before green (only that one assertion reddened; the live-self/reaped-pid/foreign-host/empty-origin cases stayed green, proving the test isolates exactly that limb). Alternate mutant = drop the `h.Host != hostname` guard → a foreign-host holder with a reaped pid reads as dead → RED on the foreign-host case. Pins the DESIGN §7.3 proven-dead predicate (boot mismatch OR same-boot ESRCH, same host only) that — with the fs-trust gate — is the SOLE authority to break a contended lock; conservative on every unprovable case so wi never steals a live peer's lock |
 | LOCK-FS-TRUST (M4) | make the per-OS classifier (`darwinFSTypeTrustworthy`/`linuxFSTypeTrustworthy`) `return true` unconditionally → every network/unknown fs reads as flock-trustworthy → `TestDarwinFSTypeTrustworthy` (host) RED on all network/unknown cases (nfs/smbfs/afpfs/webdav/ftp/fusefs/""/"wat"); symmetric `TestLinuxFSTypeTrustworthy` RED on NFS/CIFS/9p/FUSE/0. Confirmed RED on darwin before green; the `FSTrustworthy(t.TempDir())==true` end-to-end smoke stayed green under the mutant (it only exercises the syscall+string-extraction wiring, not the classification), so the classifier table is the load-bearing half. Alternate = `return false` → the local apfs/ext/btrfs cases redden. Pins DESIGN §7.3's allowlist/fail-closed fs-trust gate: a break is refused unless the backing fs is POSITIVELY a known-local type, so wi never breaks a flock another host may hold over a shared (network) fs. Linux limb typecheck-verified via `GOOS=linux go vet` (not run on the darwin host) |
+| LOCK-SAFE-TO-BREAK (M4) | in `AssessBreak` drop the `ProvenDead` conjunct from the verdict — replace `case !d.ProvenDead:`/`default:` with a single `default:` that sets `Safe=true` (i.e. `Safe = FSTrustworthy && HolderKnown`, break any known holder on a trustworthy fs, alive or not) → the live-holder case (body = `CurrentHolder` = THIS running process) reads `Safe=true` → `TestAssessBreak/live_holder_is_never_breakable` RED (`Safe = true while the holder (this process) is alive`). Confirmed RED before green — ONLY the live case reddened; the unknown-holder case (`HolderKnown=false`→Safe=false) and the proven-dead case (boot-mismatched holder→Safe=true correctly) stayed green, proving the test isolates exactly the dropped conjunct. Alternate mutant = treat an unknown holder as breakable → the unknown-holder case reddens. Pins the HEAL-3 composition (DESIGN §7.3 / §7.4): the read-only break verdict is the conjunction of all three gates (fs-trustworthy AND holder-known AND proven-dead), fail-safe on every other state, so wi never steals a lock from a live or unknown peer. Darwin host RED→GREEN; `//go:build unix` file linux-verified via `GOOS=linux go build`+`go vet` |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
