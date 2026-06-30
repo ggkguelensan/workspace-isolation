@@ -25,11 +25,19 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `sysctl(2)` SYSCALL — NOT a subprocess; linux via `/proc/sys/kernel/random/boot_id`). The subprocess
   approach was caught and rejected by INV-NO-NETWORK (only `internal/gitexec` may import `os/exec`), so the
   derivation uses the raw `syscall.Sysctl("kern.boottime")` + little-endian `tv_sec` decode instead — no
-  child process, no new dep, more faithful to "derive from sysctl" than shelling out. `gofmt`/`go build
-  ./...`/`go vet ./...`/`go test ./...` all GREEN (24 packages). NEXT M4 unit: the lock-body holder record
-  `{pid,host,boot_id,op_id}` struct + serialization (written into the lock file on acquire, read back for
-  diagnostics), which composes `processAlive` + `BootID` into the eventual auto-break policy (break ONLY on
-  flock-trustworthy local fs AND a current-boot, proven-dead holder).
+  child process, no new dep, more faithful to "derive from sysctl" than shelling out (committed `ea5480f`);
+  (3) ✅ **this firing** — the lock-holder record `lock.Holder{pid,host,boot_id,op_id}` + serialization
+  (`Marshal`/`ParseHolder`/`CurrentHolder`, guard `LOCK-HOLDER`), composing `processAlive` + `BootID` into
+  the identity a lock file carries. A methodology note from this unit: a round-trip-only test is VACUOUS
+  against a json-tag rename (Marshal+Unmarshal share the tag, so they stay symmetric) — the registered
+  "rename `boot_id`" mutant stayed green until the test was strengthened to also assert the concrete
+  durable wire keys (`"pid"`/`"host"`/`"boot_id"`/`"op_id"`), which a lock file written by one wi build
+  needs stable to read in another. `gofmt`/`go build ./...`/`go vet ./...`/`go test ./...` all GREEN (24
+  packages). NEXT M4 unit: WRITE the holder body into the lock file on acquire and READ it back — extend
+  the flock acquire path (`lockfs`/`lock.Acquire`) to stamp `CurrentHolder(opID).Marshal()` into the file
+  once the flock is held, plus a read path for diagnostics — then the auto-break POLICY consulting the body
+  + `processAlive` + `BootID` (break ONLY on a flock-trustworthy local fs AND a current-boot, proven-dead
+  holder).
 
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
@@ -1289,6 +1297,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | HELP-REGISTRY-SYNC | add a bogus key (e.g. `"ghost"`) to `BuildRegistry` → a registry command with no help row → `TestHelpTableMatchesRegistry` RED (equal-sets assertion: `registry (minus help) = [ghost init …]` ≠ `help table = [init …]`); alternate: drop a row (e.g. `isolate rm`) from `help.table` → a help row's command outlives… inverted: a registry command with no help row → same RED on the missing name; alternate: remove the `"help"` registry entry → `registry must contain the "help" command` RED. Pins that the help metadata table and the live dispatch surface can never drift (DESIGN §3.1 "help can never lie") |
 | LOCK-LIVENESS-PID (M4) | replace `lock.processAlive`'s body with `return true` (the registered mutant) → a reaped, provably-dead child pid reads as alive → `TestProcessAlive` RED (`processAlive(reaped child pid …) = true, want false`) along with the `pid 0`/`-1` guard rows; symmetrically `return false` reddens the live-self row (`processAlive(self …) = false, want true`). Confirmed RED with `return true` before going green. Pins the proven-dead gate self-heal consults before breaking a stale lock — a live process must NEVER read as dead (DESIGN §2 / §7.3) |
 | HOST-BOOTID (M4) | in the platform `host.bootID` success path replace `return "boottime:"+sec…`/`return "boot_id:"+id…` with `_ = sec; return "", nil` (the registered mutant) → `BootID()` yields an empty id → `TestBootID` RED (`BootID() = "", want a non-empty per-boot identifier`); alternate: return a value that varies per call → the stability assertion RED (`BootID() not stable across calls`). Confirmed RED (empty form) before green. Pins the reuse guard the lock-liveness layer pairs with the holder pid: a non-empty, boot-stable id is what lets a stale-across-reboot lock be told from a live one (DESIGN §6 / §7.3, open decision #3) |
+| LOCK-HOLDER (M4) | in `lock.CurrentHolder` set `OpID:""` ignoring the arg → `TestCurrentHolderCapturesProcess` RED (`OpID = "", want "op-xyz"`); alternate: rename a json tag on `Holder` (e.g. `boot_id`→`bootid`) → `TestHolderRoundTrip` RED on the **durable wire-key** assertion (`marshaled holder … missing durable wire key "boot_id"`) — NOTE the round-trip equality alone does NOT catch a tag rename (Marshal+Unmarshal share the tag and stay symmetric), which is exactly why the test pins the concrete keys `"pid"`/`"host"`/`"boot_id"`/`"op_id"`. Both confirmed RED before green. Pins lossless serialization + correct identity capture of the lock-holder record the liveness layer reads back (DESIGN §6 / §7.3) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
