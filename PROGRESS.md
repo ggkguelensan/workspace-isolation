@@ -147,15 +147,30 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   the no-prefix junk cases (`"garbage"`, `"unknown:thing"`, which `ValidateSegment` alone would accept)
   wrongly parse as repo keys → RED on exactly those two; round-trip + prefix-handled rejections stayed green.
   `gofmt`/`go build ./...`/`go test ./...` all GREEN (24 packages) + linux cross-build clean.
-  NEXT M4 unit: `lock.List(locksDir) ([]LockStatus, error)` — enumerate every `*.lock` file in locksDir,
-  `ParseKey` each filename (skipping/ignoring strays that don't parse), `AssessBreak` each valid key, and
-  return one `LockStatus{Key, BreakDecision}` per lock sorted by key. Read-only (no flock; a missing locksDir
-  → empty slice, not an error). That is the data-gathering half of `lock ls`. AFTER that: the CLI `lock ls`
-  command — which DOES touch internal/contract (a new Envelope payload for the lock list + a schema-version
-  bump) plus `assemble.go` + `BuildRegistry` + the help table — then `lock break` (the ACTION: gate on
-  `Safe`, then displace the stale lock; exit 6 lock_held when not Safe), and finally wiring `AssessBreak`→
-  auto-break into `Acquire`'s `*HeldError` path. Keep each its own unit; the CLI envelope/exit mapping is
-  internal/contract's to extend.
+  (14) ✅ **this firing** — `lock.List(locksDir) ([]LockStatus, error)` (guard `LOCK-LIST`,
+  `internal/lock/list_unix.go`), the data-gathering half of `lock ls`: it enumerates every `*.lock` file in
+  locksDir, `ParseKey`s each filename, `AssessBreak`s each valid key, and returns one `LockStatus{Key,
+  Decision}` per recognized lock sorted by canonical key. Read-only (no flock taken, nothing written). Three
+  load-bearing behaviors, all tested: (a) **strays are silently skipped** — a non-`.lock` file, a `.lock`
+  file whose stem is not a valid key (`notakey.lock`), and a subdirectory (`sub.lock`) never appear; (b) a
+  **missing locksDir is the empty result, not an error** (`os.ErrNotExist` → `nil,nil` — "no locks" is a
+  valid state); (c) each lock carries its full `AssessBreak` verdict (the test asserts a proven-dead holder
+  reads Safe, a live holder reads HolderKnown-but-not-Safe, a body-less lock reads unknown-holder). Tagged
+  `//go:build unix` (it calls `AssessBreak`). Test-first RED→GREEN: mutant = drop the stray-skip
+  (`key, _ := ParseKey(...)` with no `continue`) → `notakey.lock` is fabricated into a phantom empty-key lock
+  → `TestList` RED on the exact sorted-key-set assertion (`[<empty> isolate-state:task1 …]`); the missing/
+  empty-dir cases stayed green, isolating the skip. Alternate = drop the `os.ErrNotExist` special-case →
+  missing-dir case reddens. `gofmt`/`go build ./...`/`go test ./...` all GREEN (24 packages) + linux build/vet
+  clean.
+  NEXT M4 unit: the CLI **`lock ls`** command — the first M4 step that touches `internal/contract`. It needs
+  (i) a new Envelope payload carrying the lock list (a `[]LockInfo` with key/holder/safe/reason per row) +
+  a **SchemaVersion bump** (1.0 → 1.1, additive) + the `contract.lock.json` fingerprint regen; (ii) a `Result`
+  field + `assemble.go` wiring; (iii) a `cmd_lock_ls.go` handler that calls `lock.List(layout.LocksDir())` and
+  projects it (read-only, `ActionRead`); (iv) a `"lock ls"` row in `BuildRegistry` + the help table
+  (`help_registry_sync_test` enforces they match). **FLAG for the owner:** this is the first wire-contract
+  change since M0 froze it — additive (new optional payload + minor version bump), but it moves the schema.
+  AFTER that: `lock break` (the ACTION: gate on `Safe`, then displace the stale lock; exit 6 lock_held when
+  not Safe), then wiring `AssessBreak`→auto-break into `Acquire`'s `*HeldError` path.
 
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
@@ -1426,6 +1441,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | LOCK-FS-TRUST (M4) | make the per-OS classifier (`darwinFSTypeTrustworthy`/`linuxFSTypeTrustworthy`) `return true` unconditionally → every network/unknown fs reads as flock-trustworthy → `TestDarwinFSTypeTrustworthy` (host) RED on all network/unknown cases (nfs/smbfs/afpfs/webdav/ftp/fusefs/""/"wat"); symmetric `TestLinuxFSTypeTrustworthy` RED on NFS/CIFS/9p/FUSE/0. Confirmed RED on darwin before green; the `FSTrustworthy(t.TempDir())==true` end-to-end smoke stayed green under the mutant (it only exercises the syscall+string-extraction wiring, not the classification), so the classifier table is the load-bearing half. Alternate = `return false` → the local apfs/ext/btrfs cases redden. Pins DESIGN §7.3's allowlist/fail-closed fs-trust gate: a break is refused unless the backing fs is POSITIVELY a known-local type, so wi never breaks a flock another host may hold over a shared (network) fs. Linux limb typecheck-verified via `GOOS=linux go vet` (not run on the darwin host) |
 | LOCK-SAFE-TO-BREAK (M4) | in `AssessBreak` drop the `ProvenDead` conjunct from the verdict — replace `case !d.ProvenDead:`/`default:` with a single `default:` that sets `Safe=true` (i.e. `Safe = FSTrustworthy && HolderKnown`, break any known holder on a trustworthy fs, alive or not) → the live-holder case (body = `CurrentHolder` = THIS running process) reads `Safe=true` → `TestAssessBreak/live_holder_is_never_breakable` RED (`Safe = true while the holder (this process) is alive`). Confirmed RED before green — ONLY the live case reddened; the unknown-holder case (`HolderKnown=false`→Safe=false) and the proven-dead case (boot-mismatched holder→Safe=true correctly) stayed green, proving the test isolates exactly the dropped conjunct. Alternate mutant = treat an unknown holder as breakable → the unknown-holder case reddens. Pins the HEAL-3 composition (DESIGN §7.3 / §7.4): the read-only break verdict is the conjunction of all three gates (fs-trustworthy AND holder-known AND proven-dead), fail-safe on every other state, so wi never steals a lock from a live or unknown peer. Darwin host RED→GREEN; `//go:build unix` file linux-verified via `GOOS=linux go build`+`go vet` |
 | LOCK-PARSE-KEY (M4) | in `ParseKey` replace the `default` error branch with `return Repo(s)` (treat any unrecognized string as a repo key) → a junk filename with no recognized namespace prefix but an otherwise-valid segment (`"garbage"`, `"unknown:thing"`) parses successfully as a repo key → `TestParseKey` RED on exactly those rejection cases (`ParseKey("garbage") = nil error, want error`). Confirmed RED before green — the round-trip cases (ProjectRegistry/Repo/IsolateState) and the prefix-handled rejections (`"repo:"`,`"repo:bad/name"`,`"isolate-state:"` — caught by the repo/isolate branches' `ValidateSegment`) stayed green, isolating the namespace-gate. Alternate = drop the `"isolate-state:"` branch (fall to the default error) → the isolate-state round-trip reddens (`ParseKey("isolate-state:feature-x"): unexpected error`). Pins the inverse of the key namespace `lock ls` relies on: a stray, non-key file in the locks dir is rejected, never fabricated into a Key and assessed. Shared namespace consts make `String()` and ParseKey provably non-drifting (DESIGN §6.1 / §7.3) |
+| LOCK-LIST (M4) | in `List` drop the stray-skip — change `key, err := ParseKey(...)`/`if err != nil { continue }` to `key, _ := ParseKey(...)` and assess unconditionally → a `.lock` file whose stem is not a valid key (`notakey.lock`) yields the zero Key and is fabricated into a phantom LockStatus with an empty key → `TestList` RED on the exact sorted-key-set assertion (`List keys = [<empty> isolate-state:task1 project-registry repo:api], want [isolate-state:task1 …]`). Confirmed RED before green — the missing-dir and empty-dir subtests stayed green, isolating the stray-skip. Alternate = drop the `errors.Is(err, os.ErrNotExist)` special-case → a missing locksDir returns an error → the "missing dir is empty, not an error" subtest reddens. Pins that lock enumeration (the data half of `lock ls`) skips strays (a non-key file is NEVER fabricated into a lock), treats "no locks" as a valid empty result, and carries each lock's AssessBreak verdict (DESIGN §7.3 / §7.4) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
