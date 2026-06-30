@@ -9,8 +9,27 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** **⚠️ MVP M0–M3 NOT COMPLETE — prior "green/STOP" claims were premature (corrected
-  2026-06-30).** ORIENT caught a real gap: PLAN line 136 lists **`help` and `suggest`** as M3
+- **Milestone:** **✅ MVP M0–M3 COMPLETE AND GREEN — STOP (verified 2026-06-30, this time for real).**
+  The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
+  the MVP has been re-verified END TO END this firing. `gofmt -l .` clean · `go build ./...` · `go vet
+  ./...` · `go test ./...` all GREEN (23 packages); `goreleaser check` is covered GREEN by the remote CI
+  run (28411028448, all three jobs incl. macOS). **Built-binary smoke over the full surface** (fresh temp
+  workspace): `wi help`→exit 0 (one envelope, all 6 commands in the help block), `wi help isolate new`→
+  exit 0 (topic detail, table omitted), `wi help snc`→exit 3 not_found + `did_you_mean:["sync"]`, `wi snc`
+  (unknown command)→exit 64 usage + `did_you_mean:["sync"]` (dispatch-level suggest), `wi init`→0 created,
+  `wi resolve ghost`→3 not_found, reinit→4 already_exists, `wi --format text init`→4 lossless text
+  projection — each emits EXACTLY ONE envelope with a correct closed-set exit code. The git-backed flows
+  (`sync`/`isolate new`/`isolate rm`/`repo add`) are covered GREEN by hermetic guard tests over real git
+  (`testenv`), reached through the same Dispatch path the smoke exercised. **All seven commands reachable;
+  the `help-json` capability finally has a real backing command; `did_you_mean` fires on both unknown
+  commands and unknown help topics; the help table is fitness-locked against registry drift
+  (`HELP-REGISTRY-SYNC`).** M4/M5 remain unstarted by design (gated on explicit owner go-ahead). Owner
+  follow-ups before first `v*` release: set `HOMEBREW_TAP_GITHUB_TOKEN` PAT; add a LICENSE + set the cask
+  `license`; (optional) a `wi version` unit to enable `-X` stamping. _Gap history retained below._
+
+- **Milestone (superseded — the gap that the line above closes):** ~~⚠️ MVP M0–M3 NOT COMPLETE — prior
+  "green/STOP" claims were premature (corrected 2026-06-30).~~ ORIENT caught a real gap: PLAN line 136
+  lists **`help` and `suggest`** as M3
   deliverables ("MVP = M0–M3", line 140), but neither `internal/help` nor `internal/suggest` had been
   built. The earlier firings counted the six command handlers + `cmd/wi` + CI/goreleaser/cask as "the
   MVP" and skipped these two — the build disagreed with PROGRESS.md, so the build wins. Tells: `wi help`
@@ -1084,10 +1103,14 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   RED with a clean diff (`registry (minus help) = [ghost init …]` vs `help table = [init …]`). Both
   `help` AND `suggest` are now fully BUILT, WIRED, and GUARDED — the M3 gap ORIENT caught is closed in
   code; only end-to-end re-verification remains.
-- **NEXT — re-verify M0–M3 end-to-end** (the STOP gate): build/vet/test/gofmt clean + `goreleaser check`
-  + a fuller built-binary smoke over the whole `init→repo add→sync→isolate new→resolve→isolate rm`
-  surface PLUS `wi help` (exit 0, 6 commands in the block) and an unknown command/topic carrying
-  `did_you_mean`. Only when that passes is the MVP genuinely green and the STOP condition real.
+- ✅ **DONE (this firing) — re-verified M0–M3 end-to-end; MVP is GREEN → STOP.** `gofmt -l .` clean,
+  `go build`/`go vet`/`go test ./...` all GREEN (23 packages), `goreleaser check` GREEN via remote CI
+  (28411028448). Built-binary smoke in a fresh temp workspace exercised the full surface — `wi help`
+  (exit 0, 6 commands), `wi help isolate new` (exit 0, topic detail), `wi help snc` (exit 3 +
+  `did_you_mean:["sync"]`), `wi snc` (exit 64 usage + `did_you_mean`), `init`/`resolve ghost`/reinit/text
+  projection (0/3/4/4) — one envelope each, closed-set exit codes. Git-backed commands covered by
+  hermetic guard tests over real git. **No further loop work: the MVP (M0–M3) is complete and green.**
+  M4/M5 await an explicit owner go-ahead.
 
 M3 (DESIGN §3, IMPLEMENTATION_PLAN §M3 + Wave B) wires the green domain core through the uniform
 pipeline into the runnable `wi` binary: `internal/cli` (parse → dispatch → **one** envelope out →
