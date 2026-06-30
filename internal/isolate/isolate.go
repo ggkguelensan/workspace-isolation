@@ -99,6 +99,12 @@ func New(ctx context.Context, l layout.Layout, g *git.Git, task, opID string, sp
 		return Result{}, err // *lock.HeldError → exit 6 (DESIGN §6.1)
 	}
 	defer func() { _ = held.Release() }()
+	// Record who holds the isolate-state lock so the self-heal layer can later read
+	// the holder and judge staleness (DESIGN §6 / §7.3). Best-effort: the flock is
+	// the exclusion guarantee, so a failure to write the metadata body must not
+	// abort the isolate — a body-less lock simply reads as "unknown holder" and is
+	// conservatively never auto-broken.
+	_ = held.Stamp(opID)
 
 	// The isolas/<task>/ parent must exist before any worktree leaf is added.
 	taskDir, err := l.TaskDir(task)

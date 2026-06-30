@@ -100,6 +100,41 @@ func TestNewMaterializesAllReposComplete(t *testing.T) {
 	}
 }
 
+// Guard ISOLATE-STAMP (M4): a successful isolate new must record the operation's
+// holder identity into the isolate-state lock it takes, so the lock self-heal layer
+// can later read WHO created the isolate and judge a stale lock's liveness (DESIGN
+// §6 / §7.3). The lock file persists after release (Unlock does not unlink), so the
+// stamped holder is readable by key once New returns. This is the first of the four
+// acquire sites to be wired to (*lock.Held).Stamp.
+//
+// Non-vacuity mutant (registered): drop the held.Stamp(opID) call in isolate.New →
+// the isolate-state lock is acquired but never stamped → its body stays empty →
+// lock.ReadHolder returns an "empty holder body" error → this test RED.
+func TestNewStampsHolderOnIsolateLock(t *testing.T) {
+	env, l, g, ctx := setup(t)
+	cloneSSOT(t, env, l, g, ctx, "api")
+
+	const opID = "op_test_stamp_iso"
+	if _, err := isolate.New(ctx, l, g, "feat", opID, specs("api")); err != nil {
+		t.Fatalf("isolate.New: %v", err)
+	}
+
+	key, err := lock.IsolateState("feat")
+	if err != nil {
+		t.Fatalf("lock.IsolateState: %v", err)
+	}
+	h, err := lock.ReadHolder(l.LocksDir(), key)
+	if err != nil {
+		t.Fatalf("ReadHolder(isolate-state lock): %v — New did not stamp the holder", err)
+	}
+	if h.OpID != opID {
+		t.Errorf("stamped holder OpID = %q, want %q", h.OpID, opID)
+	}
+	if h.PID != os.Getpid() {
+		t.Errorf("stamped holder PID = %d, want this process %d", h.PID, os.Getpid())
+	}
+}
+
 // Guard ISOLATE-NEW (durable partial success — the core, DESIGN §6.3): when a repo
 // fails to materialize, New stops on it, KEEPS every repo completed before it, and
 // never attempts repos after it — and the durable registry reflects EXACTLY that

@@ -47,12 +47,21 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   ripples across ~10 files and forces a SECOND signature change on `isolate.Remove` (which has no opID today)
   — too large for one disciplined unit, and a half-applied signature change can't leave the repo green. The
   capability layer lands green and self-contained now; the wiring is the next unit. `gofmt`/`go build
-  ./...`/`go vet ./internal/lock/`/`go test ./...` all GREEN (24 packages). NEXT M4 unit: wire `Stamp` into
-  the acquire path — call `held.Stamp(opID)` at each of the 4 acquire sites (isolate `New` already has
-  `opID`; `cmd_repo_add` has `cli.OpIDFrom(ctx)`; thread `opID` through `sync.syncOne` from `Run`; thread an
-  `opID` param through `isolate.Remove` + its `cmd_isolate_rm` caller via `OpIDFrom(ctx)`). Then the
-  auto-break POLICY consulting the body + `processAlive` + `BootID` (break ONLY on a flock-trustworthy local
-  fs AND a current-boot, proven-dead holder).
+  ./...`/`go vet ./internal/lock/`/`go test ./...` all GREEN (24 packages); (6) ✅ **this firing** — wired
+  the FIRST of the four acquire sites to stamp: `isolate.New` now calls `held.Stamp(opID)` right after
+  taking the isolate-state lock (guard `ISOLATE-STAMP`, behavioral test over the hermetic git harness:
+  after `New` returns, `lock.ReadHolder(LocksDir, IsolateState(task))` reads back the holder with the op's
+  `opID` and this process's pid — the lock file persists after release since `Unlock` does not unlink).
+  Stamping is best-effort (`_ = held.Stamp(opID)`): the flock is the exclusion guarantee, so a failed
+  metadata write must not abort the isolate — a body-less lock reads as "unknown holder" and is
+  conservatively never auto-broken. The registered mutant is exactly the pre-wiring state (drop the
+  `held.Stamp` line) → the isolate-state lock body stays empty → `ReadHolder` errors → test RED (confirmed
+  before green). `gofmt`/`go build ./...`/`go vet ./internal/isolate/`/`go test ./...` all GREEN (24
+  packages). NEXT M4 unit: wire the remaining three acquire sites — `cmd_repo_add` (`cli.OpIDFrom(ctx)` →
+  `held.Stamp`), `sync.syncOne` (thread `opID` from `Run`, then `held.Stamp`), and `isolate.Remove` (thread
+  an `opID` param through `Remove` + its `cmd_isolate_rm` caller via `OpIDFrom(ctx)`, then `held.Stamp`).
+  Then the auto-break POLICY consulting the body + `processAlive` + `BootID` (break ONLY on a
+  flock-trustworthy local fs AND a current-boot, proven-dead holder).
 
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
@@ -1315,6 +1324,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | LOCK-HOLDER (M4) | in `lock.CurrentHolder` set `OpID:""` ignoring the arg → `TestCurrentHolderCapturesProcess` RED (`OpID = "", want "op-xyz"`); alternate: rename a json tag on `Holder` (e.g. `boot_id`→`bootid`) → `TestHolderRoundTrip` RED on the **durable wire-key** assertion (`marshaled holder … missing durable wire key "boot_id"`) — NOTE the round-trip equality alone does NOT catch a tag rename (Marshal+Unmarshal share the tag and stay symmetric), which is exactly why the test pins the concrete keys `"pid"`/`"host"`/`"boot_id"`/`"op_id"`. Both confirmed RED before green. Pins lossless serialization + correct identity capture of the lock-holder record the liveness layer reads back (DESIGN §6 / §7.3) |
 | FLOCK-BODY (M4) | make `lockfs.FileLock.WriteBody` `return nil` without writing → `ReadBodyAt` sees an empty body → `TestFlockBodyRoundTrip` RED (round-trip mismatch); alternate: drop the `Truncate(0)` in `WriteBody` → a shorter rewrite leaves the longer body's tail → `TestFlockBodyRoundTrip` RED on the shorter-overwrite assertion (`got "{…long…}" want "{}\n"`). Both confirmed RED before green. Pins that a held flock carries a holder body readable by a by-path inspector while held — the channel self-heal uses to identify a contended lock's holder (DESIGN §6 / §7.3) |
 | LOCK-STAMP (M4) | make `(*lock.Held).Stamp` `return nil` without writing any body → a freshly-acquired lock has an empty body → `ReadHolder` errors → `TestStampRoundTrip` RED (`lock: empty holder body`); alternate: make `Stamp` write only `h.locks[0]` (skip the rest) → the second held key's body stays empty → `TestStampStampsEveryHeldLock` RED on `ReadHolder(repo:b)` (the per-lock angle: identity is recorded into EVERY lock the operation holds, not just the first). Both confirmed RED before green. Pins the lock-layer write/read of holder identity (composing `Holder` + `WriteBody`) — an unstamped or missing lock reads as an error (unknown holder → conservatively never broken), never a zero-value `Holder` (DESIGN §6 / §7.3) |
+| ISOLATE-STAMP (M4) | drop the `held.Stamp(opID)` call in `isolate.New` (the pre-wiring state) → the isolate-state lock is acquired but never stamped → its body stays empty → `lock.ReadHolder(LocksDir, IsolateState(task))` returns `lock: empty holder body` → `TestNewStampsHolderOnIsolateLock` RED. Confirmed RED before green. Pins that the first wired acquire site actually records its holder identity end-to-end (the lock file persists past release; `Unlock` does not unlink), so the self-heal layer can read who created an isolate (DESIGN §6 / §7.3) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
