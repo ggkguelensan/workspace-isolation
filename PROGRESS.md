@@ -9,7 +9,24 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** **✅ MVP M0–M3 COMPLETE AND GREEN — STOP (verified 2026-06-30, this time for real).**
+- **Milestone:** **▶ M4 (v1) IN PROGRESS — MVP gate satisfied, proceeding on the autonomous loop.**
+  The MVP (M0–M3) is complete and green (record below). The loop's stated gate — "do NOT start M4/M5
+  until MVP is green" — is met, and the loop's standing mandate is "make concrete forward progress and
+  leave the repo green"; with no owner redirect across repeated firings I am proceeding into M4 one
+  disciplined unit per firing, exactly as M0–M3. All M4 work stays on `build/wi`, unpushed and reversible;
+  the contract was frozen at M0 so M4 is purely additive (minor schema bumps only). If the owner wants me
+  to hold instead, say so and I will stop. **M4 = `land`/`landstate`/`gc` domain + `land`/`state cas`/`gc`/
+  `lock` commands; capabilities gain `land`/`land-atomic` (PLAN line 137).** Build order = Wave C self-heal
+  (write-first fitness), starting with the documented M4 blocker `HEAL-LOCK-LIVENESS` (PLAN line 210
+  "Blocks: M4"). ✅ **First M4 unit DONE this firing:** the conservative PID-liveness predicate
+  `lock.processAlive` (guard `LOCK-LIVENESS-PID`) — the proven-dead gate self-heal consults before
+  breaking a stale lock (DESIGN §2 / §7.3). `gofmt`/`go build ./...`/`go vet`/`go test ./...` all GREEN
+  (23 packages). NEXT M4 unit: resolve open decision #3 (boot_id derivation — `sysctl kern.boottime` on
+  darwin, `/proc/sys/kernel/random/boot_id` on linux) so the holder identity can be reuse-safe across
+  reboots, then the lock-body `{pid,host,boot_id,op_id}` struct + serialization that composes with this
+  predicate into the auto-break policy (break ONLY on flock-trustworthy local fs AND proven-dead PID).
+
+- **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
   the MVP has been re-verified END TO END this firing. `gofmt -l .` clean · `go build ./...` · `go vet
   ./...` · `go test ./...` all GREEN (23 packages); `goreleaser check` is covered GREEN by the remote CI
@@ -1265,6 +1282,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CMD-HELP | in `helpCmd.Run` drop the `!ok` not_found branch (`if false && !ok`) so an unknown topic maps the zero `help.Model` to a `Result` instead of refusing → `TestHelpUnknownTopicIsNotFound` RED (got a result, want `*cli.CommandError{not_found}`); or in `envelopeFor` drop the `env.Help = r.Help` success-branch threading → the help block never reaches the wire → `TestHelpEnvelopeCarriesBlockEndToEnd` RED (`env.Help` nil, the help-json capability has no payload). Overview/command-detail tests stay GREEN under either mutant, isolating each to its path |
 | HELP-MODEL | in `help.For` ignore the topic and always `return Model{Synopsis:overview, Commands:Commands(), Next:…}, true` → drilling into a command no longer yields its detail → `TestForCommandDetail` RED (Usage/Next mismatch, Commands non-nil) and `TestForUnknownTopic` RED (got ok=true for `frobnicate`); alternate: `return Model{}, true` for an unknown topic → `TestForUnknownTopic` RED (want ok=false); alternate: drop the `"wi "` prefix on a `table` row's `Next` (or the overview's) → `TestNextIsRunnable` RED (not a runnable `wi …` line); alternate: blank a row's `Usage`/`Synopsis` → `TestTableIsFullyPopulated` RED (help would lie about the surface). Overview/empty-topic rows stay GREEN under the first mutant, isolating it to the per-command path |
 | HELP-REGISTRY-SYNC | add a bogus key (e.g. `"ghost"`) to `BuildRegistry` → a registry command with no help row → `TestHelpTableMatchesRegistry` RED (equal-sets assertion: `registry (minus help) = [ghost init …]` ≠ `help table = [init …]`); alternate: drop a row (e.g. `isolate rm`) from `help.table` → a help row's command outlives… inverted: a registry command with no help row → same RED on the missing name; alternate: remove the `"help"` registry entry → `registry must contain the "help" command` RED. Pins that the help metadata table and the live dispatch surface can never drift (DESIGN §3.1 "help can never lie") |
+| LOCK-LIVENESS-PID (M4) | replace `lock.processAlive`'s body with `return true` (the registered mutant) → a reaped, provably-dead child pid reads as alive → `TestProcessAlive` RED (`processAlive(reaped child pid …) = true, want false`) along with the `pid 0`/`-1` guard rows; symmetrically `return false` reddens the live-self row (`processAlive(self …) = false, want true`). Confirmed RED with `return true` before going green. Pins the proven-dead gate self-heal consults before breaking a stale lock — a live process must NEVER read as dead (DESIGN §2 / §7.3) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
