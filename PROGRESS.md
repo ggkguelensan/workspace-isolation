@@ -627,7 +627,39 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (64) ✅ **this firing** — **`internal/doctor` finding model + `WorstExit` exit-aggregation** (guards
+  (65) ✅ **this firing** — **`doctor.DetectOrphans` — the orphan-inventory detector** (guard
+  `DOCTOR-ORPHANS`; `internal/doctor/orphans.go` + `orphans_test.go`), the FIRST of HEAL-8's eight read-only
+  detectors (DESIGN §7.5) and the model for the rest: a PURE function from injected observations
+  (`[]gc.Candidate` — what `gc.Inspect` already gathers from disk+refs+registry) to `[]doctor.Finding`, all IO
+  left to the (future) command. **Key architectural move:** it REUSES `gc.Classify` rather than re-deriving
+  "what is an orphan" — gc is the sole owner of the §7.1 evidence-positive verdict, so a second copy in doctor
+  would be a drift hazard (and risk the exact data-loss the verdict guards). This IS the composition §7.5
+  intends: doctor diagnoses with the SAME eyes the safe-tier heal (gc) acts with, so a `--fix` dispatching to
+  gc can never disagree with what doctor reported. **Scope:** surfaces ONLY `ClassOrphanUnexplained` (markerless,
+  non-live — the loud cell §7.5 names) → a LOUD ERROR `Finding{Detector:"orphans", Kind:conflict,
+  Code:"orphan_unexplained", Severity:error, Repo, Task}` (the SAME refusal kind `cmd_gc` gives a blocked sweep,
+  exit 4). The non-orphan classes each have a different owner and produce ZERO findings: a live cell is HEAL-1's
+  to reconcile (Classify short-circuits Live FIRST, so a markerless-but-LIVE cell is NOT an orphan — the
+  load-bearing safety case), a clean wi-owned leftover is gc's to reclaim, a work-carrying cell belongs to the
+  later three-way-drift detector. Composed with unit (64)'s `WorstExit`, an orphan makes a doctor run REFUSE
+  (exit 4) — never silently tolerated. **Registered mutants** (both two-sided, isolated, RED→revert→`(cached)`
+  GREEN): LOUD limb = `Severity: SeverityError`→`SeverityWarning` → the orphan goes exit-neutral, so
+  `WorstExit` over an orphan-bearing inventory returns ExitOK not ExitRefused → `TestDetectOrphansIsLoud` + the
+  severity assertion RED while the "exactly one finding" count stays GREEN (a warning is still a finding) —
+  pinning §7.5's "orphan_unexplained is loud"; CLASS limb = filter `!= ClassOrphanUnexplained`→`== ClassLive`
+  (flag every NON-live class) → reclaimable + blocked_work cells emit spurious orphan findings →
+  `TestDetectOrphansFlagsOnlyOrphanClass` + the count RED while the genuine-orphan/live rows stay GREEN —
+  pinning that doctor selects gc's SPECIFIC orphan verdict, not a coarse live/non-live split. Both keep
+  `gc.Classify` in use so the RED is BEHAVIORAL, not a build break. Full gate GREEN (29 pkgs ok + `? schema`) +
+  gofmt clean (internal/doctor) + linux vet clean. NEXT M4 unit — HEAL-8 detector #2: pick the next pure
+  detector + its mutant. Candidates: **mirror staleness (WARNING-only)** — the simplest, and it exercises unit
+  (64)'s Severity=WARNING/exit-neutral path end-to-end (never exit 6 here; rides the structured
+  `mirror_freshness`, not a warning code); **SSOT cleanliness** (`ssot_dirty`/`ssot_stray_branch` →
+  dirty_worktree); **pending journal/parked ops** (reuse `journal.Scan`/`landstate`); or **`.wi` parseability**
+  (internal). Then the `wi doctor`/`check` CLI seam (envelope projection + WorstExit exit + registry keys +
+  HELP-REGISTRY-SYNC row), then bounded `--fix`. HEAL-8 is the LAST M4 item.
+
+  (64) ✅ **(prior firing)** — **`internal/doctor` finding model + `WorstExit` exit-aggregation** (guards
   `DOCTOR-WORST-WARN-NEUTRAL` + `DOCTOR-WORST-PRECEDENCE`; new pure package `internal/doctor/doctor.go` +
   `doctor_test.go`), the FIRST unit of HEAL-8 `wi doctor`/`check` (DESIGN §7.5, the LAST M4 build-order item).
   This is the seam every doctor detector and the command will share — the analog of `gc.Class`/`Classify` and
