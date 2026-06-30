@@ -46,7 +46,34 @@ hand — drift out of sync and leave orphaned debris nobody can safely clean up.
 
 ## Install
 
-`wi` is a single Go binary (Go 1.26+). Install it onto your `PATH` with:
+`wi` is a single, dependency-free binary.
+
+### One command — handles a missing or outdated Go
+
+```bash
+git clone https://github.com/ggkguelensan/workspace-isolation.git
+cd workspace-isolation
+./install.sh
+```
+
+`install.sh` is a portable POSIX script (plain `sh`, no bashisms). It detects your
+OS/arch, looks for a published release binary, and **falls back to `go install`
+automatically** when none matches. If Go is missing or older than **1.26** it prints
+exactly how to install or upgrade it — it never installs an unverified or half-built
+binary. Useful knobs:
+
+```bash
+./install.sh --dry-run                        # show every step; change nothing
+WI_INSTALL_DIR=/usr/local/bin ./install.sh    # pick the dir (default: ~/.local/bin)
+```
+
+Once the script lands on the default branch you can also run it without cloning first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ggkguelensan/workspace-isolation/main/install.sh | sh
+```
+
+### Manual — you already have Go 1.26+
 
 ```bash
 git clone https://github.com/ggkguelensan/workspace-isolation.git
@@ -54,10 +81,11 @@ cd workspace-isolation
 go install ./cmd/wi          # → $(go env GOPATH)/bin/wi   (usually ~/go/bin/wi)
 ```
 
-If `~/go/bin` isn't on your `PATH` yet:
+If the install dir (`~/.local/bin` for the script, `~/go/bin` for `go install`) isn't on
+your `PATH` yet:
 
 ```bash
-echo 'export PATH="$(go env GOPATH)/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+echo 'export PATH="$HOME/.local/bin:$(go env GOPATH)/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
 
 Verify:
@@ -66,8 +94,9 @@ Verify:
 wi help        # prints the command catalog as a JSON envelope
 ```
 
-> Release binaries (`.goreleaser.yaml`) and a Homebrew tap are scaffolded for tagged
-> releases; until then, `go install` is the supported path.
+> No prebuilt release is published yet — `.goreleaser.yaml` and a Homebrew tap are
+> scaffolded for tagged releases, and `install.sh` will prefer a release binary the
+> moment one exists. Until then it builds from source via `go install`.
 
 ---
 
