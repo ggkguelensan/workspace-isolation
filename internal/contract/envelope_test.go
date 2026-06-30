@@ -18,7 +18,7 @@ import (
 // TestEnvelopeErrorAlwaysPresent / TestEnvelopeReposAlwaysArray RED.
 // TestFieldOrderCheckerIsNonVacuous proves the order extractor detects a reorder.
 
-const goldenSuccess = `{"schema_version":"1.1","capabilities":["help-json","resolve-block","dry-run","partial-success","land","state-kv"],"op_id":"op_test","command":"isolate new","ok":true,"action":"created","dry_run":false,"repos":[],"warnings":[],"next":[],"error":null}`
+const goldenSuccess = `{"schema_version":"1.1","capabilities":["help-json","resolve-block","dry-run","partial-success","land","land-atomic","state-kv"],"op_id":"op_test","command":"isolate new","ok":true,"action":"created","dry_run":false,"repos":[],"warnings":[],"next":[],"error":null}`
 
 const goldenError = `{"schema_version":"1.1","capabilities":["help-json"],"op_id":"op_test","command":"isolate new","ok":false,"action":"noop","dry_run":false,"repos":[],"warnings":[],"next":[],"error":{"kind":"already_exists","message":"isolate exists"}}`
 

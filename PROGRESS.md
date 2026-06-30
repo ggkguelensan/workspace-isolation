@@ -627,7 +627,49 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (53) ✅ **this firing** — **`land.Preflight` — the non-mutating validate-all gate** (guard
+  (54) ✅ **this firing** — **`wi land --atomic` — the all-or-nothing land flag** (guard
+  `CMD-LAND-ATOMIC`; `internal/cli/cmd_land.go` + `cmd_land_test.go`), the THIRD and FINAL sub-unit of the
+  `land-atomic` capability, composing unit (53)'s `land.Preflight`. **`land-atomic` is now LIT.** Three
+  parts: (a) `newLandCommand` now parses an optional `--atomic` boolean flag out of `args` (the FIRST flag
+  any `land` form carries — `parseGlobals` strips only `--dry-run`/`--format`, so `--atomic` arrives in
+  `args`), accepted in ANY position; an UNKNOWN `--flag` is now a clean `usage` refusal rather than a
+  silent positional (mirrors `parseStateCasArgs`), and the `<task>` traversal + `≥1 <repo>` positional
+  contract still holds through the parse. (b) `landCmd.Run`, when `c.atomic`, calls `land.Preflight` BEFORE
+  the first pointer move: if ANY repo would not fast-forward it refuses the WHOLE op with
+  `*CommandError{conflict, Action:noop}` (the blockers riding `repos[]` as per-repo `non_fast_forward` via
+  the new `projectPreflight`, identical wire shape to a parked `projectLandOutcome` block) having advanced
+  NO base; if all would land it falls through to the unchanged `land.RunJournaled`. (c) `CapLandAtomic`
+  lit in `contract.Capabilities()` (canonical order: after `land`, before `state-kv`) → the byte-exact
+  `goldenSuccess` golden updated to the honest wire form (append `"land-atomic"`), exactly as
+  CMD-LAND/CMD-STATE-CAS drifted it. **DECISION #ATOMIC-1 sub-question resolved** (recorded at type-doc):
+  adopted *pre-flight-then-normal-`RunJournaled`* (the RECOMMENDED option) over a heavier two-phase
+  prepare/commit — `Preflight` takes no lock, but the check→land window is covered by `RunJournaled`'s own
+  isolate-state:<task> lock against a concurrent wi, and a racing EXTERNAL git mutation is still caught
+  safely by `LandRepo`'s own ff-refusal (it parks that repo; the base is never forced), so the
+  all-or-nothing guarantee holds in the uncontended single-agent case wi targets, with a safe degrade under
+  a race. **Fitnesses** (real-git harness): `TestLandCommandAtomicRefusesAndMovesNothing` (api landable+FIRST,
+  web divergent+SECOND → `conflict`, api's base UNCHANGED + NO backup anchor, web rides repos[] as
+  `non_fast_forward` — the atomic property plain stop-at-first-block land violates, cf.
+  `TestLandCommandPartialBlocksOneRepo` which lands api); `TestLandCommandAtomicLandsAllWhenClean`
+  (all repos clean → `--atomic` lands all, every base advanced — proves it refuses IFF a blocker exists,
+  not unconditionally); `TestLandCommandAtomicFlagParsing` (--atomic accepted in any position, unknown
+  flag → usage, positional+traversal contract preserved). **Registered mutants** (both
+  RED→revert→`(cached)` GREEN, byte-identity): PRIMARY = neuter the `if c.atomic` pre-flight branch
+  (`if false && c.atomic`) → `--atomic` degrades to plain stop-at-first-block land → RefusesAndMovesNothing
+  RED on all 3 atomic-property assertions (Kind partial not conflict @:253, api base moved @:259, api
+  backup anchored @:265) while LandsAllWhenClean + FlagParsing stay GREEN (two-sided); ALTERNATE = parse
+  `--atomic` but never bind it (`atomic: false` in the factory) → identical RED. Full gate GREEN (28 pkgs
+  ok + `? schema`) + gofmt clean + linux cross-build/vet clean.
+  NEXT M4 unit — `land-atomic` is COMPLETE; the M4 capability vocabulary (`land`, `land-atomic`, `state-kv`)
+  is now fully lit and backed. Remaining M4 surface per IMPLEMENTATION_PLAN §4: **HEAL-5 `land continue/
+  abort/status`** (the `journal.KindLand` land-recovery Finisher + the resume verbs — resumes the durable
+  partial a stop-at-first-block land leaves; the journal write-side already records KindLand
+  intent→committed→done, so this is the read-side Finisher + 3 thin commands) is the natural next M4 unit,
+  decomposed bottom-up like land-atomic was. (DEFERRED, unchanged: HEAL-GC-NO-LIVE-LOSS case (iii)
+  #GC-AHEAD-V0 — needs a journaled discard verb, do NOT fake with a vacuous test; `wi state get` — NOT in
+  documented M4 scope, do not build without owner direction; `wi doctor`/`check` + bounded `--fix` — LAST.)
+
+  (53) ✅ **(prior firing)** — **`land.Preflight` — the non-mutating validate-all gate** (guard
   `LAND-PREFLIGHT`; `internal/land/preflight.go` + `preflight_test.go`), the SECOND sub-unit of the
   `land-atomic` capability, composing unit (52)'s `git.IsAncestor`. **API:**
   `land.Preflight(ctx, g, l, task, specs) (checks []RepoPreflight, ok bool, err error)` — for each repo
@@ -656,20 +698,9 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `WouldLand:true` in the per-repo cell (ignore the IsAncestor result) → the block test RED on
   `api WouldLand = true, want false` (preflight_test.go:143), isolating the per-repo verdict from the
   aggregate `ok`. Full gate GREEN (28 pkgs ok + `? schema`) + gofmt clean + linux cross-build/vet clean.
-  NEXT M4 unit — **sub-unit 3: the `wi land --atomic` flag** in `cmd_land.go` (the FIRST flag on `land`;
-  parse like `state cas` did — `parseGlobals` strips only `--dry-run`/`--format`, so `--atomic` arrives
-  in `args`). Atomic flow under the isolate-state:<task> lock: call `land.Preflight` FIRST; if `!ok`
-  refuse the WHOLE op with a `*CommandError` (likely `conflict`, the non-ff blockers riding `repos[]` as
-  per-repo `non_fast_forward` like CMD-LAND does) having moved nothing; if `ok` proceed to the existing
-  `land.RunJournaled`. THEN light `CapLandAtomic` in `contract.Capabilities()` (byte-exact `goldenSuccess`
-  drift → update golden, exactly as CMD-LAND/CMD-STATE-CAS). OPEN sub-question for sub-unit 3 (adopt at
-  build time, record then): whether `--atomic` lands all-or-nothing by *pre-flight then normal Run* (the
-  TOCTOU window between check and land is covered by the held lock vs. concurrent wi; an external git race
-  still gets caught by `LandRepo`'s own ff-refusal, parking that repo — acceptable, the base is never
-  forced) — RECOMMENDED — vs. a heavier two-phase prepare/commit (deferred, not needed for v1).
-  (DEFERRED, unchanged: `journal.KindLand` land-recovery Finisher (HEAL-5); HEAL-GC-NO-LIVE-LOSS case (iii)
-  #GC-AHEAD-V0 — needs a journaled discard verb, do NOT fake with a vacuous test; `wi state get` — NOT in
-  documented M4 scope, do not build without owner direction.)
+  NEXT [SATISFIED by unit (54) — `wi land --atomic` shipped, `CapLandAtomic` lit, golden updated; the
+  pre-flight-then-normal-`RunJournaled` sub-question was adopted as recommended]. `land-atomic` is now
+  complete end-to-end (git predicate → land pre-flight → CLI flag + capability).
 
   (52) ✅ **(prior firing)** — **`git.IsAncestor` — the non-mutating fast-forward predicate** (guard
   `GIT-IS-ANCESTOR`; `internal/git/git.go` + `git_test.go`), the FIRST sub-unit of the `land-atomic`
@@ -2668,6 +2699,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CMD-STATE-CAS (M4 state cas) | the `wi state cas <ns> <key> --expected <v\|__ABSENT__> --new <v>` handler (`cmd_state_cas.go`): the FIRST command with its own flags (`parseStateCasArgs` handles `--flag value` + `--flag=value`, both required, exactly two positionals, non-empty key, namespace traversal-checked at the factory → usage exit 64). `stateCasCmd.Run` maps `state.KVCompareAndSwap`: won → `*Result{action=created}` (exit 0); lost (`!swapped`) → `*CommandError{conflict, noop}` (exit 4, a TYPED refusal not an infra error); `*lock.HeldError` → `*CommandError{lock_held}` (exit 6); `--dry-run` → `*Result{action=noop}` no write (exit 0). Primary mutant = map the lost CAS to a `created` success instead of the conflict → `TestStateCasCompareMiss` RED (`err=<nil>, want *cli.CommandError`, cmd_state_cas_test.go:100 — a lost race mis-reported as a win). Alternate mutant = drop the `DryRunFrom(ctx)` guard so `--dry-run` executes the swap → `TestStateCasDryRunNoWrite` RED (the value it must NOT have written is present). A SECOND coupled change — lighting `CapStateKV` in `contract.Capabilities()` — is guarded by the byte-exact `goldenSuccess` (`TestEnvelopeGoldenSuccess`): adding it reddened the golden showing `,"state-kv"` appended; updated to the honest wire form → RED→GREEN. End-to-end through the registry factory + `cmd.Run(WithOpID(...))`, no build tag. Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | GIT-IS-ANCESTOR (M4 land-atomic) | the non-mutating fast-forward predicate `(*Git).IsAncestor(ctx, dir, maybeAncestor, descendant)` (`internal/git/git.go`): runs `git merge-base --is-ancestor`, exit 0 → `(true,nil)`, exit 1 → `(false,nil)`, any other code → a real error (never silent false). `FastForwardBaseRef` was refactored to reuse it, so the SSOT base advance (DESIGN §5) and `wi land --atomic`'s pre-flight share one predicate. Primary mutant = ignore the exit code, return `(true,nil)` always → `TestIsAncestor` RED on rewind + both-diverged + nonexistent-rev (4 failures, git_test.go:167/:174) — pins that a non-ancestor is reported false, not true. Alternate mutant = collapse the "other exit code = error" branch into the false branch (`return false, nil` for any error) → ONLY the nonexistent-rev case RED (a missing rev must error, not read as "not an ancestor"). Hermetic real-git harness over a 3-commit DAG, no build tag. Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | LAND-PREFLIGHT (M4 land-atomic) | the non-mutating validate-all gate `land.Preflight(ctx, g, l, task, specs) (checks, ok, err)` (`internal/land/preflight.go`): for each repo resolve work tip (worktree HEAD) + base tip and call `git.IsAncestor(baseTip, workTip)` in the SSOT clone (shared object store, DESIGN §1); `ok=true` IFF EVERY repo would fast-forward; writes no backup, advances no base, persists no landstate, takes no lock — a pure read for `wi land --atomic`'s pre-flight (sub-unit 3). Does NOT short-circuit (reports the full blocker set); an unresolvable ref is a Go error, a clean non-ff is `WouldLand=false` (not an error). Primary mutant = drop the `if !ff { ok = false }` accumulation (ok stays true) → `TestPreflightRefusesWhenAnyRepoBlocks` RED (`ok=true, want false`, preflight_test.go:135); `TestPreflightAllReposWouldLand` stays GREEN (two-sided). Alternate mutant = hardcode `WouldLand:true` in the per-repo cell → same test RED on `api WouldLand = true, want false` (preflight_test.go:143), isolating the per-repo verdict from aggregate `ok`. Both tests also assert `assertNothingMoved` (bases untouched / no backup anchor / no landstate record) — the atomic purity property, sharpened by ordering the landable repo FIRST and the blocker SECOND (a sequential land would have advanced the first base). Hermetic real-git harness (isolate.New stands up worktrees), no build tag. Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
+| CMD-LAND-ATOMIC (M4 land-atomic) | the `wi land --atomic <task> <repo>…` flag (`cmd_land.go`): `newLandCommand` parses an optional `--atomic` boolean out of `args` (accepted in any position; an unknown `--flag` → usage; `<task>` traversal + `≥1 <repo>` positional contract preserved), and `landCmd.Run`, when set, calls `land.Preflight` BEFORE any pointer move — if ANY repo would not fast-forward it refuses the WHOLE op with `*CommandError{conflict, noop}` (blockers ride `repos[]` as per-repo `non_fast_forward` via `projectPreflight`, same wire shape as a parked `projectLandOutcome` block) having advanced NO base; else it falls through to the unchanged `land.RunJournaled` (decision #ATOMIC-1: pre-flight-then-normal-Run, the check→land window covered by RunJournaled's own isolate-state lock + LandRepo's ff-refusal under a race). Primary mutant = neuter the pre-flight branch (`if false && c.atomic`) → `--atomic` degrades to plain stop-at-first-block land → `TestLandCommandAtomicRefusesAndMovesNothing` RED on all 3 atomic-property assertions (Kind partial not conflict @cmd_land_test.go:253, api base advanced @:259, api backup anchored @:265) while `TestLandCommandAtomicLandsAllWhenClean` + `TestLandCommandAtomicFlagParsing` stay GREEN (two-sided). Alternate mutant = parse `--atomic` but never bind it (`atomic: false` in the factory) → identical RED. A SECOND coupled change — lighting `CapLandAtomic` in `contract.Capabilities()` (after `land`, before `state-kv`) — is guarded by the byte-exact `goldenSuccess` (`TestEnvelopeGoldenSuccess`): adding it reddened the golden showing `,"land-atomic"` appended; updated to the honest wire form → RED→GREEN, exactly as CMD-LAND/CMD-STATE-CAS. End-to-end real-git harness through the registry factory + `cmd.Run(WithOpID(...))`, no build tag. Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |

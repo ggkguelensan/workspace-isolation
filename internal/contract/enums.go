@@ -139,12 +139,13 @@ func AllCapabilities() []Capability {
 
 // Capabilities returns the capabilities advertised by the CURRENT build — only
 // those backed by a wired command. v0 (M0–M3) lit the first four; M4 adds `land`
-// now that `wi land` is wired, and `state-kv` now that `wi state cas` backs the
-// namespaced compare-and-swap primitive (land-atomic stays dark until `--atomic`
-// validate-all lands; ports/hooks at M5). This keeps the "capability ⇒ backing
-// command" invariant true so an agent never branches on a capability that does nothing.
+// now that `wi land` is wired, `state-kv` now that `wi state cas` backs the
+// namespaced compare-and-swap primitive, and `land-atomic` now that `wi land --atomic`
+// runs the validate-all pre-flight gate before any base advances (ports/hooks/
+// remote-discovery stay dark until M5). This keeps the "capability ⇒ backing command"
+// invariant true so an agent never branches on a capability that does nothing.
 func Capabilities() []Capability {
 	return []Capability{
-		CapHelpJSON, CapResolveBlock, CapDryRun, CapPartialSuccess, CapLand, CapStateKV,
+		CapHelpJSON, CapResolveBlock, CapDryRun, CapPartialSuccess, CapLand, CapLandAtomic, CapStateKV,
 	}
 }

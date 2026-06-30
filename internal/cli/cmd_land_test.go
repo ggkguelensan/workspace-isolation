@@ -210,6 +210,131 @@ func TestLandCommandAllBlockedIsConflict(t *testing.T) {
 	}
 }
 
+// Guard CMD-LAND-ATOMIC: `wi land --atomic <task> <repo>…` runs land.Preflight (the
+// non-mutating validate-all gate, DESIGN §7.2) BEFORE the first pointer move; if ANY repo
+// would not fast-forward it refuses the WHOLE op with a conflict (exit 4) having advanced NO
+// base — the distinguishing value over plain land, which is stop-at-first-block and so
+// partially lands the repos listed BEFORE the blocker. Here api is landable and listed FIRST,
+// web diverged and listed SECOND: plain `land feat api web` lands api then parks web (a
+// durable partial, see TestLandCommandPartialBlocksOneRepo); `land --atomic feat api web`
+// must catch web while api's base is STILL untouched and no backup anchored. The blocked web
+// rides in repos[] as a conflict coded non_fast_forward (same shape as a parked block); the
+// landable api rides as a blameless noop (it would have landed, but the op refused).
+//
+// Non-vacuity mutant (registered): in landCmd.Run, delete the `if c.atomic { …Preflight… }`
+// pre-flight branch → --atomic degrades to plain stop-at-first-block land → api's base
+// advances and the outcome is a durable partial → this test RED on BOTH "api base must be
+// unchanged" and "want conflict". Alternate: in newLandCommand drop `atomic: atomic` (parse
+// the flag but never bind it) → c.atomic stays false → identical RED.
+func TestLandCommandAtomicRefusesAndMovesNothing(t *testing.T) {
+	env, l, g, ctx := isolateEnv(t)
+	seedSSOT(t, env, l, g, ctx, "api")
+	seedSSOT(t, env, l, g, ctx, "web")
+	writeManifest(t, l, "api", "web")
+	materializeIsolate(t, l, g, ctx, "feat", "api", "web")
+	landWork(t, env, l, "feat", "api")
+	landWork(t, env, l, "feat", "web")
+	divergeBase(t, env, l, g, ctx, "web") // web is now a non-fast-forward
+
+	apiSSOT, _ := l.Repo("api")
+	apiBaseBefore := env.Git(t, apiSSOT, "rev-parse", "refs/heads/"+testenv.DefaultBranch)
+
+	cmd, err := landFactory(t, l, g)([]string{"--atomic", "feat", "api", "web"})
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	res, err := cmd.Run(cli.WithOpID(ctx, "op_land_atomic"))
+
+	var ce *cli.CommandError
+	if !errors.As(err, &ce) {
+		t.Fatalf("atomic refusal: want *cli.CommandError, got %T: %v", err, err)
+	}
+	if ce.Kind != contract.KindConflict {
+		t.Errorf("Kind = %q, want %q (--atomic refuses the WHOLE op when any repo blocks)", ce.Kind, contract.KindConflict)
+	}
+
+	// The atomic property: api WOULD land and is listed FIRST, but --atomic moved NOTHING —
+	// api's base is exactly as it was. A plain (stop-at-first-block) land advances it here.
+	if got := env.Git(t, apiSSOT, "rev-parse", "refs/heads/"+testenv.DefaultBranch); got != apiBaseBefore {
+		t.Errorf("api base = %q, want it UNCHANGED at %q (--atomic must advance no base when any repo blocks)", got, apiBaseBefore)
+	}
+	// No backup ref was anchored for api: preflight writes nothing and the land loop never ran.
+	if _, exists, err := g.BackupRefSHA(ctx, apiSSOT, "feat", "api"); err != nil {
+		t.Fatalf("api BackupRefSHA: %v", err)
+	} else if exists {
+		t.Errorf("api has a backup anchor, want none (--atomic refused before any pointer move)")
+	}
+
+	// web (the blocker) rides in repos[] as a conflict coded non_fast_forward.
+	if res == nil {
+		t.Fatal("the atomic refusal must still carry a result with per-repo detail")
+	}
+	web := landOutcome(t, res, "web")
+	if web.Error == nil || web.Error.Kind != contract.KindConflict || web.Error.Code != "non_fast_forward" {
+		t.Errorf("web outcome = %+v, want conflict coded non_fast_forward", web)
+	}
+}
+
+// The other side of the gate: with EVERY repo a clean fast-forward, --atomic passes pre-flight
+// and lands all of them exactly as plain land would (a landed Result, every base advanced).
+// This proves --atomic refuses IFF a blocker exists — not an unconditional "always refuse".
+func TestLandCommandAtomicLandsAllWhenClean(t *testing.T) {
+	env, l, g, ctx := isolateEnv(t)
+	seedSSOT(t, env, l, g, ctx, "api")
+	seedSSOT(t, env, l, g, ctx, "web")
+	writeManifest(t, l, "api", "web")
+	materializeIsolate(t, l, g, ctx, "feat", "api", "web")
+	landWork(t, env, l, "feat", "api")
+	landWork(t, env, l, "feat", "web")
+
+	cmd, err := landFactory(t, l, g)([]string{"--atomic", "feat", "api", "web"})
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	res, err := cmd.Run(cli.WithOpID(ctx, "op_land_atomic"))
+	if err != nil {
+		t.Fatalf("Run (--atomic, all landable): unexpected error %v", err)
+	}
+	if res.Action != contract.ActionLanded {
+		t.Errorf("Action = %q, want %q", res.Action, contract.ActionLanded)
+	}
+	for _, repo := range []string{"api", "web"} {
+		rr := landOutcome(t, res, repo)
+		if rr.Action != contract.ActionLanded || rr.Error != nil {
+			t.Errorf("repo %s outcome = %+v, want landed/no-error", repo, rr)
+		}
+		wt, _ := l.Isolate("feat", repo)
+		workTip := env.Git(t, wt, "rev-parse", "HEAD")
+		ssot, _ := l.Repo(repo)
+		if got := env.Git(t, ssot, "rev-parse", "refs/heads/"+testenv.DefaultBranch); got != workTip {
+			t.Errorf("%s base = %q, want advanced to work tip %q", repo, got, workTip)
+		}
+	}
+}
+
+// Flag parsing: --atomic is accepted in any position and stripped from the positionals; an
+// unknown flag is a clean usage refusal (not silently treated as a task name); and the
+// positional contract (a safe <task> + ≥1 <repo>) still holds through the parse.
+func TestLandCommandAtomicFlagParsing(t *testing.T) {
+	l := bootstrappedLayout(t)
+	f := landFactory(t, l, git.New(gitexec.New()))
+
+	for _, args := range [][]string{{"--atomic", "feat", "api"}, {"feat", "api", "--atomic"}} {
+		if cmd, err := f(args); err != nil || cmd == nil {
+			t.Errorf("args %v: --atomic must build a Command, got cmd=%v err=%v", args, cmd, err)
+		}
+	}
+	if _, err := f([]string{"--bogus", "feat", "api"}); !isUsage(err) {
+		t.Errorf("unknown flag: want kind=usage, got %v", err)
+	}
+	if _, err := f([]string{"--atomic", "feat"}); !isUsage(err) {
+		t.Errorf("--atomic with no repo: want kind=usage, got %v", err)
+	}
+	if _, err := f([]string{"--atomic", "../evil", "api"}); !isUsage(err) {
+		t.Errorf("--atomic + traversing task: want kind=usage, got %v", err)
+	}
+}
+
 // A task with no isolate record cannot land — the worktree path resolution still works
 // (layout is pure), but there is nothing committed to land and the base cannot advance;
 // here we only assert arg validation at the factory (mirrors isolate new/rm).
