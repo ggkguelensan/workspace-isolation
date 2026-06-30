@@ -1052,19 +1052,27 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   the `HelpBlock`/`HelpCommand` wire types; mirrored in `schema/envelope.schema.json` ($defs +
   top-level ref, not required); SHAPE-FINGERPRINT lock regenerated. This is the wire form the
   `help-json` capability finally has a payload for — the `cmd_help.go` handler (NEXT) fills it.
-- **NEXT — register a `help` command**: a `cli` handler (`cmd_help.go` + a `"help"` `BuildRegistry`
-  entry) so `wi help [topic]` returns `help.For(topic)` mapped onto the now-existing `contract.HelpBlock`
-  (decision #HB resolved the wire shape). Needs: add a `Help *contract.HelpBlock` field to `cli.Result`
-  + thread it onto the success envelope in `envelopeFor` (it threads `Resolve/Planned/Blocked` but NOT
-  yet `Help`). The handler maps `help.Command`→`contract.HelpCommand` (contract does NOT import help;
-  help does NOT import contract) and sets the model's runnable lines onto `Result.Next`. Topic
-  resolution: no args → overview (`help.For("")`); args joined (`help isolate new`) → that command;
-  unknown topic → not_found + `did_you_mean` via `suggest.For` over `help.Commands()` names.
-  Test-first with its non-vacuity mutant.
-- **THEN — help↔registry SYNC fitness**: a `cli`-layer test (it can import both `help` and the
+- ✅ **DONE (this firing) — `cmd_help.go` handler + `"help"` registry entry** (guard `CMD-HELP`). `wi
+  help [topic]` is now a real command backing the advertised `help-json` capability (closes the PLAN
+  line 108 "capabilities ⇒ backing command" violation ORIENT caught). Added `Help *contract.HelpBlock`
+  to `cli.Result` + threaded it onto the success envelope in `envelopeFor` (alongside
+  `Resolve/Planned/Blocked`). `helpCmd.Run` projects `help.For(topic)` onto the contract:
+  `helpBlockFromModel` maps `help.Model`→`contract.HelpBlock` and each `help.Command`→`contract.HelpCommand`
+  (cli owns the translation so contract never imports help and help never imports contract); the model's
+  runnable lines ride `Result.Next`. Topic resolution: no args → overview; args joined (`help isolate
+  new`) → that command (Dispatch resolves the 1-token "help" and hands the rest as args, rejoined with
+  spaces); unknown topic → `*CommandError{not_found}` + `did_you_mean` via `suggest.For` over
+  `helpCommandNames()` + the `wi help` pointer. Smoke-verified through the built binary: `wi help`→exit
+  0 with all 6 commands in the block; `wi help isolate new`→exit 0 (topic detail, table omitted); `wi
+  help snc`→exit 3 not_found with `did_you_mean:["sync"]`. Two non-vacuity mutants demonstrated
+  RED-then-reverted (see the `CMD-HELP` registry row).
+- **NEXT — help↔registry SYNC fitness**: a `cli`-layer test (it can import both `help` and the
   registry without a cycle, since `help` stays pure) asserting `help.Commands()` names ==
-  `BuildRegistry` keys, so the metadata table can never drift from the live command surface ("help can
-  never lie", DESIGN §3.1).
+  `BuildRegistry` keys EXCEPT `"help"` itself, so the metadata table can never drift from the live
+  command surface ("help can never lie", DESIGN §3.1). **Decision needed (record when built):** `help`
+  is a meta-command deliberately ABSENT from the workflow table (the overview reads as the init→…→rm
+  runbook; you're already using help), so the fitness compares `help.Commands()` names against the
+  registry keys with `"help"` excluded — the two must be equal sets.
 - **THEN — re-verify M0–M3 end-to-end** (build/vet/test/gofmt + `goreleaser check` + binary smoke incl.
   `wi help` exit 0 and an unknown command carrying `did_you_mean`). Only then is the MVP genuinely green
   and the STOP condition real.
@@ -1219,6 +1227,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CMD-ISOLATE-RM | in `isolateRmCmd.Run`, on the mixed outcome (`removed > 0` with blocks) return `(result, nil)` instead of `(result, *CommandError{Kind:partial, Action:removed})` → a partial teardown is mis-reported as a clean success (no error, exit 0) → `TestIsolateRmDurablePartialBlocksOrphan` RED (`want *cli.CommandError, got <nil>`), while complete-teardown + all-blocked stay GREEN (isolates the mutant to the partial-mapping path); alternate: in `projectRemoveOutcome` map an orphan hard-block to `Kind:internal` (or drop the `Code:"orphan_unexplained"`) → same test RED on the repos[] `web.Error.Kind == conflict` / `Code == orphan_unexplained` assertions — pins the loud `orphan_unexplained` surface (DESIGN §7.1) riding in repos[] not Blocked[] (decision #RD) |
 | CMD-MAIN | in `run` (cmd/wi) `_ = code; return contract.ExitOK` instead of `return code` → run swallows Dispatch's computed exit and always exits 0 → `TestRunUnknownCommandExitsUsage` RED (got 0, want 64), while `TestRunInitScaffoldsWorkspace` stays GREEN (init already exits 0) — isolates the mutant to exit-code propagation; alternate: hand `cli.Dispatch` an empty `Registry{}` instead of `BuildRegistry(deps)` → every command is unknown → `TestRunInitScaffoldsWorkspace` RED (no `.wi/` scaffolded, ok:false/usage not created) — pins that the REAL registry over a cwd-resolved root is wired |
 | SUGGEST-DIDYOUMEAN | in `suggest.For` return `nil` regardless (the shipped test-first stub) → every typo/prefix case loses its suggestion → `TestForSuggestsClosest` RED on the `reslove`/`snc`/`re`/`RESLOVE` rows (got nil, want the match) while the `xyzzy`/empty rows stay GREEN (isolates the mutant to the match path); alternate: drop the threshold/prefix filter and `return candidates` unfiltered → the `xyzzy`/empty "nothing close → nil" rows RED (got the whole command set); alternate: remove the `input==""` guard → empty input prefix-matches everything → `empty input is never a suggestion` RED |
+| CMD-HELP | in `helpCmd.Run` drop the `!ok` not_found branch (`if false && !ok`) so an unknown topic maps the zero `help.Model` to a `Result` instead of refusing → `TestHelpUnknownTopicIsNotFound` RED (got a result, want `*cli.CommandError{not_found}`); or in `envelopeFor` drop the `env.Help = r.Help` success-branch threading → the help block never reaches the wire → `TestHelpEnvelopeCarriesBlockEndToEnd` RED (`env.Help` nil, the help-json capability has no payload). Overview/command-detail tests stay GREEN under either mutant, isolating each to its path |
 | HELP-MODEL | in `help.For` ignore the topic and always `return Model{Synopsis:overview, Commands:Commands(), Next:…}, true` → drilling into a command no longer yields its detail → `TestForCommandDetail` RED (Usage/Next mismatch, Commands non-nil) and `TestForUnknownTopic` RED (got ok=true for `frobnicate`); alternate: `return Model{}, true` for an unknown topic → `TestForUnknownTopic` RED (want ok=false); alternate: drop the `"wi "` prefix on a `table` row's `Next` (or the overview's) → `TestNextIsRunnable` RED (not a runnable `wi …` line); alternate: blank a row's `Usage`/`Synopsis` → `TestTableIsFullyPopulated` RED (help would lie about the surface). Overview/empty-topic rows stay GREEN under the first mutant, isolating it to the per-command path |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)

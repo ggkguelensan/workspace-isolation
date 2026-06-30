@@ -35,5 +35,6 @@ func BuildRegistry(d Deps) Registry {
 		"isolate rm":  func(args []string) (Command, error) { return newIsolateRmCommand(d.Layout, d.Git, args) },
 		"sync":        func(args []string) (Command, error) { return newSyncCommand(d.Layout, d.Git, d.Clock, args) },
 		"repo add":    func(args []string) (Command, error) { return newRepoAddCommand(d.Layout, args) },
+		"help":        func(args []string) (Command, error) { return newHelpCommand(args) },
 	}
 }
