@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -704,5 +705,83 @@ func TestPruneWorktreesClearsStaleAdminEntry(t *testing.T) {
 	}
 	if got := env.Git(t, wt, "rev-parse", "--abbrev-ref", "HEAD"); got != "HEAD" {
 		t.Errorf("re-materialized worktree HEAD abbrev-ref = %q, want %q (detached)", got, "HEAD")
+	}
+}
+
+// Guard GIT-LIST-OWNED-REFS — the enumeration half of the evidence-positive
+// ownership markers (DESIGN §7.1, HEAL-2). Where OwnedRefSHA answers "does wi own
+// THIS cell?", ListOwnedRefs answers "which cells does wi own in this mirror at
+// all?" — the candidate population the workspace gc sweep classifies. It must
+// (a) return EVERY marker (sorted, deterministic), and (b) be scoped strictly to
+// refs/wi/owned/, so refs/wi/backup/* (PROTECTED from gc by §7.1) and ordinary
+// branches are never fabricated into gc candidates.
+//
+// Non-vacuity (registered): (primary) broaden the for-each-ref pattern from
+// ownedRefPrefix to "refs/wi/" → the backup ref surfaces, fails the owned-prefix
+// parse guard, and ListOwnedRefs errors → TestListOwnedRefsScopedToOwnedNamespace
+// RED. (alternate) `break` after the first parsed marker → only one of three is
+// returned → TestListOwnedRefsEnumeratesAllMarkers RED.
+func TestListOwnedRefsEnumeratesAllMarkers(t *testing.T) {
+	env := testenv.New(t)
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+	ssot := newSSOT(t, env)
+	sha := writeCommit(t, env, ssot, "f", "x", "c0")
+
+	// A mirror with no markers yet is the empty result, not an error.
+	if refs, err := g.ListOwnedRefs(ctx, ssot); err != nil || len(refs) != 0 {
+		t.Fatalf("ListOwnedRefs with no markers = (%+v, %v), want (empty, nil)", refs, err)
+	}
+
+	// Three markers across two tasks. ListOwnedRefs returns all three, sorted by
+	// refname (so "bugfix" precedes "feat", and within "feat" "api" precedes "web").
+	for _, m := range []struct{ task, repo string }{
+		{"feat", "web"}, {"bugfix", "api"}, {"feat", "api"},
+	} {
+		if err := g.CreateOwnedRef(ctx, ssot, m.task, m.repo, sha); err != nil {
+			t.Fatalf("CreateOwnedRef %s/%s: %v", m.task, m.repo, err)
+		}
+	}
+	refs, err := g.ListOwnedRefs(ctx, ssot)
+	if err != nil {
+		t.Fatalf("ListOwnedRefs: %v", err)
+	}
+	want := []git.OwnedRef{
+		{Task: "bugfix", Repo: "api", SHA: sha},
+		{Task: "feat", Repo: "api", SHA: sha},
+		{Task: "feat", Repo: "web", SHA: sha},
+	}
+	if !reflect.DeepEqual(refs, want) {
+		t.Fatalf("ListOwnedRefs = %+v, want %+v", refs, want)
+	}
+}
+
+// TestListOwnedRefsScopedToOwnedNamespace pins the §7.1 protection boundary: a
+// refs/wi/backup/* ref and an ordinary branch are NOT wi ownership markers and must
+// never be enumerated as gc candidates. backup refs in particular are explicitly
+// protected from collection, so surfacing one here would let gc treat protected
+// recovery state as garbage.
+func TestListOwnedRefsScopedToOwnedNamespace(t *testing.T) {
+	env := testenv.New(t)
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+	ssot := newSSOT(t, env)
+	sha := writeCommit(t, env, ssot, "f", "x", "c0")
+
+	// Non-owned refs under refs/wi/ and refs/heads/ — neither is a marker.
+	env.Git(t, ssot, "update-ref", "refs/wi/backup/feat/api", sha)
+	env.Git(t, ssot, "branch", "stray", sha)
+	// ...alongside exactly one genuine owned marker.
+	if err := g.CreateOwnedRef(ctx, ssot, "feat", "api", sha); err != nil {
+		t.Fatalf("CreateOwnedRef: %v", err)
+	}
+
+	refs, err := g.ListOwnedRefs(ctx, ssot)
+	if err != nil {
+		t.Fatalf("ListOwnedRefs: %v", err)
+	}
+	want := []git.OwnedRef{{Task: "feat", Repo: "api", SHA: sha}}
+	if !reflect.DeepEqual(refs, want) {
+		t.Fatalf("ListOwnedRefs = %+v, want only the owned marker %+v (backup ref / branch must be excluded)", refs, want)
 	}
 }

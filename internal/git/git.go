@@ -148,8 +148,14 @@ func (g *Git) PruneWorktrees(ctx context.Context, ssotDir string) error {
 // markers live under refs/wi/owned/ — a ref (so its commit stays gc-reachable) that
 // is NOT a branch (so it never appears as a stray branch in the pristine SSOT,
 // DESIGN §5).
+// ownedRefPrefix is the ref namespace every wi ownership marker lives under
+// (refs/wi/owned/<task>/<repo>). It is the single source for both one cell's marker
+// name (ownedRef) and the for-each-ref pattern that enumerates the whole set
+// (ListOwnedRefs), so the writer and the enumerator provably cannot drift.
+const ownedRefPrefix = "refs/wi/owned/"
+
 func ownedRef(task, repo string) string {
-	return "refs/wi/owned/" + task + "/" + repo
+	return ownedRefPrefix + task + "/" + repo
 }
 
 // CreateOwnedRef records wi's ownership of the (task, repo) worktree by atomically
@@ -187,6 +193,56 @@ func (g *Git) OwnedRefSHA(ctx context.Context, ssotDir, task, repo string) (sha 
 		return "", false, fmt.Errorf("git: read owned ref %s in %s: %w", ref, ssotDir, runErr)
 	}
 	return strings.TrimSpace(res.Stdout), true, nil
+}
+
+// OwnedRef is one enumerated wi ownership marker: the (task, repo) cell it vouches
+// for and the sha it pins. The set of OwnedRefs in a mirror is the set of cells wi
+// can PROVE it created there — the evidence-positive candidate population the
+// workspace gc sweep classifies (DESIGN §7.1, HEAL-2).
+type OwnedRef struct {
+	Task string
+	Repo string
+	SHA  string
+}
+
+// ListOwnedRefs enumerates every wi ownership marker refs/wi/owned/<task>/<repo> in
+// ssotDir, one OwnedRef per marker sorted by refname for determinism. Where
+// OwnedRefSHA answers "does wi own THIS cell?", ListOwnedRefs answers "which cells
+// does wi own here at all?" — the positive evidence reclamation is built on (DESIGN
+// §7.1). It is a local, read-only operation (no network); no markers is the empty
+// result, not an error.
+//
+// The for-each-ref pattern is scoped to ownedRefPrefix, so refs/wi/backup/* (which
+// §7.1 PROTECTS from gc) and ordinary branches are never enumerated as candidates.
+// A line that does not parse as a well-formed owned marker is a hard error — a
+// corrupt or foreign ref surfacing under the namespace is reported, never silently
+// fabricated into a phantom cell that gc might then act on.
+func (g *Git) ListOwnedRefs(ctx context.Context, ssotDir string) ([]OwnedRef, error) {
+	res, err := g.r.Run(ctx, ssotDir, "for-each-ref", "--sort=refname",
+		"--format=%(refname) %(objectname)", ownedRefPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("git: list owned refs in %s: %w", ssotDir, err)
+	}
+	var out []OwnedRef
+	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		if line == "" {
+			continue
+		}
+		refname, sha, ok := strings.Cut(line, " ")
+		if !ok {
+			return nil, fmt.Errorf("git: malformed for-each-ref line %q in %s", line, ssotDir)
+		}
+		rest, ok := strings.CutPrefix(refname, ownedRefPrefix)
+		if !ok {
+			return nil, fmt.Errorf("git: for-each-ref returned non-owned ref %q in %s", refname, ssotDir)
+		}
+		task, repo, ok := strings.Cut(rest, "/")
+		if !ok || task == "" || repo == "" || strings.Contains(repo, "/") {
+			return nil, fmt.Errorf("git: malformed owned ref %q in %s", refname, ssotDir)
+		}
+		out = append(out, OwnedRef{Task: task, Repo: repo, SHA: sha})
+	}
+	return out, nil
 }
 
 // RemoveWorktree removes the linked worktree at worktreePath from the SSOT at

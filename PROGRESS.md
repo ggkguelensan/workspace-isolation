@@ -446,6 +446,32 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   the safe HEAL-3 surface is the explicit `lock break` command + `wi doctor`, not a silent break inside
   Acquire. Revisit only with a concrete stale-flock scenario that survives the proven-dead gate.
 
+  (26) ✅ **this firing** — `git.ListOwnedRefs(ctx, ssotDir) ([]OwnedRef, error)`, the enumeration half of
+  the evidence-positive ownership markers and the enabling primitive for HEAL-2 sub-unit (a) `gc.Inspect`
+  (guard `GIT-LIST-OWNED-REFS`, `internal/git/git.go` + `_test`). Where `OwnedRefSHA` answers "does wi own
+  THIS cell?", `ListOwnedRefs` answers "which (task,repo) cells does wi own in this mirror at all?" — the
+  evidence-positive *candidate population* the workspace gc sweep will classify. Implementation: a single
+  `git for-each-ref --sort=refname --format='%(refname) %(objectname)' refs/wi/owned/` (read-only, no
+  network), parsed into a sorted `[]OwnedRef{Task,Repo,SHA}`. Two structural safety properties, both
+  guarded: the for-each-ref pattern is **scoped to `ownedRefPrefix` (`refs/wi/owned/`)** so `refs/wi/backup/*`
+  (PROTECTED from gc by §7.1) and ordinary branches are NEVER enumerated as candidates; and a line that does
+  not parse as a well-formed owned ref is a **hard error**, never silently fabricated into a phantom cell.
+  Refactored the shared `ownedRefPrefix` const so the single-ref name (`ownedRef`) and the enumeration
+  pattern can never drift apart. Test-first → GREEN: `TestListOwnedRefsEnumeratesAllMarkers` (empty mirror →
+  empty; 3 markers across 2 tasks → all three, sorted) + `TestListOwnedRefsScopedToOwnedNamespace` (a
+  `refs/wi/backup/*` ref and a stray branch alongside one genuine marker → only the marker returned). Two
+  mutants confirmed RED-then-reverted (registry below): widen the pattern to `refs/wi/` → backup ref surfaces
+  → owned-prefix parse guard errors → `Scoped` RED; `break` after the first parsed marker → 1-of-3 returned →
+  `EnumeratesAll` RED. `gofmt`/`go vet`/`go build ./...`/`go test ./...` GREEN (25 packages) + linux
+  cross-build/vet clean.
+  NEXT M4 unit — HEAL-2 sub-unit **(a) `gc.Inspect(ctx, l, g) ([]gc.Candidate, error)`**: the read-only,
+  lock-free, ZERO-network sweep that builds the candidate set. Population = `ListOwnedRefs` markers (per
+  mirror) ∪ on-disk isolate worktree dirs; for each (task,repo) cell observe the four `Candidate` signals —
+  `HasMarker` (a marker exists, via the just-built enumeration), `Live` (a live isolate registry record still
+  claims it — likely needs a new `state.List`/StateDir enumeration primitive, which `state` lacks today),
+  `Clean` (`git.IsClean`), `AheadOfBase` (`git.DivergedCounts` vs base) — then run each through `gc.Classify`.
+  THEN (b) `gc.Collect` executor and (c) `wi gc [--dry-run]` CLI handler, per the unit-25 NEXT pointer above.
+
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
   the MVP has been re-verified END TO END this firing. `gofmt -l .` clean · `go build ./...` · `go vet
@@ -1641,6 +1667,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | guard | mutant |
 |-------|--------|
 | GC-CLASSIFY (M4 HEAL-2) | in `gc.Classify`, **(no-live-loss limb)** delete the `case !c.Clean \|\| c.AheadOfBase: return ClassBlockedWork` arm → a wi-owned worktree carrying uncommitted/unmerged work falls through to `ClassReclaimable` → `TestClassifyNeverReclaimsLiveWork` RED (`got "reclaimable"`) + the `owned-dirty`/`owned-ahead-but-clean`/`owned-dirty-and-ahead` truth-table rows RED, the orphan/live/clean-reclaimable rows GREEN — pinning HEAL-GC-NO-LIVE-LOSS (DESIGN §7.1: gc never destroys live work). **(Evidence-positive limb)** delete the `case !c.HasMarker: return ClassOrphanUnexplained` arm → a markerless candidate is judged by cleanliness alone, so a clean one becomes `ClassReclaimable` → `TestClassifyNeverReclaimsWithoutMarker` RED + the `no-marker-*` rows RED, the owned/live rows GREEN — pinning the §7.1 evidence-positive keystone (no marker = no provenance = never reclaimable). Pure function, no build tag. Darwin RED→GREEN, both confirmed-then-reverted (`cached` = byte-identity) |
+| GIT-LIST-OWNED-REFS (M4 HEAL-2) | in `git.ListOwnedRefs`, **(primary — scoping limb)** widen the `for-each-ref` pattern from `ownedRefPrefix` (`refs/wi/owned/`) to `"refs/wi/"` → a `refs/wi/backup/*` ref (PROTECTED from gc by §7.1) surfaces, fails the `CutPrefix(refname, ownedRefPrefix)` owned-prefix guard, and `ListOwnedRefs` errors → `TestListOwnedRefsScopedToOwnedNamespace` RED (`for-each-ref returned non-owned ref "refs/wi/backup/feat/api"`) — pinning that backup refs/branches are never enumerated as gc candidates. **(alternate — completeness limb)** `break` after the first `out = append(...)` → only 1 of 3 markers returned → `TestListOwnedRefsEnumeratesAllMarkers` RED (`got [bugfix/api], want all three sorted`). Read-only, no build tag. Darwin RED→GREEN, both confirmed-then-reverted |
 | REPAIR-PLAN | change the `ClassOrphanWorktree` arm of `isolate.PlanAction` to `return RepairDropRecord` (auto-clean an orphan) → exactly the two `orphan_worktree` rows of `TestPlanActionTruthTable` + `TestPlanActionNeverAutoRemovesOrphan` RED, the other 6 rows GREEN — proving the §7.1 orphan hard-block is load-bearing (a `ClassReclaimed`→`RepairRematerialize` mutant likewise reddens the resurrection guard) |
 | GIT-WORKTREE-PRUNE | make `git.PruneWorktrees` a no-op (`return nil` without running `git worktree prune`) → the stale `.git/worktrees/<id>` admin entry left by an out-of-band worktree-dir removal survives → the post-prune `AddWorktree` in `TestPruneWorktreesClearsStaleAdminEntry` fails "missing but already registered" (exit 128) → RED (the pre-prune failed re-add additionally pins that AddWorktree itself does not silently `--force`) |
 | REPAIR-EXEC | skip the `PruneWorktrees` call in `isolate.Repair`'s `rematerialize` arm (call only `AddWorktree`) → the `web` MissingWorktree cell's re-add fails "missing but already registered" → exactly the `web` rematerialize assertions of `TestRepairReconcilesAllDriftStates` (Done, worktree-present, HEAD-at-marker) RED while the other four arms (`api`/`auth`/`db`/`cache`) stay GREEN — pinning that the executor composes the unit-22 prune primitive before re-adding; alternates: drop a Reclaimed repo from the `drop` set → cache survives in the record RED; turn the `block_orphan` arm into a removal → db orphan-left-intact RED |
