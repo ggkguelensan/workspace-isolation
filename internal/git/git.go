@@ -369,12 +369,33 @@ func (e *NonFastForwardError) Error() string {
 		e.Base, e.Current, e.New)
 }
 
+// IsAncestor reports whether maybeAncestor is an ancestor of descendant in the repo
+// at dir — equivalently, whether advancing a ref from maybeAncestor to descendant
+// would be a fast-forward. A commit is its own ancestor (the reflexive case is true).
+// It runs `git merge-base --is-ancestor`, which exits 0 when true and 1 when false (a
+// genuine non-ancestor); ANY other exit code (e.g. a nonexistent revision) is a real
+// error, never silently read as false. It mutates nothing, so it is the non-mutating
+// twin of FastForwardBaseRef's ff-safety check — `wi land --atomic`'s pre-flight uses
+// it to prove EVERY repo would fast-forward before any base ref moves, and
+// FastForwardBaseRef calls it so the pre-flight and the actual advance share one predicate.
+func (g *Git) IsAncestor(ctx context.Context, dir, maybeAncestor, descendant string) (bool, error) {
+	if _, err := g.r.Run(ctx, dir, "merge-base", "--is-ancestor", maybeAncestor, descendant); err != nil {
+		var ee *gitexec.ExitError
+		if errors.As(err, &ee) && ee.Result.ExitCode == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("git: ancestry check %s..%s in %s: %w", maybeAncestor, descendant, dir, err)
+	}
+	return true, nil
+}
+
 // FastForwardBaseRef advances refs/heads/<base> in the repo at dir to newRev,
 // but ONLY if doing so is a fast-forward (the current base tip is an ancestor of
 // newRev). It performs no checkout and no merge, so it operates on the detached
 // SSOT clone; on a non-fast-forward it returns *NonFastForwardError and leaves
 // the ref untouched. This is the only function in wi permitted to move a base
-// ref (DESIGN §5).
+// ref (DESIGN §5). The ff-safety predicate is IsAncestor, so this advance and
+// `wi land --atomic`'s non-mutating pre-flight agree by construction.
 func (g *Git) FastForwardBaseRef(ctx context.Context, dir, base, newRev string) error {
 	baseRef := "refs/heads/" + base
 	current, err := g.ResolveRef(ctx, dir, baseRef)
@@ -386,15 +407,15 @@ func (g *Git) FastForwardBaseRef(ctx context.Context, dir, base, newRev string) 
 		return err
 	}
 
-	// Fast-forward safety: current must be an ancestor of newSHA. merge-base
-	// --is-ancestor exits 0 when true, 1 when false (a genuine non-ff), and other
-	// codes on error.
-	if _, ffErr := g.r.Run(ctx, dir, "merge-base", "--is-ancestor", current, newSHA); ffErr != nil {
-		var ee *gitexec.ExitError
-		if errors.As(ffErr, &ee) && ee.Result.ExitCode == 1 {
-			return &NonFastForwardError{Base: base, Current: current, New: newSHA}
-		}
-		return fmt.Errorf("git: ancestry check %s..%s in %s: %w", current, newSHA, dir, ffErr)
+	// Fast-forward safety: current must be an ancestor of newSHA. IsAncestor already
+	// distinguishes a genuine non-ancestor (false) from a real fault (error), so a
+	// false here is exactly the non-fast-forward refusal — return its error verbatim.
+	ff, err := g.IsAncestor(ctx, dir, current, newSHA)
+	if err != nil {
+		return err
+	}
+	if !ff {
+		return &NonFastForwardError{Base: base, Current: current, New: newSHA}
 	}
 
 	// Move the ref with the old value asserted, so a concurrent change between the

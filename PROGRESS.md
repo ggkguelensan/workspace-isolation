@@ -627,7 +627,40 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (51) ✅ **this firing** — **the `wi state cas` CLI command + lit `CapStateKV`** (guard `CMD-STATE-CAS`;
+  (52) ✅ **this firing** — **`git.IsAncestor` — the non-mutating fast-forward predicate** (guard
+  `GIT-IS-ANCESTOR`; `internal/git/git.go` + `git_test.go`), the FIRST sub-unit of the `land-atomic`
+  capability. **API:** `(*Git).IsAncestor(ctx, dir, maybeAncestor, descendant) (bool, error)` — runs
+  `git merge-base --is-ancestor`, mapping exit 0 → `(true,nil)`, exit 1 → `(false,nil)` (a genuine
+  non-ancestor), and ANY other exit code (e.g. a nonexistent revision) → a real error, never silently
+  read as false. It mutates nothing, so it is the non-mutating twin of `FastForwardBaseRef`'s ff-safety
+  check. **`FastForwardBaseRef` refactored to reuse it** — the inline `merge-base --is-ancestor` +
+  exit-code dance is gone; it now calls `IsAncestor(current, newSHA)`, returns its error verbatim (no
+  double-wrap; `IsAncestor` already produces the `"git: ancestry check …"` context), and maps `!ff` to
+  `*NonFastForwardError`. So the actual base advance (DESIGN §5) and `wi land --atomic`'s non-mutating
+  pre-flight now agree by construction — one predicate, two callers. The existing FF tests
+  (`TestFastForward*`) exercise the refactored path unchanged. **DECISION #ATOMIC-1 recorded** (the
+  `land-atomic` decomposition): `wi land --atomic` spans three packages (a git ancestry predicate +
+  an `internal/land` validate-all pre-flight + a `cmd_land.go` `--atomic` flag) plus a light contract
+  change (`CapLandAtomic` lit + `goldenSuccess` drift) — too large for one green unit, so it is built
+  bottom-up, one disciplined unit per firing. This unit ships the leaf the pre-flight needs. **Fitness:**
+  `TestIsAncestor` (5 table cases over a 3-commit DAG — C0→C1 linear, C2 a sibling of C1: linear-ancestor
+  true, rewind false, reflexive true, both-diverged false — plus a nonexistent-rev → non-nil-error case).
+  **Registered mutants** (both RED→revert→`(cached)` GREEN, byte-identity): PRIMARY = ignore the exit
+  code and return `(true,nil)` always → `TestIsAncestor` RED on rewind + both-diverged + nonexistent-rev
+  (4 failures, git_test.go:167/:174); ALTERNATE (documented) = collapse the "other exit code = error"
+  branch into the false branch → the nonexistent-rev case RED. Full gate GREEN (28 pkgs ok + `? schema`)
+  + gofmt clean + linux cross-build/vet clean.
+  NEXT M4 unit — **the `internal/land` non-mutating validate-all pre-flight** (sub-unit 2 of `land-atomic`):
+  for each repo spec resolve the work tip (worktree HEAD) + base tip and call `IsAncestor(baseTip, workTip)`;
+  ALL-pass → proceed to land, ANY-fail → refuse the WHOLE op moving nothing (an all-or-nothing gate, vs.
+  v0 land's stop-at-first-block which may have already advanced earlier repos). THEN sub-unit 3 — the
+  `wi land --atomic` flag in `cmd_land.go` (the first flag on `land`; parse like `state cas` did) + light
+  `CapLandAtomic` in `contract.Capabilities()` (byte-exact `goldenSuccess` drift → update golden, exactly
+  as CMD-LAND/CMD-STATE-CAS). (DEFERRED, unchanged: `journal.KindLand` land-recovery Finisher (HEAL-5);
+  HEAL-GC-NO-LIVE-LOSS case (iii) #GC-AHEAD-V0 — needs a journaled discard verb, do NOT fake with a vacuous
+  test; `wi state get` — NOT in documented M4 scope, do not build without owner direction.)
+
+  (51) ✅ **(prior firing)** — **the `wi state cas` CLI command + lit `CapStateKV`** (guard `CMD-STATE-CAS`;
   `internal/cli/cmd_state_cas.go` + `cmd_state_cas_test.go`, package `cli_test`), sub-unit **(3)** of `state cas`
   (DESIGN §8) — the seam wiring unit (50)'s `KVCompareAndSwap` core to the envelope, the FIRST command to back the
   state-kv capability. **Surface:** `wi state cas <namespace> <key> --expected <value|__ABSENT__> --new <value>`,
@@ -663,12 +696,15 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   (`state-kv` was already in `AllCapabilities()`). HELP-REGISTRY-SYNC satisfied with a new `state cas` help row. The
   "capability ⇒ backing command" invariant now holds for state-kv: it lit in the SAME unit that wired its command.
   Full gate GREEN (28 pkgs ok + `? schema`) + gofmt clean + linux cross-build/vet clean.
-  NEXT M4 unit — **`wi state get <ns> <key>`** (the read companion: wire `state.KVGet` to the envelope as
-  `action=read`; absent key → a clean `not_found` refusal so an agent can probe a slot without a CAS), OR pivot back to
-  **Wave C self-heal** — the `§7.3` auto-lock-break composing the now-complete liveness stack (`processAlive` +
-  `BootID` + `Holder` + `Stamp`/`ReadHolder`, units 1–7): `lock break <key>` should consult `ReadHolder` and refuse
-  unless the holder is proven dead (different boot_id, or same-host dead pid). Reuse `cmd_state_cas.go`'s
-  flag-parsing + `cmd_land.go`'s registry/help/CommandError shape as the template. (DEFERRED, unchanged: the
+  NEXT [SUPERSEDED by unit (52)] — this firing offered `wi state get` OR the §7.3 auto-lock-break. Build-over-doc
+  correction recorded at (52)-selection time: (a) **`wi state get` is NOT in documented M4 scope** — the PLAN M4 row
+  (line 137) lists `state cas`, not `state get`, and surfacing a read value needs a new Envelope additive block, so it
+  is deferred pending owner direction, NOT chosen by the loop; (b) **the §7.3 auto-lock-break is ALREADY built** —
+  `lock break <key>` already consults the proven-dead/boot-id-mismatch liveness stack (passing tests in
+  `cmd_lock_break_unix.go`/`cmd_lock_ls_unix.go`), so it is not open work. The genuine remaining documented M4
+  capability is **`land-atomic`** (PLAN line 137), which (52) began. The original text, for the record: ~`wi state get
+  <ns> <key>` (wire `state.KVGet` → `action=read`; absent → `not_found`)~ / ~§7.3 auto-lock-break reusing
+  `cmd_state_cas.go` flag-parsing + `cmd_land.go` registry/help shape~. (DEFERRED, unchanged: the
   `journal.KindLand` land-recovery Finisher (HEAL-5); HEAL-GC-NO-LIVE-LOSS case (iii) #GC-AHEAD-V0 — needs a journaled
   discard verb, do NOT fake with a vacuous test.)
 
@@ -2592,6 +2628,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | LOCK-KEY-STATE-KV (M4 state cas) | the `state-kv:<namespace>` key in the closed `lock.Key` namespace (`internal/lock/keys.go`) — the key `wi state cas` takes around its load-compare-store so a CAS is atomic across processes. `StateKV(namespace)` validates the namespace via `layout.ValidateSegment` and yields the canonical string `state-kv:<namespace>`; `ParseKey` reverses it (so a `state-kv:<ns>.lock` file is recognized as a real key, not rejected as a stray). Registered mutant = drop the `case strings.HasPrefix(s, stateKVPrefix)` arm of `ParseKey` → `TestParseKey` RED (`ParseKey("state-kv:ports"): unexpected error … is not a valid key`) — pinning the round-trip the lock lister relies on. Also pinned: `TestCanonicalKeyStrings` (literal `state-kv:ports`) + `TestKeyConstructorsRejectUnsafeNames` (traversal/separator/empty namespace rejected). Pure key namespace, no I/O, no build tag. Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | STATE-KV-CAS (M4 state cas) | the `internal/state` namespaced compare-and-swap core (`KVCompareAndSwap`/`KVGet`, `internal/state/kv.go`): a CAS sets `ns/key` to newval IFF the current value equals `expected` (with `AbsentSentinel == "__ABSENT__"` meaning "iff absent"), serializing the load-compare-store on `lock.StateKV(ns)` taken from `l.LocksDir()` — owns the lock end-to-end + `Stamp(opID)`s it, symmetric with `isolate.New` (decision #SKV-2). A mismatch returns `(false, nil)` writing nothing; a contended namespace surfaces `*lock.HeldError` → exit 6. Store = `.wi/state/kv/<ns>.json` (`map[string]string`, atomic write, `kv/` lazily made + skipped by `state.List`). Primary mutant = drop the compare and store newval unconditionally → `TestKVCompareAndSwap` RED at the mismatch case (`swapped=true, want false`, kv_test.go:52). Alternate mutant = acquire `lock.Workspace()` instead of `lock.StateKV(ns)` (lock the wrong key) → `TestKVCompareAndSwapSerializesOnLock` RED (with `state-kv:ports` held externally the CAS no longer sees `*lock.HeldError`, kv_test.go:111). Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | CMD-STATE-CAS (M4 state cas) | the `wi state cas <ns> <key> --expected <v\|__ABSENT__> --new <v>` handler (`cmd_state_cas.go`): the FIRST command with its own flags (`parseStateCasArgs` handles `--flag value` + `--flag=value`, both required, exactly two positionals, non-empty key, namespace traversal-checked at the factory → usage exit 64). `stateCasCmd.Run` maps `state.KVCompareAndSwap`: won → `*Result{action=created}` (exit 0); lost (`!swapped`) → `*CommandError{conflict, noop}` (exit 4, a TYPED refusal not an infra error); `*lock.HeldError` → `*CommandError{lock_held}` (exit 6); `--dry-run` → `*Result{action=noop}` no write (exit 0). Primary mutant = map the lost CAS to a `created` success instead of the conflict → `TestStateCasCompareMiss` RED (`err=<nil>, want *cli.CommandError`, cmd_state_cas_test.go:100 — a lost race mis-reported as a win). Alternate mutant = drop the `DryRunFrom(ctx)` guard so `--dry-run` executes the swap → `TestStateCasDryRunNoWrite` RED (the value it must NOT have written is present). A SECOND coupled change — lighting `CapStateKV` in `contract.Capabilities()` — is guarded by the byte-exact `goldenSuccess` (`TestEnvelopeGoldenSuccess`): adding it reddened the golden showing `,"state-kv"` appended; updated to the honest wire form → RED→GREEN. End-to-end through the registry factory + `cmd.Run(WithOpID(...))`, no build tag. Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
+| GIT-IS-ANCESTOR (M4 land-atomic) | the non-mutating fast-forward predicate `(*Git).IsAncestor(ctx, dir, maybeAncestor, descendant)` (`internal/git/git.go`): runs `git merge-base --is-ancestor`, exit 0 → `(true,nil)`, exit 1 → `(false,nil)`, any other code → a real error (never silent false). `FastForwardBaseRef` was refactored to reuse it, so the SSOT base advance (DESIGN §5) and `wi land --atomic`'s pre-flight share one predicate. Primary mutant = ignore the exit code, return `(true,nil)` always → `TestIsAncestor` RED on rewind + both-diverged + nonexistent-rev (4 failures, git_test.go:167/:174) — pins that a non-ancestor is reported false, not true. Alternate mutant = collapse the "other exit code = error" branch into the false branch (`return false, nil` for any error) → ONLY the nonexistent-rev case RED (a missing rev must error, not read as "not an ancestor"). Hermetic real-git harness over a 3-commit DAG, no build tag. Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |

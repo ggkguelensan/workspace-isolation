@@ -116,6 +116,65 @@ func TestFastForwardRefusesNonFastForward(t *testing.T) {
 	}
 }
 
+// Guard GIT-IS-ANCESTOR — the non-mutating fast-forward predicate (DESIGN §5, §7.2).
+//
+// IsAncestor(maybeAncestor, descendant) reports whether advancing a ref from
+// maybeAncestor to descendant would be a fast-forward — the SAME ancestry test
+// FastForwardBaseRef enforces, but with NO ref motion. It is what `wi land --atomic`'s
+// pre-flight uses to prove EVERY repo would fast-forward before any base ref is moved,
+// so the all-or-nothing validate-all pass and the actual advance can never disagree
+// (FastForwardBaseRef is refactored to call this exact predicate). The load-bearing
+// properties: a true linear ancestor is reported true; a rewind and a divergence are
+// both false (the append-only floor, two-sided); a commit is its own ancestor; and a
+// nonexistent revision is an ERROR, never silently read as "not an ancestor".
+//
+// Non-vacuity mutant (registered, primary): ignore merge-base's exit code and return
+// (true, nil) always → the rewind and both diverged cases go RED (a non-ff wrongly
+// reported as a fast-forward). Alternate mutant: collapse the "other exit code = error"
+// branch into the false branch (return false on any non-zero exit) → the nonexistent-rev
+// case goes RED (a missing object silently swallowed as "not an ancestor").
+func TestIsAncestor(t *testing.T) {
+	env := testenv.New(t)
+	dir := newSSOT(t, env)
+
+	c0 := writeCommit(t, env, dir, "a.txt", "c0", "c0") // main = C0
+	env.Git(t, dir, "branch", "side")                   // side = C0
+	c1 := writeCommit(t, env, dir, "b.txt", "c1", "c1") // main = C1 (child of C0)
+	env.Git(t, dir, "switch", "side")
+	c2 := writeCommit(t, env, dir, "c.txt", "c2", "c2") // side = C2 (child of C0, sibling of C1)
+	env.Git(t, dir, "switch", "--detach")
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	cases := []struct {
+		name                 string
+		ancestor, descendant string
+		want                 bool
+	}{
+		{"linear ancestor", c0, c1, true},    // C0 is an ancestor of C1 → a clean fast-forward
+		{"rewind is not ff", c1, c0, false},  // C1 is NOT an ancestor of C0 (advancing would rewind)
+		{"reflexive", c1, c1, true},          // a commit is its own ancestor (a noop ff)
+		{"diverged forward", c1, c2, false},  // siblings: C1 not an ancestor of C2
+		{"diverged backward", c2, c1, false}, // siblings: C2 not an ancestor of C1
+	}
+	for _, tc := range cases {
+		got, err := g.IsAncestor(ctx, dir, tc.ancestor, tc.descendant)
+		if err != nil {
+			t.Fatalf("%s: IsAncestor(%s, %s): unexpected error %v", tc.name, tc.ancestor, tc.descendant, err)
+		}
+		if got != tc.want {
+			t.Errorf("%s: IsAncestor(%s, %s) = %v, want %v", tc.name, tc.ancestor, tc.descendant, got, tc.want)
+		}
+	}
+
+	// A nonexistent revision is an ERROR, not a silent false: a bare exit-code check
+	// that mapped every non-zero exit to "not an ancestor" would mask a missing object.
+	if _, err := g.IsAncestor(ctx, dir, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", c1); err == nil {
+		t.Errorf("IsAncestor with a nonexistent rev: err = nil, want a non-nil error")
+	}
+}
+
 // Guard GIT-CLONE-DETACHED — the SSOT clone lifecycle (DESIGN §5).
 //
 // EnsureClone lazily materializes an absent SSOT clone and leaves it in the
