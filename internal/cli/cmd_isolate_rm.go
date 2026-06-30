@@ -54,7 +54,7 @@ type isolateRmCmd struct {
 }
 
 func (c *isolateRmCmd) Run(ctx context.Context) (*Result, error) {
-	res, err := isolate.Remove(ctx, c.layout, c.git, c.task, c.repos)
+	res, err := isolate.Remove(ctx, c.layout, c.git, c.task, OpIDFrom(ctx), c.repos)
 	if err != nil {
 		var he *lock.HeldError
 		if errors.As(err, &he) {

@@ -258,7 +258,7 @@ func TestRemoveReclaimsCleanBlocksAheadOfBase(t *testing.T) {
 	webWT, _ := l.Isolate("feat", "web")
 	env.Git(t, webWT, "commit", "--allow-empty", "-m", "local work")
 
-	res, err := isolate.Remove(ctx, l, g, "feat", []string{"api", "web", "ghost"})
+	res, err := isolate.Remove(ctx, l, g, "feat", "op_test_rm_blocked", []string{"api", "web", "ghost"})
 	if err != nil {
 		t.Fatalf("isolate.Remove: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestRemoveAllCleanDeletesRecord(t *testing.T) {
 		t.Fatalf("isolate.New: %v", err)
 	}
 
-	res, err := isolate.Remove(ctx, l, g, "feat", nil) // nil → all recorded repos
+	res, err := isolate.Remove(ctx, l, g, "feat", "op_test_rm_teardown", nil) // nil → all recorded repos
 	if err != nil {
 		t.Fatalf("isolate.Remove: %v", err)
 	}
@@ -354,6 +354,55 @@ func TestRemoveAllCleanDeletesRecord(t *testing.T) {
 	}
 }
 
+// Guard ISOLATE-RM-STAMP (M4): Remove holds the isolate-state:<task> lock for the
+// whole reclamation, and must record the operation's holder identity into that lock
+// so the self-heal layer can later read WHO is tearing down an isolate and judge a
+// stale lock's liveness (DESIGN §6 / §7.3). The lock file persists after release
+// (Unlock does not unlink) AND past a full teardown (the lock lives under LocksDir,
+// not the task dir), so the stamped holder is readable by key once Remove returns.
+// This is the 4th and final acquire site wired. The assertion is sharp because New
+// already stamped this very lock with its OWN op id during setup: Remove must
+// RE-stamp with its own id, so reading back the REMOVE op id (not New's) proves the
+// stamp happened in Remove specifically.
+//
+// Non-vacuity mutant (registered): drop the held.Stamp(opID) call in Remove → the
+// isolate-state lock is re-acquired but never re-stamped → its body still carries
+// New's op id → lock.ReadHolder returns OpID == the New op id, not the Remove op id
+// → this test RED on the OpID assertion.
+func TestRemoveStampsHolderOnIsolateLock(t *testing.T) {
+	env, l, g, ctx := setup(t)
+	cloneSSOT(t, env, l, g, ctx, "api")
+
+	const newOpID = "op_new_for_rm_stamp"
+	const rmOpID = "op_remove_stamp"
+	if _, err := isolate.New(ctx, l, g, "feat", newOpID, specs("api")); err != nil {
+		t.Fatalf("isolate.New: %v", err)
+	}
+
+	res, err := isolate.Remove(ctx, l, g, "feat", rmOpID, nil) // full teardown
+	if err != nil {
+		t.Fatalf("isolate.Remove: %v", err)
+	}
+	if res.Status != isolate.RemoveComplete {
+		t.Fatalf("Status = %q, want %q", res.Status, isolate.RemoveComplete)
+	}
+
+	key, err := lock.IsolateState("feat")
+	if err != nil {
+		t.Fatalf("lock.IsolateState: %v", err)
+	}
+	h, err := lock.ReadHolder(l.LocksDir(), key)
+	if err != nil {
+		t.Fatalf("ReadHolder(isolate-state lock): %v — Remove did not stamp the holder", err)
+	}
+	if h.OpID != rmOpID {
+		t.Errorf("stamped holder OpID = %q, want %q — Remove must re-stamp with its own op id (was it the New op id %q?)", h.OpID, rmOpID, newOpID)
+	}
+	if h.PID != os.Getpid() {
+		t.Errorf("stamped holder PID = %d, want this process %d", h.PID, os.Getpid())
+	}
+}
+
 // Guard ISOLATE-REMOVE (lock): Remove runs under the isolate-state:<task> lock, so a
 // concurrent holder makes it refuse with *lock.HeldError (→ exit 6) rather than
 // racing a reclamation against another op on the same task (DESIGN §6.1).
@@ -374,7 +423,7 @@ func TestRemoveRefusesWhenIsolateStateHeld(t *testing.T) {
 	}
 	defer func() { _ = held.Release() }()
 
-	_, err = isolate.Remove(ctx, l, g, "feat", nil)
+	_, err = isolate.Remove(ctx, l, g, "feat", "op_test_rm_held", nil)
 	var he *lock.HeldError
 	if !errors.As(err, &he) {
 		t.Fatalf("Remove under a held isolate-state lock: err = %v (%T), want *lock.HeldError", err, err)
@@ -385,7 +434,7 @@ func TestRemoveRefusesWhenIsolateStateHeld(t *testing.T) {
 // returns state.ErrNoRecord so the CLI can map it to not_found.
 func TestRemoveMissingRecordIsErrNoRecord(t *testing.T) {
 	_, l, g, ctx := setup(t)
-	_, err := isolate.Remove(ctx, l, g, "ghost-task", nil)
+	_, err := isolate.Remove(ctx, l, g, "ghost-task", "op_test_rm_norecord", nil)
 	if !errors.Is(err, state.ErrNoRecord) {
 		t.Fatalf("Remove on a never-created task: err = %v, want state.ErrNoRecord", err)
 	}

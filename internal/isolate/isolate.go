@@ -220,7 +220,7 @@ type RemoveResult struct {
 // with no record returns state.ErrNoRecord (the isolate does not exist). A per-repo
 // gate failure is NOT a Go error — it is recorded in the result; Remove's error
 // return is reserved for failures that prevent the op from running at all.
-func Remove(ctx context.Context, l layout.Layout, g *git.Git, task string, repos []string) (RemoveResult, error) {
+func Remove(ctx context.Context, l layout.Layout, g *git.Git, task, opID string, repos []string) (RemoveResult, error) {
 	key, err := lock.IsolateState(task)
 	if err != nil {
 		return RemoveResult{}, err
@@ -230,6 +230,11 @@ func Remove(ctx context.Context, l layout.Layout, g *git.Git, task string, repos
 		return RemoveResult{}, err // *lock.HeldError → exit 6 (DESIGN §6.1)
 	}
 	defer func() { _ = held.Release() }()
+	// Record who holds the isolate-state lock so the self-heal layer can later read
+	// the holder and judge staleness (DESIGN §6 / §7.3). Best-effort: the flock is the
+	// exclusion guarantee, so a failed metadata write must not abort the teardown — a
+	// body-less lock reads as "unknown holder" and is conservatively never auto-broken.
+	_ = held.Stamp(opID)
 
 	stateDir := l.StateDir()
 	rec, err := state.Load(stateDir, task)
