@@ -152,3 +152,68 @@ func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return !os.IsNotExist(err)
 }
+
+// RepairAction is the per-cell verdict of the reconciler's "decide" half — the single
+// thing the executor will do to reconcile one Cell's three-way drift under the
+// isolate-state lock. It is an isolate-package domain vocabulary, NOT a closed contract
+// wire enum: like Classification and state.Stage it never crosses the envelope boundary
+// directly (the cli layer projects it into repos[]/blocked[] reasons), so internal/
+// contract — sole owner of the WIRE enums — does not own it. Per IMPLEMENTATION_PLAN §7
+// open decisions, recording this split keeps "contract owns closed enums" precise:
+// contract owns the enums agents parse, packages own their internal policy vocabularies.
+type RepairAction string
+
+const (
+	// RepairNone: a ClassConsistent cell whose recorded stage already agrees (created).
+	// The healthy steady state — the executor touches neither disk nor record.
+	RepairNone RepairAction = "none"
+
+	// RepairHealStage: a ClassConsistent cell (marker + worktree both present) whose
+	// recorded stage still lags at pending — a crash AFTER materialize but BEFORE the
+	// stage flip. The physical truth is "created"; the executor heals the registry stage
+	// forward to match. No disk action — the worktree is already correct.
+	RepairHealStage RepairAction = "heal_stage"
+
+	// RepairRematerialize: a ClassMissingWorktree cell (marker survives, worktree gone).
+	// The executor recreates the worktree at the marker's recorded base sha (Cell.MarkerSHA)
+	// — never an arbitrary newer base — and leaves the marker as-is (it already exists).
+	// Safe PRECISELY because the surviving marker proves this is not a completed-then-
+	// deleted op (no resurrection — DESIGN §7.4 HEAL-1).
+	RepairRematerialize RepairAction = "rematerialize"
+
+	// RepairDropRecord: a ClassReclaimed cell (neither marker nor worktree). The absent
+	// marker is authoritative that the cell should not exist; a registry record still
+	// naming it is a stale tombstone the executor drops. The cell is NEVER recreated —
+	// no resurrection, whatever the recorded stage said.
+	RepairDropRecord RepairAction = "drop_record"
+
+	// RepairBlockOrphan: a ClassOrphanWorktree cell (worktree present, marker absent) —
+	// a worktree wi cannot prove it owns. A HARD BLOCK (DESIGN §7.1 orphan_unexplained):
+	// the executor removes NOTHING and surfaces it loudly. wi never auto-prunes what it
+	// cannot prove it created.
+	RepairBlockOrphan RepairAction = "block_orphan"
+)
+
+// PlanAction is the pure "decide" half of the three-way reconciler (HEAL-1): it maps a
+// Cell's evidence-positive Classification plus its recorded stage to the single
+// RepairAction the executor will carry out. It performs no I/O and is the seam where the
+// two §7 safety invariants live structurally — a ClassReclaimed cell can only ever map to
+// RepairDropRecord (never re-materialized: no resurrection), and a ClassOrphanWorktree
+// cell can only ever map to RepairBlockOrphan (never auto-removed: unexplained orphans are
+// a hard block). The recorded stage refines ONLY the consistent case, distinguishing the
+// healthy steady state from a stage that lagged behind a completed materialize.
+func PlanAction(c Cell) RepairAction {
+	switch c.Class {
+	case ClassConsistent:
+		if c.Stage == state.StageCreated {
+			return RepairNone
+		}
+		return RepairHealStage
+	case ClassMissingWorktree:
+		return RepairRematerialize
+	case ClassOrphanWorktree:
+		return RepairBlockOrphan
+	default: // ClassReclaimed
+		return RepairDropRecord
+	}
+}

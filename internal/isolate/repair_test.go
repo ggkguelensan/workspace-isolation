@@ -166,3 +166,58 @@ func TestInspectNoRecordPropagates(t *testing.T) {
 		t.Fatal("Inspect over a nonexistent isolate returned nil error, want state.ErrNoRecord")
 	}
 }
+
+// TestPlanActionTruthTable pins the full (Classification × stage) → RepairAction
+// decision policy of the reconciler (HEAL-1, DESIGN §7.1/§7.4). PlanAction is the
+// pure "decide" half: given a Cell's evidence-positive class and its recorded stage,
+// it chooses the per-cell repair action the executor will carry out under the lock.
+//
+// Stage only refines the Consistent case (a cell materialized on disk but still
+// recorded pending is a crash-after-materialize-before-stage-flip → heal the stage
+// forward); for every other class the physical evidence decides alone.
+func TestPlanActionTruthTable(t *testing.T) {
+	cases := []struct {
+		class isolate.Classification
+		stage state.Stage
+		want  isolate.RepairAction
+	}{
+		{isolate.ClassConsistent, state.StageCreated, isolate.RepairNone},
+		{isolate.ClassConsistent, state.StagePending, isolate.RepairHealStage},
+		{isolate.ClassMissingWorktree, state.StageCreated, isolate.RepairRematerialize},
+		{isolate.ClassMissingWorktree, state.StagePending, isolate.RepairRematerialize},
+		{isolate.ClassOrphanWorktree, state.StageCreated, isolate.RepairBlockOrphan},
+		{isolate.ClassOrphanWorktree, state.StagePending, isolate.RepairBlockOrphan},
+		{isolate.ClassReclaimed, state.StageCreated, isolate.RepairDropRecord},
+		{isolate.ClassReclaimed, state.StagePending, isolate.RepairDropRecord},
+	}
+	for _, tc := range cases {
+		got := isolate.PlanAction(isolate.Cell{Class: tc.class, Stage: tc.stage})
+		if got != tc.want {
+			t.Errorf("PlanAction(class=%q, stage=%q) = %q, want %q", tc.class, tc.stage, got, tc.want)
+		}
+	}
+}
+
+// TestPlanActionNeverAutoRemovesOrphan isolates the two §7 safety invariants the
+// planner must encode:
+//
+//   - An OrphanWorktree (a worktree wi cannot prove it owns) is a HARD BLOCK —
+//     never reconciled into any record-dropping or removing action (§7.1: unexplained
+//     orphans are never auto-pruned).
+//   - A Reclaimed cell is dropped, NEVER re-materialized — no resurrection at the
+//     planning layer either (§7.4 HEAL-1).
+//
+// Registered non-vacuity mutant: change the OrphanWorktree arm to return
+// RepairDropRecord (auto-clean the orphan) → both OrphanWorktree rows above and this
+// test redden, while every other row stays green — proving the orphan hard-block is
+// load-bearing.
+func TestPlanActionNeverAutoRemovesOrphan(t *testing.T) {
+	for _, stage := range []state.Stage{state.StagePending, state.StageCreated} {
+		if got := isolate.PlanAction(isolate.Cell{Class: isolate.ClassOrphanWorktree, Stage: stage}); got != isolate.RepairBlockOrphan {
+			t.Errorf("an orphan worktree must be a hard block, got %q (stage %q)", got, stage)
+		}
+		if got := isolate.PlanAction(isolate.Cell{Class: isolate.ClassReclaimed, Stage: stage}); got == isolate.RepairRematerialize {
+			t.Errorf("a reclaimed cell must never be re-materialized (no resurrection), got %q (stage %q)", got, stage)
+		}
+	}
+}

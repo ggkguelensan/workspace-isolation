@@ -318,13 +318,36 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   failure, not a behavioral RED — so the mutant was moved into `pathExists`'s body to keep the call site
   intact). `gofmt`/`go vet`/`go build ./...`/`go test ./...` all GREEN (24 packages) + linux
   cross-build/vet clean.
+  (21) ✅ **this firing** — the **pure repair planner** `isolate.PlanAction(Cell) RepairAction` + the
+  `RepairAction` vocabulary (`none`/`heal_stage`/`rematerialize`/`drop_record`/`block_orphan`) (guard
+  `REPAIR-PLAN`, `internal/isolate/repair.go` + `_test`), the "decide" half of the HEAL-1 reconciler that
+  maps each classified `Cell` (unit-19 `Class` × unit-20-observed × recorded `state.Stage`) to the single
+  action the executor will carry out under the lock. Splitting the planner out FIRST (mirrors the
+  Classify→Inspect split) keeps the executor unit small and de-risks a half-done actor leaving the tree red.
+  The two §7 safety invariants live STRUCTURALLY in this seam: ClassReclaimed → `drop_record` only (never
+  `rematerialize`: no resurrection — §7.4 HEAL-1), ClassOrphanWorktree → `block_orphan` only (never an
+  auto-removing action: unexplained orphans are a hard block, never auto-pruned — §7.1). The recorded stage
+  refines ONLY the Consistent case: marker+worktree both present but stage still `pending` = a crash AFTER
+  materialize but BEFORE the stage flip → `heal_stage` (forward to created, no disk action); a Consistent
+  cell already at `created` → `none`. **Decision recorded (IMPLEMENTATION_PLAN §7):** `RepairAction` is an
+  isolate-package DOMAIN vocabulary, NOT a closed contract wire enum — like `Classification` and
+  `state.Stage` it never crosses the envelope boundary directly (the cli layer projects it into
+  repos[]/blocked[] reasons), so `internal/contract` (sole owner of the enums AGENTS PARSE) does not own it;
+  this keeps "contract owns closed enums" precise — contract owns wire enums, packages own internal policy
+  vocabularies. Test-first RED (`undefined: isolate.RepairAction`) → GREEN: the full (4 classes × {pending,
+  created}) → action truth table + a dedicated `TestPlanActionNeverAutoRemovesOrphan` pinning the two safety
+  invariants. Mutant = OrphanWorktree arm → `return RepairDropRecord` (auto-clean the orphan) → exactly the
+  two orphan rows + the safety test redden, the other 6 truth-table rows stay green (confirmed RED then
+  reverted). `gofmt`/`go vet`/`go build ./...`/`go test ./...` all GREEN (24 packages) + linux
+  cross-build/vet clean.
   NEXT M4 unit — **build order (recorded):** `wi doctor` (HEAL-8) stays LAST in M4 (PLAN line 84; its
-  `--fix` COMPOSES the safe heals). Continue HEAL-1: the **reconciler** `isolate.Repair` — under the
-  isolate-state:<task> lock, `Inspect` then act per `Cell`: re-materialize a MissingWorktree from
-  `Cell.MarkerSHA` (reuse the worktree-add path; the marker already exists so DON'T re-create it; flip the
-  stage), drop a Reclaimed cell's stale record entry (no resurrection), heal a Consistent-but-pending stage
-  forward to created, and HARD-BLOCK an OrphanWorktree (orphan_unexplained, never auto-removed — §7.1).
-  Then the `isolate repair` CLI handler (read `Inspect`/`Repair` onto repos[]; a hermetic dry-run path).
+  `--fix` COMPOSES the safe heals). Continue HEAL-1: the **executor** `isolate.Repair` (the pure `PlanAction`
+  decision core now exists — unit 21) — under the isolate-state:<task> lock, `Inspect` then dispatch each
+  `Cell` on `PlanAction(cell)`: re-materialize a MissingWorktree from `Cell.MarkerSHA` (reuse the worktree-add
+  path; the marker already exists so DON'T re-create it; flip the stage), drop a Reclaimed cell's stale record
+  entry (no resurrection), heal a Consistent-but-pending stage forward to created, and HARD-BLOCK an
+  OrphanWorktree (orphan_unexplained, never auto-removed — §7.1). Then the `isolate repair` CLI handler (read
+  `Inspect`/`Repair` onto repos[]; a hermetic dry-run path).
   THEN evidence-positive gc (HEAL-2, §7.1 — marker refs, `refs/wi/{backup,owned}` protected, unexplained =
   hard block); and only after those, `wi doctor` (HEAL-8) as the read-only aggregate + `--fix` dispatcher.
   AFTER that: wiring auto-break into `Acquire`'s `*HeldError` path is DEFERRED as a deliberate judgment call —
@@ -1527,6 +1550,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 
 | guard | mutant |
 |-------|--------|
+| REPAIR-PLAN | change the `ClassOrphanWorktree` arm of `isolate.PlanAction` to `return RepairDropRecord` (auto-clean an orphan) → exactly the two `orphan_worktree` rows of `TestPlanActionTruthTable` + `TestPlanActionNeverAutoRemovesOrphan` RED, the other 6 rows GREEN — proving the §7.1 orphan hard-block is load-bearing (a `ClassReclaimed`→`RepairRematerialize` mutant likewise reddens the resurrection guard) |
 | SHAPE-ENUM-DOUBLE-ENTRY | add/reorder a value in any `All*()` without editing the `want*()` literal copy |
 | SHAPE-ENVELOPE-INVARIANTS | add `,omitempty` to `Envelope.Error`, or drop the nil→`[]` coercion for repos/capabilities/warnings/next in `MarshalJSON`; **help block (decision #HB):** drop `,omitempty` from `Envelope.Help` → `"help":null` appears on every envelope → `TestEnvelopeHelpOmittedWhenNil` + the success/error goldens RED; reorder/rename a `HelpBlock` json tag or move the `Help` field → the frozen bytes drift → `TestEnvelopeHelpBlockGolden` RED |
 | SHAPE-SCHEMA | set top-level `additionalProperties:true` (or drop `error` from `required`, or widen a closed enum) in `schema/envelope.schema.json` → `TestSchemaRejectsInvalid` RED |
