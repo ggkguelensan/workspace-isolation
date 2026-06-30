@@ -271,11 +271,38 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `lock break project-registry` → lock_held/exit 6 with the verdict carried, file intact; `lock break`
   (no arg) and `lock break "not a key"` → usage/exit 64; `wi help` overview lists `lock break` as the 8th
   command.
-  NEXT M4 unit — pick the next HEAL primitive. Candidates (per IMPLEMENTATION_PLAN M4 Wave C): `wi doctor`/
-  `check` (HEAL-8, §7.5 — a read-only aggregate health report; would consume `lock.List` like `lock ls`
-  does, plus isolate-drift + orphan checks as they land); the three-way isolate drift reconciler (HEAL-1,
-  `isolate repair`); evidence-positive gc (HEAL-2). `lock break` completes the lock-self-heal command pair;
-  `wi doctor` is the natural next read-only consumer of the same domain and a low-risk unit.
+  (19) ✅ **this firing** — the **evidence-positive drift classifier** `isolate.Classify(markerExists,
+  worktreeExists bool) Classification` (guard `REPAIR-CLASSIFY`, `internal/isolate/repair.go` + `_test`),
+  the keystone of the three-way isolate drift reconciler (HEAL-1, DESIGN §7.1/§7.4 — `isolate repair`). A
+  PURE function (no I/O, no build tag) returning the 2×2 verdict over the two physical ownership signals:
+  `ClassConsistent` (marker ✓ + worktree ✓), `ClassMissingWorktree` (marker ✓, worktree ✗ — re-materialize
+  candidate), `ClassOrphanWorktree` (marker ✗, worktree ✓ — HARD BLOCK orphan_unexplained), `ClassReclaimed`
+  (neither — completed-then-deleted / never materialized). **DESIGN RULING (recorded):** the "three-way"
+  reconciler reconciles *recorded stage × owned-marker × worktree*; this unit owns the verdict over the two
+  PHYSICAL signals, and the keystone is that **the marker ref — NOT the registry record — is the authority
+  on whether a cell should exist** (evidence-positive §7.1). Keying the re-materialize verdict on the marker
+  makes the §7.4 HEAL-1 "no resurrection" rule STRUCTURAL rather than a special case: `isolate rm` unlinks
+  the marker when it reclaims a cell, so a completed-then-deleted op can never present a surviving marker —
+  it can only ever classify as Reclaimed, never MissingWorktree. The recorded stage is carried into the
+  reconciler (NEXT unit) to choose the record action (drop a stale tombstone / heal a lagging stage forward
+  / re-materialize), not into this verdict. Test-first RED (undefined symbols) → GREEN: a 4-row truth-table
+  test + a dedicated `TestClassifyNoResurrection` pinning the (✗marker,✗worktree)→Reclaimed and
+  (✓marker,✗worktree)→MissingWorktree rows. Mutant = `case !worktreeExists: return ClassMissingWorktree`
+  (re-materialize keyed off worktree-absence, ignoring the marker = the resurrection bug) → `neither-present`
+  + `TestClassifyNoResurrection` RED (`"missing_worktree"`, want `reclaimed`), other rows green — isolating
+  exactly the no-resurrection keystone (confirmed RED then reverted). `gofmt`/`go vet`/`go build ./...`/`go
+  test ./...` all GREEN (24 packages) + linux cross-build clean.
+  NEXT M4 unit — **build order correction (recorded):** `wi doctor` (HEAL-8) is NOT the next unit — per
+  IMPLEMENTATION_PLAN line 84 it is the LAST M4 piece because its bounded `--fix` COMPOSES the safe-tier
+  heals (drift reconciler, gc), which must therefore exist first. The next units follow PLAN line 82–83 in
+  order: continue HEAL-1 (the **drift observer** — read each cell's marker via `git.OwnedRefSHA` + worktree
+  presence via the layout path into a `Cell`, then a **reconciler** that joins `Classify` with the recorded
+  stage to choose a per-cell action: re-materialize a MissingWorktree from the marker's base sha reusing
+  `materializeRepo`, drop a Reclaimed stale record, heal a StageLag forward, HARD-BLOCK an OrphanWorktree),
+  then the `isolate repair` CLI handler; THEN evidence-positive gc (HEAL-2); and only after those, `wi
+  doctor` (HEAL-8) as the read-only aggregate + `--fix` dispatcher.
+  AFTER the reconciler: evidence-positive gc (HEAL-2, §7.1 — marker refs, `refs/wi/{backup,owned}` protected,
+  unexplained = hard block).
   AFTER that: wiring auto-break into `Acquire`'s `*HeldError` path is DEFERRED as a deliberate judgment call —
   on a trustworthy local fs an `EWOULDBLOCK` from `TryLock` means the holder's flock is LIVE (the kernel
   released it if the holder had died), so a silent auto-break there would risk stealing a live peer's lock;
@@ -1555,6 +1582,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | LOCK-BREAK (M4) | in `Break` drop the `if !d.Safe { return d, nil }` early return so it ALWAYS `os.Remove`s the lock file regardless of verdict → a refused break still destroys the file → `TestBreak` RED on BOTH the `live_holder_is_refused_and_left_intact` and `unknown_holder_(body-less)_is_refused_and_left_intact` subtests (`lock file removed …, want intact`), while `proven-dead … is broken` and `nothing to break is not an error` stay green — isolating the mutant to exactly the safe gate. Alternate = replace `os.Remove(...)` with a no-op → the proven-dead subtest reddens (`lock file still present after a safe break, want removed`). Pins the DESIGN §7.3 / HEAL-3 displacement action: a lock is unlinked ONLY when AssessBreak proves the holder dead on a trustworthy fs; unlinking a file a LIVE peer holds would break mutual exclusion (next Acquire O_CREATEs a new inode and flocks that), the exact data-loss path §7 forbids. Darwin host RED→GREEN; `//go:build unix` |
 | CMD-LOCK-LS (M4) | in the `LockStatus`→`LockInfo` projection (`lockInfoOf`/`lockInfoFrom`) drop the `if d.HolderKnown { li.Holder = … }` guard so Holder is left nil for every row → the proven-dead row (which HAS a known holder) loses its identity → `TestLockLsProjectsHolders` RED on the non-nil-holder assertion (`repo:api has a known holder; its nested holder identity must be projected, got nil`), while the body-less row (holder legitimately nil) stays green — isolating the holder projection. Alternate = swap two of the four bool fields in the projection → the per-field bool assertions redden. Pins the read-only `wi lock ls` CLI surface over `lock.List`: action=read, the four verdict bools land on the right contract fields, Reason is carried, and a holder identity rides the nested LockHolder EXACTLY when known (DESIGN §7.3/§7.4); `//go:build unix` |
 | CMD-LOCK-BREAK (M4) | in `lockBreakCmd.Run` drop the `if !d.Safe { return … &CommandError{Kind: KindLockHeld} … }` branch so every break maps to `Result{Action: removed}` / exit 0 regardless of verdict → a live holder is mis-reported as a successful break → `TestLockBreakLiveHolderRefusesWithLockHeld` RED (`exit = 0, want 6`; `got ok=true error=<nil>`), while `TestLockBreakProvenDeadRemovesAndExitsZero` stays green — isolating the verdict→envelope mapping. Alternate = drop `env.Locks = r.Locks` from `envelopeFor`'s failure arm → the refusal stops carrying its verdict → same test RED on the `locks[]`-on-failure-envelope assertion (`a lock_held refusal must carry the lock's verdict`). Both confirmed via `cli.Execute` (full pipeline) RED→GREEN. Pins the ACTION half of HEAL-3: a SAFE break → removed/exit 0 + the removed lock's verdict; a refused break → lock_held/exit 6 with the verdict carried so the agent sees WHY, file left intact; one-operand factory rule (DESIGN §7.3); `//go:build unix` |
+| REPAIR-CLASSIFY (M4) | in `isolate.Classify` replace the marker-keyed arms with `case !worktreeExists: return ClassMissingWorktree` (re-materialize ANY missing worktree, ignoring the marker) → a completed-then-deleted cell (no marker, no worktree) is mis-classified as a re-materialize candidate → `TestClassifyNoResurrection` RED (`got "missing_worktree"`, want `reclaimed`) + `TestClassifyEvidencePositive/neither-present` RED, while `owned-but-worktree-gone`, `owned-and-present`, `worktree-without-marker` stay green — isolating exactly the no-resurrection keystone. Pins HEAL-1 (DESIGN §7.1/§7.4): the marker ref — not the registry record — is the authority on whether a cell should exist, so the re-materialize verdict (MissingWorktree) requires a SURVIVING marker; a deliberately removed op (marker unlinked by `isolate rm`) classifies as Reclaimed and is NEVER resurrected. Pure function, no build tag. Darwin RED→GREEN |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
