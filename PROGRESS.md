@@ -627,7 +627,55 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (47) ✅ **this firing** — **the land op-journal lifecycle wrapper `land.RunJournaled`** (guard `LAND-JOURNAL`;
+  (48) ✅ **this firing** — **the `wi land <task> <repo>…` CLI command** (guard `CMD-LAND`; `internal/cli/
+  cmd_land.go` + `cmd_land_test.go`, package `cli_test`), the seam where the unit-47 `land.RunJournaled` core
+  (journaled, durable, stop-at-first-block) meets the envelope contract — making `wi land` runnable end-to-end.
+  `newLandCommand` validates a safe `<task>` segment + ≥1 `<repo>` (a traversing task name → clean usage refusal
+  HERE; mirrors `isolate new`'s factory); `landCmd.Run` (a) `config.Load`s the manifest (missing → not_found
+  +`wi init`; malformed → usage, exit 64) and resolves each repo to a `land.RepoSpec{Name,Base}` via `cfg.Lookup`
+  (undeclared repo → not_found, NOT usage); (b) reads the minted op_id via `OpIDFrom(ctx)` so the durable
+  landstate record + op-journal carry the SAME id the envelope reports (CTX-OPID); (c) calls `RunJournaled` and
+  maps Status onto the return convention; `projectLandOutcome` projects each `land.RepoResult` onto the wire
+  `RepoResult` (landed → action=landed + LandedSHA + Stage; a parked non-ff block → per-repo conflict coded
+  `non_fast_forward`; an infra fault → internal; an unreached repo → plain noop). **Wired** `"land"` into
+  `BuildRegistry` (which FORCES a help row via guard HELP-REGISTRY-SYNC) + added the `land` help-table row
+  (`resolve`'s Next now points at `wi land` so the overview reads isolate→resolve→land→rm) + **advertised
+  `CapLand`** in `contract.Capabilities()` now that `wi land` is a backing command (capability ⇒ backing command;
+  `land-atomic` stays dark until `--atomic` validate-all exists). **DECISION #LD recorded** (corrects the unit-47
+  NEXT pointer's "exit 2 partial, like isolate-new"): the StatusBlocked→exit mapping MIRRORS `isolate rm`'s
+  three-way shape, NOT `isolate new`'s flat partial — all landed → landed Result (exit 0); ≥1 landed then blocked
+  → DURABLE PARTIAL `(result, *CommandError{partial, Action: landed})` (bases moved = real progress, `land
+  continue` resumes, exit 2); NOTHING landed (first repo blocked) → full refusal `*CommandError{conflict}` (exit
+  4 — no base advanced, the agent must rebase then retry). A non-ff block needs a rebase to clear, like an rm
+  orphan needs the worktree resolved — neither self-heals on a blind re-run; isolate-new flattens to partial
+  because its blocks are independent per-repo materialization faults, not a stop-the-world refusal. Blocked repos
+  ride in `repos[]` (envelopeFor threads only Repos/Warnings/Next onto a failure envelope; Blocked[] would
+  vanish). **Four fitnesses over the real-git harness, through the registry factory + `cmd.Run(WithOpID(...))`:**
+  `TestLandCommandLandsAllRepos` (both repos ff → action=landed, SSOT base advanced to the work tip, exit 0),
+  `TestLandCommandPartialBlocksOneRepo` (api lands, web's base diverged → KindPartial + api landed + web conflict
+  `non_fast_forward` in repos[]), `TestLandCommandAllBlockedIsConflict` (sole repo diverged → KindConflict,
+  nothing moved), `TestLandCommandFactoryValidatesArgs` (arg/traversal validation). **Registered mutant**
+  (RED→revert→`(cached)` GREEN): in `landCmd.Run`, on the mixed outcome return `(result, nil)` instead of the
+  partial CommandError → `TestLandCommandPartialBlocksOneRepo` RED (a partial land mis-reported as clean success);
+  alternate = map the all-blocked outcome to KindPartial → `TestLandCommandAllBlockedIsConflict` RED (a
+  nothing-changed refusal must be exit 4, not 2). The `CapLand` addition is itself guarded by the byte-exact
+  `goldenSuccess` (TestEnvelopeGoldenSuccess): adding `CapLand` reddened it (drift showing `,"land"`); the golden
+  was updated to the honest new wire form — confirmed RED→GREEN. Full gate GREEN (only `? schema` non-ok) + gofmt
+  clean + linux cross-build/vet clean.
+  NEXT M4 unit — **(a) the `state cas` command** (DESIGN §8; the `--expected __ABSENT__` sentinel is frozen) — a
+  clean, self-contained CLI unit composing the green `state` core. OR **(b) the land recovery Finisher** for
+  `journal.KindLand` (wiring into `recovery.Finisher`'s switch, the `case journal.KindIsolateRm` precedent) — but
+  this is genuinely coupled to **HEAL-5** resume logic: per the unit-47 ruling a blind re-run of `land.Run`
+  re-anchors `refs/wi/backup` for already-landed repos at the NEW base (clobbering the original backup, breaking
+  `land abort`) AND `land.Run` rewrites a fresh all-pending record (overwriting what already landed), so the
+  Finisher MUST read the durable record and skip `PhaseLanded` cells (re-resolving bases from the manifest, since
+  `landstate.RepoLand` has no base field) — defer it to the HEAL-5 block. THEN **HEAL-5** `land continue/abort/
+  status` (resume/abort restoring `BackupSHA`, §7.2); **HEAL-6** mirror-stale refusal at land (exit 6); **HEAL-7**
+  atomic `.wi/` writes audit; **HEAL-8** `wi doctor`/`check` + bounded `--fix` (LAST). **DEFERRED (not next):**
+  HEAL-GC-NO-LIVE-LOSS **case (iii)** — needs a journaled discard/reset verb that does not exist; do NOT fake with
+  a vacuous test (#GC-AHEAD-V0).
+
+  (47) ✅ **(prior firing)** — **the land op-journal lifecycle wrapper `land.RunJournaled`** (guard `LAND-JOURNAL`;
   `internal/land/run.go` + `run_journaled_test.go`, package `land_test`). The land mirror of `isolate.Remove`
   around `removeCore` (the `removeCore` no-journaling / `Remove` journaling split, DESIGN §7.4 / HEAL-4):
   `RunJournaled` appends an **`intent`→`committed`** journal entry (Kind `journal.KindLand`) BEFORE delegating to
@@ -658,20 +706,8 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `FinishRemove`→`removeCore` shape); `RunJournaled` is the producer-side wrapper the CLI will call. The KindLand
   recovery Finisher (consumer side) is HEAL-5 follow-up — until it is wired, `recovery.Finisher`'s default case
   surfaces a crash-left land journal for retry, never silently drops it.
-  NEXT M4 unit — **the land recovery Finisher** for `journal.KindLand`, wiring it into `recovery.Finisher`'s switch
-  (the `case journal.KindIsolateRm` precedent). PER THE RULING it re-runs the idempotent `land.Run` core
-  (FinishRemove→removeCore shape) — but with a **known subtlety to resolve in that unit:** a blind re-run
-  re-anchors `refs/wi/backup` for already-landed repos at the NEW (work-tip) base, clobbering the original backup
-  and breaking `land abort`'s ability to undo a landed repo — so the Finisher (or `LandRepo`) must only re-attempt
-  repos NOT already `PhaseLanded` (read the durable record, skip landed cells), which is naturally HEAL-5 resume
-  logic. THEN (b) the **`land` CLI command** (`internal/cli/cmd_land.go` + capability `land`/`land-atomic`, PLAN
-  line 137) projecting `Result` onto the envelope (StatusBlocked → exit 2 partial, like isolate-new), calling
-  `RunJournaled`; (c) the **`state cas`** command (DESIGN §8; `--expected __ABSENT__` sentinel frozen). THEN
-  **HEAL-5** `land continue/abort/status` (resume/abort restoring `BackupSHA`, §7.2 — consumes the durable record +
-  the Finisher above); **HEAL-6** mirror-stale refusal at land (exit 6); **HEAL-7** atomic `.wi/` writes audit;
-  **HEAL-8** `wi doctor`/`check` + bounded `--fix` (LAST). **DEFERRED (not next):** HEAL-GC-NO-LIVE-LOSS **case
-  (iii)** — needs a journaled discard/reset verb that does not exist (journal kinds = `isolate_new`/`isolate_rm`/
-  `land`); do NOT fake with a vacuous test (#GC-AHEAD-V0).
+  [NEXT superseded — item (b) the `land` CLI command is now built; see unit (48) above. The land recovery
+  Finisher (item a) remains deferred to HEAL-5 per the subtlety recorded here.]
 
   (46) ✅ **(prior firing)** — **the per-task land orchestrator `land.Run`** (guard `LAND-RUN`; `internal/land/
   run.go` + `run_test.go`, package `land_test`). This composes the unit-45 `LandRepo` cell into the actual
@@ -2454,6 +2490,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | LAND-REPO-FF (M4 land) | the `internal/land` executor's single repo-cell `land.LandRepo`: anchor the base's current tip via `CreateBackupRef`, then `FastForwardBaseRef` the base to the worktree's HEAD (the work tip), mapping a `*git.NonFastForwardError` to a clean `PhaseBlocked` refusal (err=nil, base untouched) vs `PhaseLanded` on a true ff (DESIGN §5, §7.2). Primary mutant = skip the `FastForwardBaseRef` call (claim `PhaseLanded`+`LandedSHA` without moving the base) → BOTH `TestLandRepoAdvancesBaseToWorkTip` (base ref not advanced to the work tip) AND `TestLandRepoRefusesNonFastForward` (no error → falls through to landed, never blocked) RED. Alternate = on `NonFastForwardError` set `PhaseLanded`+`LandedSHA` instead of `PhaseBlocked` → ONLY `TestLandRepoRefusesNonFastForward` RED (isolates the refusal-mapping safety property; happy stays GREEN — a true ff never reaches that branch). Alternate = no-op `CreateBackupRef` → the happy-path backup-anchor assertion RED. Hermetic real-git harness, no build tag. Confirmed RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | LAND-RUN (M4 land) | the per-task land orchestrator `land.Run`: under the isolate-state:<task> lock, write an all-pending `landstate.TaskLand`, then land each repo via `LandRepo`, folding+`Store`-ing after every repo, STOP-AT-FIRST-BLOCK (a non-ff/fault parks the repo blocked and leaves later repos pending+untouched). Primary mutant = neuter the stop (`if rr.Phase != PhaseLanded` → `if false`) → ONLY `TestRunParksAtFirstBlockedRepo` RED (the later repo `web` is wrongly landed — its base moves, it is no longer pending, Status not blocked, durable web landed; `TestRunLandsAllReposComplete` stays GREEN since it never blocks). Alternate = skip the per-repo `landstate.Store` (record stays all-pending) → BOTH tests RED on the DURABLE-record assertions specifically while the in-memory `Result` stays correct (pins that the per-repo Store is what makes the parked record durable+resumable). Hermetic real-git harness (isolate.New stands up the worktrees), no build tag. Confirmed RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | LAND-JOURNAL (M4 land) | the land op-journal lifecycle wrapper `land.RunJournaled` around the `land.Run` core (the `removeCore`/`Remove` split, DESIGN §7.4/HEAL-4): append `intent`→`committed` (Kind `journal.KindLand`) BEFORE the run, then DROP the journal on a pre-run failure (zero Result), LEAVE it at `committed` on a fault past the commit point, and append `done`+`Discard` on a CLEAN run — `StatusLanded` OR a deliberately parked `StatusBlocked`. RULING: a parked block self-cleans the journal (unlike `isolate.Remove`, which leaves a blocked teardown at `committed` for roll-forward) because roll-forward cannot unblock a non-ff and the parked state lives in the durable landstate record HEAL-5 resumes from. Primary mutant = skip the final `journal.Discard` → BOTH `TestRunJournaledClearsJournalOnCleanLand` AND `TestRunJournaledClearsJournalOnParkedBlock` RED (a `Disposition:complete` op survives — proves the wrapper writes the full lifecycle and Discard clears it). Ruling-mutant = leave the parked block at `committed` (early `return res, nil`, the isolate.Remove posture) → ONLY the parked-block test RED (`Disposition:roll_forward` survives); the clean-land test stays GREEN (it never blocks). Hermetic real-git harness (isolate.New stands up the worktrees), no build tag. Confirmed RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
+| CMD-LAND (M4 land) | the `wi land <task> <repo>…` handler (`landCmd.Run`): resolve specs from the manifest, call `land.RunJournaled`, map Status onto the return convention MIRRORING `isolate rm` (decision #LD) — all landed → landed Result (exit 0); ≥1 landed then blocked → DURABLE PARTIAL `(result, *CommandError{partial, Action: landed})` (exit 2); nothing landed → full refusal `*CommandError{conflict}` (exit 4); a parked non-ff block rides in `repos[]` as a per-repo conflict coded `non_fast_forward`. Primary mutant = on the mixed outcome return `(result, nil)` instead of the partial CommandError → `TestLandCommandPartialBlocksOneRepo` RED (a partial land mis-reported as a clean success — want `*cli.CommandError{partial}`, got nil). Alternate = map the all-blocked outcome to `KindPartial` instead of `KindConflict` → `TestLandCommandAllBlockedIsConflict` RED (a nothing-changed refusal must be exit 4, not 2). A SECOND coupled change — advertising `CapLand` in `contract.Capabilities()` — is guarded by the byte-exact `goldenSuccess` (`TestEnvelopeGoldenSuccess`): adding `CapLand` reddened it (drift showing `,"land"` appended), the golden was updated to the honest wire form → RED→GREEN confirmed. End-to-end over the real-git harness through the registry factory + `cmd.Run(WithOpID(...))`, no build tag. Full gate GREEN (only `? schema` non-ok) + gofmt clean + linux cross-build/vet clean |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |
@@ -2707,6 +2744,29 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   construct, threaded only on the SUCCESS path) — so a non-zero-exit refusal that put its blocked repos
   in `Blocked[]` would silently drop them from the emitted envelope. Recorded in the `isolateRmCmd.Run`
   doc comment; guard `CMD-ISOLATE-RM`'s mutant pins the partial-mapping + the orphan_unexplained surface.
+- **#LD `wi land` outcome → envelope/exit mapping — RESOLVED 2026-06-30** (not a §7 ruling; DESIGN defines
+  the exit table but pins no per-outcome mapping for the land command, so the handler adopts one — and this
+  SUPERSEDES the unit-47 NEXT pointer's loose "StatusBlocked → exit 2 partial, like isolate-new"). The land
+  command mirrors **#RD (`isolate rm`)**, NOT `isolate new`, because a land block is a stop-the-world refusal
+  (a non-fast-forward needs a rebase to clear), not an independent per-repo materialization fault. Given
+  `land.RunJournaled`'s `Result` (overall Status + per-repo `Phase`): **(1) `StatusLanded` (every repo's work
+  fast-forwarded) → `Result{Action: landed}`, nil error → exit 0.** **(2) `StatusBlocked` with ≥1 repo already
+  `PhaseLanded` before the block → the DURABLE PARTIAL `(result, *CommandError{Kind: partial, Action: landed})`
+  → exit 2** — the advanced bases are real, durable progress; `land continue` (HEAL-5) resumes the
+  still-pending repos, so it is resumable, the same #D shape isolate-rm/new/sync use. **(3) `StatusBlocked`
+  with NOTHING landed (the first repo blocked) → a full refusal `*CommandError{Kind: conflict}` → exit 4**
+  (NOT partial: no base advanced, nothing durable changed — a clean "refused" the agent resolves by rebasing
+  the blocked repo onto its base, then retrying). Pre-loop fault: `*lock.HeldError`→lock_held (exit 6).
+  Manifest resolution faults (shared with `isolate new`): missing manifest→not_found+`wi init`; undeclared
+  repo→not_found; malformed manifest→usage (exit 64). **Per-repo projection (`projectLandOutcome`):**
+  `PhaseLanded`→`landed` + `LandedSHA` + `Stage`; a parked `PhaseBlocked` with `Err==nil` (a clean non-ff)
+  →`noop` + `Error{Kind: conflict, Code: "non_fast_forward", Repo}` (so the agent knows to rebase); a parked
+  `PhaseBlocked` with `Err!=nil` (infra fault)→`noop` + `Error{Kind: internal}`; an unreached `PhasePending`
+  repo→plain `noop`, no error. **Same critical contract fact as #RD:** blocked repos ride in **repos[]**, NOT
+  `Blocked[]` (envelopeFor threads only `Repos/Warnings/Next` onto a FAILURE envelope; `Blocked[]` is the
+  exit-neutral dry-run construct). Recorded in the `landCmd.Run` doc comment; guard `CMD-LAND`'s mutant pins
+  the partial-vs-conflict discriminator. **Companion ruling:** `CapLand` IS advertised now (capability ⇒
+  backing command: `wi land` is wired), but `CapLandAtomic` stays DARK until `--atomic` validate-all exists.
 - **#RM "not ahead of base" realization for v0 reclamation — RESOLVED 2026-06-30** (not a §7 ruling;
   forced by `isolate.Remove` implementing DESIGN §7.1's "not ahead of base" gate against a `state.RepoRecord`
   that does NOT persist the per-repo base branch name). **A worktree is "not ahead of base" iff its HEAD sha

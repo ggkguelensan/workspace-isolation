@@ -77,6 +77,12 @@ var table = []Command{
 		Name:     "resolve",
 		Synopsis: "print the path bundle for a task's isolate",
 		Usage:    "wi resolve <task>",
+		Next:     []string{"wi land <task> <repo>…", "wi isolate rm <task>"},
+	},
+	{
+		Name:     "land",
+		Synopsis: "fast-forward each repo's isolate work back onto its base branch",
+		Usage:    "wi land <task> <repo>…",
 		Next:     []string{"wi isolate rm <task>"},
 	},
 	{
