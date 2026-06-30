@@ -1015,3 +1015,110 @@ func TestRestoreBaseRefRefusesStaleExpectation(t *testing.T) {
 		t.Errorf("base ref moved to %s on a refused stale restore; must stay %s", after, before)
 	}
 }
+
+// Guard GIT-BASE-CANDIDATES — first-existing-branch resolution for a base declared
+// as an ordered preference list (defaults.base / repo.base = ["dev","main"] meaning
+// "prefer dev, else main", DESIGN §1). Two resolvers back the same policy at two
+// seams: FirstExistingBase reads the already-cloned single-branch SSOT mirror
+// (local, rev-parse --verify), and FirstExistingRemoteHead probes origin once at
+// first sync (network, ls-remote --heads) before any mirror exists. Both honor
+// candidate ORDER (earlier wins) and both report "none of these exist" as
+// found=false with a nil error — distinct from a real fault.
+//
+// Non-vacuity (FirstExistingBase): (primary — fall-through) replace the exit-1
+// `continue` with `return "", "", false, nil`, so the first absent candidate ends
+// the search → the only-main case yields found=false → TestFirstExistingBase RED,
+// proving the fall-through to later candidates is load-bearing. (alternate — order)
+// iterate candidates last-to-first → the both-exist case returns "main" not "dev" →
+// same test RED, proving preference order is honored.
+//
+// Non-vacuity (FirstExistingRemoteHead): (primary — existence) return candidates[0]
+// whenever ls-remote succeeds (ignore the present set) → the only-main case returns
+// "dev" and the absent case returns found=true → TestFirstExistingRemoteHead RED,
+// proving the head must actually exist on the remote; (alternate — ref keying) build
+// present from fields[0] (the sha) instead of fields[1] (the refname) → no candidate
+// ever matches → found=false in the only-main case → same test RED.
+
+func TestFirstExistingBase(t *testing.T) {
+	env := testenv.New(t)
+	dir := newSSOT(t, env)
+	writeCommit(t, env, dir, "a.txt", "c0", "c0") // main = C0
+	env.Git(t, dir, "switch", "--detach")         // SSOT posture
+	mainSHA := env.Git(t, dir, "rev-parse", "refs/heads/main")
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	// Only main exists: ["dev","main"] falls through the absent dev to main.
+	branch, sha, found, err := g.FirstExistingBase(ctx, dir, []string{"dev", "main"})
+	if err != nil || !found {
+		t.Fatalf("FirstExistingBase(dev,main) with only main: found=%v err=%v", found, err)
+	}
+	if branch != "main" || sha != mainSHA {
+		t.Errorf("got (branch=%q sha=%q), want (main %q)", branch, sha, mainSHA)
+	}
+
+	// Create dev ahead of main; now the earlier candidate (dev) must win.
+	env.Git(t, dir, "branch", "dev", "main")
+	env.Git(t, dir, "switch", "dev")
+	devSHA := writeCommit(t, env, dir, "b.txt", "c1", "c1")
+	env.Git(t, dir, "switch", "--detach")
+	branch, sha, found, err = g.FirstExistingBase(ctx, dir, []string{"dev", "main"})
+	if err != nil || !found {
+		t.Fatalf("FirstExistingBase(dev,main) with both: found=%v err=%v", found, err)
+	}
+	if branch != "dev" || sha != devSHA {
+		t.Errorf("got (branch=%q sha=%q), want (dev %q) — earlier candidate wins", branch, sha, devSHA)
+	}
+
+	// None of the candidates exist: found=false, nil error (not a failure).
+	_, _, found, err = g.FirstExistingBase(ctx, dir, []string{"nope", "nada"})
+	if err != nil {
+		t.Fatalf("FirstExistingBase(absent): unexpected err %v", err)
+	}
+	if found {
+		t.Errorf("found=true for absent candidates, want false")
+	}
+}
+
+func TestFirstExistingRemoteHead(t *testing.T) {
+	env := testenv.New(t)
+	origin := env.SeedOrigin(t, "acme") // bare origin on main only
+	originURL := "file://" + origin
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	// Origin has only main: ["dev","main"] resolves to main over the network.
+	branch, found, err := g.FirstExistingRemoteHead(ctx, originURL, []string{"dev", "main"})
+	if err != nil || !found {
+		t.Fatalf("FirstExistingRemoteHead(dev,main) only main: found=%v err=%v", found, err)
+	}
+	if branch != "main" {
+		t.Errorf("branch=%q, want main", branch)
+	}
+
+	// Push a dev head to the bare origin; the earlier candidate (dev) must now win.
+	work := filepath.Join(env.Root, "work")
+	env.Git(t, env.Root, "clone", originURL, work)
+	env.Git(t, work, "switch", "-c", "dev")
+	writeCommit(t, env, work, "d.txt", "d0", "d0")
+	env.Git(t, work, "push", "origin", "dev")
+
+	branch, found, err = g.FirstExistingRemoteHead(ctx, originURL, []string{"dev", "main"})
+	if err != nil || !found {
+		t.Fatalf("FirstExistingRemoteHead(dev,main) both: found=%v err=%v", found, err)
+	}
+	if branch != "dev" {
+		t.Errorf("branch=%q, want dev — earlier candidate wins", branch)
+	}
+
+	// No candidate present on the remote: found=false, nil error.
+	_, found, err = g.FirstExistingRemoteHead(ctx, originURL, []string{"nope"})
+	if err != nil {
+		t.Fatalf("FirstExistingRemoteHead(absent): unexpected err %v", err)
+	}
+	if found {
+		t.Errorf("found=true for absent candidate, want false")
+	}
+}

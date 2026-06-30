@@ -32,11 +32,13 @@
 // SSOT invariants (DESIGN §5): the base ref moves ONLY via FastForwardBaseRef
 // (append-only, ff-only), the SSOT stays detached with a pristine working tree
 // (EnsureClone detaches; Fetch never checks out), and the network is dialed only by
-// EnsureClone/Fetch — the two RunNetwork verbs.
+// EnsureClone/Fetch and — at first sync, to resolve the base candidate list against
+// origin — FirstExistingRemoteHead, the three RunNetwork verbs.
 package sync
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/ggkguelensan/workspace-isolation/internal/clock"
@@ -47,13 +49,16 @@ import (
 )
 
 // RepoSpec is one repo to sync: its wi-internal name (→ repos/<name> SSOT), the
-// origin URL to clone/fetch from, and the EFFECTIVE base branch wi keeps as the
-// SSOT base. The CLI resolves these from the manifest (config.Repo) before calling
-// Run, so this package stays decoupled from manifest parsing.
+// origin URL to clone/fetch from, and the ordered base candidate list (defaults.base
+// / repo.base, e.g. ["dev","main"] = "prefer dev, else main"). sync is the ONE place
+// the candidate list is resolved against ORIGIN rather than the mirror: at first sync
+// the single-branch mirror does not exist yet, so syncOne probes origin under the
+// repo lock to pick the effective base before cloning. The CLI passes the manifest's
+// candidate list straight through (config.Repo.Base) without pre-resolving it.
 type RepoSpec struct {
 	Name string
 	URL  string
-	Base string
+	Base []string
 }
 
 // Status is the overall outcome of a Run.
@@ -108,7 +113,9 @@ func Run(ctx context.Context, l layout.Layout, g *git.Git, clk clock.Clock, opID
 // the lock release). The base ref is advanced ONLY via FastForwardBaseRef, so a
 // rewound origin is refused, not force-moved (DESIGN §5).
 func syncOne(ctx context.Context, l layout.Layout, g *git.Git, clk clock.Clock, opID string, spec RepoSpec) RepoOutcome {
-	oc := RepoOutcome{Repo: spec.Name, Base: spec.Base}
+	// Provisional base (top preference) so an early, pre-resolution failure still
+	// reports a branch; overwritten with the resolved base once we hold the lock.
+	oc := RepoOutcome{Repo: spec.Name, Base: firstBase(spec.Base)}
 
 	key, err := lock.Repo(spec.Name)
 	if err != nil {
@@ -133,9 +140,20 @@ func syncOne(ctx context.Context, l layout.Layout, g *git.Git, clk clock.Clock, 
 		return oc
 	}
 
+	// Resolve the ordered candidate list to the single effective base, under the
+	// lock. This is the ONE place resolution consults ORIGIN: before the first clone
+	// there is no mirror, so probe origin with ls-remote; once the single-branch
+	// mirror exists, read the candidates back against it.
+	base, err := resolveSyncBase(ctx, g, ssotDir, spec.URL, spec.Base)
+	if err != nil {
+		oc.Err = err
+		return oc
+	}
+	oc.Base = base
+
 	// Lazy materialization: clone the SSOT detached at the base tip on first sync,
 	// a no-op once the mirror exists (DESIGN §5).
-	if err := g.EnsureClone(ctx, ssotDir, spec.URL, spec.Base); err != nil {
+	if err := g.EnsureClone(ctx, ssotDir, spec.URL, base); err != nil {
 		oc.Err = err
 		return oc
 	}
@@ -144,12 +162,12 @@ func syncOne(ctx context.Context, l layout.Layout, g *git.Git, clk clock.Clock, 
 		oc.Err = err
 		return oc
 	}
-	originSHA, err := g.ResolveRef(ctx, ssotDir, "refs/remotes/origin/"+spec.Base)
+	originSHA, err := g.ResolveRef(ctx, ssotDir, "refs/remotes/origin/"+base)
 	if err != nil {
 		oc.Err = err
 		return oc
 	}
-	if err := g.FastForwardBaseRef(ctx, ssotDir, spec.Base, originSHA); err != nil {
+	if err := g.FastForwardBaseRef(ctx, ssotDir, base, originSHA); err != nil {
 		oc.Err = err // *git.NonFastForwardError on a rewound/force-pushed origin
 		return oc
 	}
@@ -159,7 +177,7 @@ func syncOne(ctx context.Context, l layout.Layout, g *git.Git, clk clock.Clock, 
 	// fast-forward — so the local base is 0 commits behind origin as of this fetch.
 	snap := mirror.Snapshot{
 		Repo:                  spec.Name,
-		Base:                  spec.Base,
+		Base:                  base,
 		FetchedAt:             clk.Now().UTC().Format(time.RFC3339),
 		LocalBaseSHA:          originSHA,
 		OriginBaseSHA:         originSHA,
@@ -171,4 +189,43 @@ func syncOne(ctx context.Context, l layout.Layout, g *git.Git, clk clock.Clock, 
 	}
 	oc.Snapshot = snap
 	return oc
+}
+
+// resolveSyncBase picks the single effective base from the ordered candidate list.
+// Once the single-branch SSOT mirror exists it is the source of truth (read locally
+// with FirstExistingBase); before the first clone there is no mirror, so origin is
+// probed with FirstExistingRemoteHead (sync's deliberate exception — every other
+// seam resolves against the mirror via internal/baseref). None of the candidates
+// existing on origin is a per-repo failure, surfaced as the outcome's Err rather than
+// a cryptic `clone --branch` error.
+func resolveSyncBase(ctx context.Context, g *git.Git, ssotDir, originURL string, candidates []string) (string, error) {
+	if g.MirrorExists(ctx, ssotDir) {
+		branch, _, found, err := g.FirstExistingBase(ctx, ssotDir, candidates)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			return branch, nil
+		}
+		// A materialized mirror that tracks none of the candidates is anomalous; fall
+		// back to the top preference and let the fetch/ff surface any real mismatch.
+		return firstBase(candidates), nil
+	}
+	branch, found, err := g.FirstExistingRemoteHead(ctx, originURL, candidates)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("sync: none of the base candidates %v exist on origin %s", candidates, originURL)
+	}
+	return branch, nil
+}
+
+// firstBase returns the top-preference candidate, or "" for an empty list (a
+// contract violation config.Parse rejects).
+func firstBase(candidates []string) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
 }

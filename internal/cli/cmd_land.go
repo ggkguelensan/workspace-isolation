@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"strings"
 
+	"github.com/ggkguelensan/workspace-isolation/internal/baseref"
 	"github.com/ggkguelensan/workspace-isolation/internal/config"
 	"github.com/ggkguelensan/workspace-isolation/internal/contract"
 	"github.com/ggkguelensan/workspace-isolation/internal/git"
@@ -119,7 +120,7 @@ func (c *landCmd) Run(ctx context.Context) (*Result, error) {
 				Help:    "declare it in wi.config.jsonc, or check the name",
 			}
 		}
-		specs = append(specs, land.RepoSpec{Name: r.Name, Base: r.Base})
+		specs = append(specs, land.RepoSpec{Name: r.Name, Base: baseref.Resolve(ctx, c.git, c.layout, r.Name, r.Base)})
 	}
 
 	// --atomic: validate ALL repos would fast-forward before moving anything. If any blocks,

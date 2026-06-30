@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 
+	"github.com/ggkguelensan/workspace-isolation/internal/baseref"
 	"github.com/ggkguelensan/workspace-isolation/internal/config"
 	"github.com/ggkguelensan/workspace-isolation/internal/contract"
 	"github.com/ggkguelensan/workspace-isolation/internal/git"
@@ -74,7 +75,7 @@ func (c *isolateNewCmd) Run(ctx context.Context) (*Result, error) {
 				Help:    "declare it in wi.config.jsonc, or check the name",
 			}
 		}
-		specs = append(specs, isolate.RepoSpec{Name: r.Name, Base: r.Base})
+		specs = append(specs, isolate.RepoSpec{Name: r.Name, Base: baseref.Resolve(ctx, c.git, c.layout, r.Name, r.Base)})
 	}
 
 	res, err := isolate.New(ctx, c.layout, c.git, c.task, OpIDFrom(ctx), specs)

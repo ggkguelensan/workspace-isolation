@@ -96,7 +96,7 @@ func TestRepoAddAppendsToManifest(t *testing.T) {
 		t.Errorf("existing repo api was lost by the edit")
 	}
 	web, ok := cfg.Lookup("web")
-	if !ok || web.URL != "https://example.com/web.git" || web.Base != "develop" {
+	if !ok || web.URL != "https://example.com/web.git" || len(web.Base) != 1 || web.Base[0] != "develop" {
 		t.Errorf("web not added correctly: %+v (ok=%v)", web, ok)
 	}
 }
@@ -153,8 +153,8 @@ func TestRepoAddOmitsInheritedBase(t *testing.T) {
 		t.Fatalf("re-load: %v", err)
 	}
 	web, ok := cfg.Lookup("web")
-	if !ok || web.Base != "main" { // inherited from defaults.base
-		t.Errorf("web base = %q (ok=%v), want inherited \"main\"", web.Base, ok)
+	if !ok || len(web.Base) != 1 || web.Base[0] != "main" { // inherited from defaults.base
+		t.Errorf("web base = %v (ok=%v), want inherited [main]", web.Base, ok)
 	}
 }
 
