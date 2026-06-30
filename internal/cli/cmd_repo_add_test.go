@@ -100,6 +100,41 @@ func TestRepoAddAppendsToManifest(t *testing.T) {
 	}
 }
 
+// Guard REPOADD-STAMP (M4): a successful `repo add` holds the project-registry lock
+// for the edit, and must record the operation's holder identity into that lock so the
+// self-heal layer can later read WHO is mutating the registry and judge a stale lock's
+// liveness (DESIGN §6 / §7.3). The lock file persists after release (Unlock does not
+// unlink), so the stamped holder is readable by key once Run returns. The handler
+// reads its op_id from the context (cli.OpIDFrom), the same id Execute injects.
+//
+// Non-vacuity mutant (registered): drop the held.Stamp(OpIDFrom(ctx)) call in
+// repoAddCmd.Run → the project-registry lock is acquired but never stamped → its body
+// stays empty → lock.ReadHolder returns "empty holder body" → this test RED.
+func TestRepoAddStampsHolderOnRegistryLock(t *testing.T) {
+	l := bootstrappedLayout(t)
+	seedManifest(t, l, addManifest)
+
+	const opID = "op_repo_add_stamp"
+	cmd, err := repoAddFactory(t, l)([]string{"web", "https://example.com/web.git"})
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	if _, err := cmd.Run(cli.WithOpID(context.Background(), opID)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	h, err := lock.ReadHolder(l.LocksDir(), lock.ProjectRegistry())
+	if err != nil {
+		t.Fatalf("ReadHolder(project-registry lock): %v — repo add did not stamp the holder", err)
+	}
+	if h.OpID != opID {
+		t.Errorf("stamped holder OpID = %q, want %q", h.OpID, opID)
+	}
+	if h.PID != os.Getpid() {
+		t.Errorf("stamped holder PID = %d, want this process %d", h.PID, os.Getpid())
+	}
+}
+
 // With no --base the inserted repo omits the base field and inherits defaults.base.
 func TestRepoAddOmitsInheritedBase(t *testing.T) {
 	l := bootstrappedLayout(t)

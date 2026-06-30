@@ -86,6 +86,11 @@ func (c *repoAddCmd) Run(ctx context.Context) (*Result, error) {
 		return nil, fmt.Errorf("repo add: acquire registry lock: %w", err)
 	}
 	defer held.Release()
+	// Record who holds the project-registry lock so the self-heal layer can later read
+	// the holder and judge staleness (DESIGN §6 / §7.3). Best-effort: the flock is the
+	// exclusion guarantee, so a failed metadata write must not abort the edit — a
+	// body-less lock reads as "unknown holder" and is conservatively never auto-broken.
+	_ = held.Stamp(OpIDFrom(ctx))
 
 	err = config.Add(c.layout.Config(), c.name, c.url, c.base)
 	switch {

@@ -65,12 +65,20 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   body-less lock reads as "unknown holder" and is never auto-broken). The `Run`→`syncOne` signature change
   is package-internal (one caller). Registered mutant = pre-wiring state (no `Stamp` call) → empty body →
   `ReadHolder` errors → RED (confirmed before green). `gofmt`/`go build ./...`/`go vet ./internal/sync/`/`go
-  test ./...` all GREEN (24 packages). **2 of 4 acquire sites wired** (`isolate.New`, `sync.syncOne`). NEXT
-  M4 unit: wire the remaining two — `cmd_repo_add` (`cli.OpIDFrom(ctx)` → `held.Stamp`, no signature
-  change), then `isolate.Remove` (the one needing an external signature change: thread an `opID` param
-  through `Remove` + its `cmd_isolate_rm` caller via `OpIDFrom(ctx)` + the 4 test callers, then `held.Stamp`).
-  Then the auto-break POLICY consulting the body + `processAlive` + `BootID` (break ONLY on a
-  flock-trustworthy local fs AND a current-boot, proven-dead holder).
+  test ./...` all GREEN (24 packages); (8) ✅ **this firing** — wired the THIRD acquire site: the
+  `repo add` handler (`repoAddCmd.Run`) now calls `held.Stamp(OpIDFrom(ctx))` after taking the
+  project-registry lock (guard `REPOADD-STAMP`, behavioral test driving the real handler with a
+  `WithOpID` context: after `Run` succeeds, `lock.ReadHolder(LocksDir, ProjectRegistry())` reads back the
+  holder with the op's `opID` + this process's pid). The handler reads its op_id from the context — the
+  same id Execute injects — so no signature change was needed. Same best-effort posture
+  (`_ = held.Stamp(...)`). Registered mutant = pre-wiring state (no `Stamp` call) → empty body →
+  `ReadHolder` errors → RED (confirmed before green). `gofmt`/`go build ./...`/`go vet ./internal/cli/`/`go
+  test ./...` all GREEN (24 packages). **3 of 4 acquire sites wired** (`isolate.New`, `sync.syncOne`,
+  `repoAddCmd.Run`). NEXT M4 unit: wire the LAST site, `isolate.Remove` — the one needing an external
+  signature change: thread an `opID` param through `Remove` + update its `cmd_isolate_rm` caller (via
+  `OpIDFrom(ctx)`) + the 4 test callers, then `held.Stamp(opID)`. Then the auto-break POLICY consulting the
+  body + `processAlive` + `BootID` (break ONLY on a flock-trustworthy local fs AND a current-boot,
+  proven-dead holder).
 
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
@@ -1335,6 +1343,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | LOCK-STAMP (M4) | make `(*lock.Held).Stamp` `return nil` without writing any body → a freshly-acquired lock has an empty body → `ReadHolder` errors → `TestStampRoundTrip` RED (`lock: empty holder body`); alternate: make `Stamp` write only `h.locks[0]` (skip the rest) → the second held key's body stays empty → `TestStampStampsEveryHeldLock` RED on `ReadHolder(repo:b)` (the per-lock angle: identity is recorded into EVERY lock the operation holds, not just the first). Both confirmed RED before green. Pins the lock-layer write/read of holder identity (composing `Holder` + `WriteBody`) — an unstamped or missing lock reads as an error (unknown holder → conservatively never broken), never a zero-value `Holder` (DESIGN §6 / §7.3) |
 | ISOLATE-STAMP (M4) | drop the `held.Stamp(opID)` call in `isolate.New` (the pre-wiring state) → the isolate-state lock is acquired but never stamped → its body stays empty → `lock.ReadHolder(LocksDir, IsolateState(task))` returns `lock: empty holder body` → `TestNewStampsHolderOnIsolateLock` RED. Confirmed RED before green. Pins that the first wired acquire site actually records its holder identity end-to-end (the lock file persists past release; `Unlock` does not unlink), so the self-heal layer can read who created an isolate (DESIGN §6 / §7.3) |
 | SYNC-STAMP (M4) | drop the `held.Stamp(opID)` call in `sync.syncOne` (or thread `opID` but never call `Stamp`) → the `repo:<name>` lock is acquired but never stamped → its body stays empty → `lock.ReadHolder(LocksDir, Repo("api"))` returns `lock: empty holder body` → `TestSyncStampsHolderOnRepoLock` RED. Confirmed RED before green. Pins that the hottest-contention acquire site (parallel agents racing `wi sync` on the same `repo:<name>` key) records its holder identity end-to-end (DESIGN §6 / §7.3) |
+| REPOADD-STAMP (M4) | drop the `held.Stamp(OpIDFrom(ctx))` call in `repoAddCmd.Run` (the pre-wiring state) → the `project-registry` lock is acquired but never stamped → its body stays empty → `lock.ReadHolder(LocksDir, ProjectRegistry())` returns `lock: empty holder body` → `TestRepoAddStampsHolderOnRegistryLock` RED. Confirmed RED before green. Pins that the registry-mutation acquire site records its holder identity end-to-end, reading the op_id from the context (`cli.OpIDFrom`, the same id `Execute` injects) — no signature change needed (DESIGN §6 / §7.3) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
