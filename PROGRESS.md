@@ -19,6 +19,16 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   remain unstarted by design (additive on the frozen M0 contract; await owner go-ahead). _Prior
   milestone history retained below._
 
+- **Post-MVP (owner-driven, 2026-06-30):** Owner pushed `build/wi` to `origin`
+  (`git@github.com:ggkguelensan/workspace-isolation.git`); first remote CI run (28411028448) passed
+  **GREEN on all three jobs** — `goreleaser check`, gate on `ubuntu-latest`, AND gate on `macos-latest`
+  (the Apple-Git §6 portability cell), confirming the authored workflows run on real runners. That run
+  annotated a Node-20 deprecation, cleared this firing: bumped `actions/checkout@v4→v5`,
+  `actions/setup-go@v5→v6`, `goreleaser/goreleaser-action@v6→v7` (all verified `using: node24`;
+  goreleaser-action v7 keeps the distribution/version/args inputs) — commit `bc7e9a4`, `ci:`. CI config
+  is DATA (no Go guard/mutant); validated by YAML parse + local green, re-validated CI-side on next push.
+  **Not yet pushed** (no standing push permission — one explicit push ≠ standing grant).
+
 - **Milestone (prior):** **M2 COMPLETE; M3 NEARLY COMPLETE — the `wi` binary runs end-to-end.** All six MVP
   commands plus `cmd/wi/main.go` now land green; the entire `init→repo add→sync→isolate new→resolve→
   isolate rm` surface is reachable through a runnable, smoke-verified binary. **Release scaffolding
