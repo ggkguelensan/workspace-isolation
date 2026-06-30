@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 500" width="1200" height="500" role="img" aria-label="wi — deterministic multi-repo workspace isolation. One pristine SSOT mirror per repo, cut into isolated per-task worktrees where agents work in parallel, then landed back onto base by fast-forward only.">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#0A1222"/>
+      <stop offset="1" stop-color="#0B1A33"/>
+    </linearGradient>
+    <linearGradient id="spine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2E6E88"/>
+      <stop offset="0.5" stop-color="#54C7E8"/>
+      <stop offset="1" stop-color="#2E6E88"/>
+    </linearGradient>
+    <radialGradient id="cyanGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#54C7E8" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#54C7E8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="amberGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#F2B43C" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#F2B43C" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#4F86C6" stroke-opacity="0.05" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <!-- ground -->
+  <rect x="0" y="0" width="1200" height="500" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1200" height="500" fill="url(#grid)"/>
+  <ellipse cx="150" cy="180" rx="240" ry="190" fill="url(#cyanGlow)"/>
+  <ellipse cx="556" cy="322" rx="150" ry="90" fill="url(#amberGlow)"/>
+
+  <!-- ============ LEFT · identity ============ -->
+  <text x="56" y="92" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="12.5" letter-spacing="3" fill="#6E89AD">MULTI-REPO WORKSPACE ISOLATION</text>
+
+  <text x="52" y="214" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="128" font-weight="700" fill="#E2ECF7">wi</text>
+  <rect x="218" y="140" width="18" height="74" fill="#F2B43C"/>
+
+  <text x="56" y="256" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="25" font-weight="600" fill="#E2ECF7">Deterministic multi-repo</text>
+  <text x="56" y="288" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="25" font-weight="600" fill="#E2ECF7">workspace isolation</text>
+
+  <text x="56" y="324" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="13" fill="#93A7C2">one mirror · many isolated worktrees · ff-only land</text>
+
+  <text x="56" y="364" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="13.5" fill="#54C7E8"><tspan fill="#6E89AD">$</tspan> wi isolate new add-auth api web</text>
+  <text x="56" y="388" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11.5" fill="#6E89AD">→ 2 worktrees materialized · one JSON envelope · exit 0</text>
+
+  <!-- ============ RIGHT · schematic ============ -->
+  <!-- region eyebrows -->
+  <text x="552" y="86" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="12" letter-spacing="2" fill="#6E89AD">SSOT MIRROR</text>
+  <text x="552" y="103" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#2E7E9A">detached @ base · never dirtied</text>
+  <text x="832" y="86" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="12" letter-spacing="2" fill="#6E89AD">ISOLATE</text>
+  <text x="832" y="103" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#2E7E9A">one worktree set per task</text>
+
+  <!-- base spine (the trunk / base ref) -->
+  <rect x="548" y="124" width="8" height="292" rx="4" fill="url(#spine)"/>
+  <circle cx="552" cy="124" r="4" fill="#54C7E8"/>
+
+  <!-- mirror nodes (per-repo SSOT clones) -->
+  <rect x="500" y="186" width="104" height="36" rx="8" fill="#101D33" stroke="#54C7E8" stroke-width="1.3"/>
+  <text x="552" y="209" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="14" fill="#E2ECF7">api</text>
+  <text x="614" y="208" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10" fill="#6E89AD">@main</text>
+
+  <rect x="500" y="254" width="104" height="36" rx="8" fill="#101D33" stroke="#54C7E8" stroke-width="1.3"/>
+  <text x="552" y="277" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="14" fill="#E2ECF7">web</text>
+  <text x="614" y="276" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10" fill="#6E89AD">@main</text>
+
+  <!-- isolate connectors: task-cuts fanning off the shared base trunk -->
+  <path d="M556,238 C620,212 662,180 712,180" fill="none" stroke="#54C7E8" stroke-opacity="0.55" stroke-width="1.4"/>
+  <path d="M556,238 C620,250 662,270 712,270" fill="none" stroke="#54C7E8" stroke-opacity="0.55" stroke-width="1.4"/>
+  <path d="M556,238 C620,300 662,360 712,360" fill="none" stroke="#54C7E8" stroke-opacity="0.55" stroke-width="1.4"/>
+  <circle cx="556" cy="238" r="3.5" fill="#54C7E8"/>
+  <text x="628" y="224" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10" fill="#6E89AD">isolate ▸</text>
+
+  <!-- isolated worktree set A -->
+  <rect x="712" y="151" width="240" height="58" rx="10" fill="#0E1A30" stroke="#2C476B" stroke-width="1.2"/>
+  <text x="724" y="170" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11" fill="#54C7E8">isolas/add-auth/</text>
+  <rect x="724" y="178" width="58" height="22" rx="6" fill="#101D33" stroke="#2E6E88" stroke-width="1"/>
+  <text x="753" y="193" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11" fill="#CFE2F2">api</text>
+  <rect x="790" y="178" width="58" height="22" rx="6" fill="#101D33" stroke="#2E6E88" stroke-width="1"/>
+  <text x="819" y="193" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11" fill="#CFE2F2">web</text>
+  <circle cx="912" cy="180" r="4" fill="#54C7E8"/>
+  <text x="940" y="184" text-anchor="end" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10" fill="#6E89AD">agent</text>
+
+  <!-- isolated worktree set B -->
+  <rect x="712" y="241" width="240" height="58" rx="10" fill="#0E1A30" stroke="#2C476B" stroke-width="1.2"/>
+  <text x="724" y="260" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11" fill="#54C7E8">isolas/fix-cache/</text>
+  <rect x="724" y="268" width="58" height="22" rx="6" fill="#101D33" stroke="#2E6E88" stroke-width="1"/>
+  <text x="753" y="283" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11" fill="#CFE2F2">api</text>
+  <rect x="790" y="268" width="58" height="22" rx="6" fill="#101D33" stroke="#2E6E88" stroke-width="1"/>
+  <text x="819" y="283" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11" fill="#CFE2F2">web</text>
+  <circle cx="912" cy="270" r="4" fill="#54C7E8"/>
+  <text x="940" y="274" text-anchor="end" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10" fill="#6E89AD">agent</text>
+
+  <!-- isolated worktree set C (single-repo set) -->
+  <rect x="712" y="331" width="240" height="58" rx="10" fill="#0E1A30" stroke="#2C476B" stroke-width="1.2"/>
+  <text x="724" y="350" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11" fill="#54C7E8">isolas/bump-deps/</text>
+  <rect x="724" y="358" width="58" height="22" rx="6" fill="#101D33" stroke="#2E6E88" stroke-width="1"/>
+  <text x="753" y="373" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11" fill="#CFE2F2">api</text>
+  <circle cx="912" cy="360" r="4" fill="#54C7E8"/>
+  <text x="940" y="364" text-anchor="end" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10" fill="#6E89AD">agent</text>
+
+  <text x="832" y="408" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10" fill="#5C7799">parallel · isolated · non-colliding</text>
+
+  <!-- LAND · the fast-forward return (the one bold accent) -->
+  <path d="M712,196 C660,248 624,302 558,314" fill="none" stroke="#F2B43C" stroke-width="3" stroke-linecap="round"/>
+  <path d="M558,300 L551,314 L565,314 Z" fill="#F2B43C"/>
+
+  <text x="460" y="332" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="12" letter-spacing="2" fill="#F2B43C">LAND ↩</text>
+  <text x="460" y="353" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="15" font-weight="600" fill="#F2B43C">fast-forward only</text>
+  <text x="460" y="372" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11" fill="#D98A24">base advances ▲</text>
+  <text x="460" y="389" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10" fill="#6E89AD">never force · never reset --hard</text>
+
+  <!-- ============ invariant strip ============ -->
+  <line x1="56" y1="438" x2="1144" y2="438" stroke="#2C476B" stroke-opacity="0.55" stroke-width="1"/>
+  <text x="56" y="465" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="12.5" fill="#7E93AE">no LLM dependency&#160;&#160;·&#160;&#160;no hidden network&#160;&#160;·&#160;&#160;evidence-positive gc&#160;&#160;·&#160;&#160;liveness-aware locks&#160;&#160;·&#160;&#160;offline roll-forward&#160;&#160;·&#160;&#160;frozen exit codes</text>
+</svg>

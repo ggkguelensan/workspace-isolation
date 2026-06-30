@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/banner.svg" alt="wi — deterministic multi-repo workspace isolation: one pristine SSOT mirror per repo, cut into isolated per-task worktrees where agents work in parallel, then landed back onto base by fast-forward only" width="100%">
+</p>
+
 # wi — workspace isolation
 
 **Deterministic, multi-repo workspace isolation for parallel AI coding agents.**
