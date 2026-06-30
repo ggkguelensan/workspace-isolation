@@ -73,17 +73,17 @@ func Recover(journalDir string, finish Finisher) (RecoveryReport, error) {
 			if err := Append(journalDir, doneEntry(op)); err != nil {
 				return rep, err
 			}
-			if err := removeOp(journalDir, op.OpID); err != nil {
+			if err := Discard(journalDir, op.OpID); err != nil {
 				return rep, err
 			}
 			rep.RolledForward = append(rep.RolledForward, op.OpID)
 		case DispositionComplete:
-			if err := removeOp(journalDir, op.OpID); err != nil {
+			if err := Discard(journalDir, op.OpID); err != nil {
 				return rep, err
 			}
 			rep.Completed = append(rep.Completed, op.OpID)
 		case DispositionAbandoned:
-			if err := removeOp(journalDir, op.OpID); err != nil {
+			if err := Discard(journalDir, op.OpID); err != nil {
 				return rep, err
 			}
 			rep.Abandoned = append(rep.Abandoned, op.OpID)
@@ -98,10 +98,13 @@ func doneEntry(op OpRecovery) Entry {
 	return Entry{OpID: op.OpID, Kind: op.Kind, Phase: PhaseDone, Task: op.Task, Repos: op.Repos}
 }
 
-// removeOp deletes one op's journal file. An already-absent file is not an error
-// (idempotent — recovery may re-run), so a crash between append-done and remove
-// is harmless: the next pass sees done → Complete → removes it.
-func removeOp(journalDir, opID string) error {
+// Discard deletes one op's journal file — the single journal-file reaper, used by
+// both the normal path (isolate.Remove drops its journal on `done`) and recovery
+// (Recover, after a roll-forward/complete/abandon disposition). An
+// already-absent file is not an error (idempotent — recovery may re-run), so a
+// crash between append-done and remove is harmless: the next pass sees
+// done → Complete → removes it.
+func Discard(journalDir, opID string) error {
 	path, err := opPath(journalDir, opID)
 	if err != nil {
 		return err

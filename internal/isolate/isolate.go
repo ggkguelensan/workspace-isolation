@@ -38,6 +38,7 @@ import (
 	"os"
 
 	"github.com/ggkguelensan/workspace-isolation/internal/git"
+	"github.com/ggkguelensan/workspace-isolation/internal/journal"
 	"github.com/ggkguelensan/workspace-isolation/internal/layout"
 	"github.com/ggkguelensan/workspace-isolation/internal/lock"
 	"github.com/ggkguelensan/workspace-isolation/internal/state"
@@ -195,8 +196,71 @@ type RemoveResult struct {
 	Repos  []RemoveOutcome
 }
 
-// Remove reclaims an isolate's materialized worktrees under the isolate-state:<task>
-// lock, honoring the evidence-positive reclamation contract (DESIGN §7.1): a repo's
+// Remove is the public `wi isolate rm` entry point: it journals the teardown's
+// durable lifecycle around removeCore so an interrupted run can be finished by the
+// offline roll-forward executor (HEAL-4, decision #4 — RESOLVED 2026-06-30: roll
+// FORWARD). It records `intent`, then — because isolate-rm teardown is idempotent
+// and resumable (evidence-positive per-repo reclamation re-proves ownership on every
+// run) — `committed` immediately: the WHOLE invocation is past the point of no
+// return, so a crashed isolate-rm always rolls forward (a no-op when nothing was
+// reclaimed), never abandons. On a clean RemoveComplete it closes the lifecycle
+// (`done`) and self-cleans the journal (journal.Discard); on a hard block
+// (RemoveBlocked) or a fault PAST the commit point it LEAVES the journal at
+// `committed` for the next offline startup to roll forward (reclaiming any
+// now-unblocked repos). A failure BEFORE the teardown begins (held lock, no record,
+// unsafe name — removeCore returns the zero RemoveResult) DROPS the journal: the op
+// never crossed its commit point, so there is nothing to recover. A journal-write
+// fault that would mask the teardown is surfaced as an error; the teardown's own
+// result/err are otherwise returned from removeCore unchanged.
+//
+// The split is deliberate: removeCore does the teardown and NO journaling, so the
+// recovery Finisher (a later sub-unit) can re-run it WITHOUT re-journaling — the
+// executor owns every journal mutation during recovery (DESIGN §7.4).
+func Remove(ctx context.Context, l layout.Layout, g *git.Git, task, opID string, repos []string) (RemoveResult, error) {
+	jdir := l.JournalDir()
+	id := journal.Entry{OpID: opID, Kind: journal.KindIsolateRm, Task: task, Repos: repos}
+	intent := id
+	intent.Phase = journal.PhaseIntent
+	if err := journal.Append(jdir, intent); err != nil {
+		return RemoveResult{}, fmt.Errorf("isolate: journal intent for %q: %w", task, err)
+	}
+	committed := id
+	committed.Phase = journal.PhaseCommitted
+	if err := journal.Append(jdir, committed); err != nil {
+		return RemoveResult{}, fmt.Errorf("isolate: journal committed for %q: %w", task, err)
+	}
+
+	res, err := removeCore(ctx, l, g, task, opID, repos)
+	switch {
+	case err != nil && res.Status == "":
+		// Failure BEFORE the teardown begins (held lock, no record, unsafe name):
+		// removeCore returns the zero RemoveResult, so nothing was reclaimed and the
+		// op never crossed its commit point. Drop the journal — there is nothing to
+		// roll forward, and a lingering `committed` entry would make recovery retry a
+		// no-op forever. Best-effort: a Discard fault here is itself harmless (a later
+		// pass's finisher would re-error on the absent record and leave it).
+		_ = journal.Discard(jdir, opID)
+		return res, err
+	case err != nil || res.Status != RemoveComplete:
+		// RemoveBlocked (a hard-block orphan) or a fault PAST the commit point: leave
+		// the journal at `committed` so the next offline startup rolls it forward.
+		return res, err
+	}
+
+	done := id
+	done.Phase = journal.PhaseDone
+	if aerr := journal.Append(jdir, done); aerr != nil {
+		return res, fmt.Errorf("isolate: journal done for %q: %w", task, aerr)
+	}
+	if derr := journal.Discard(jdir, opID); derr != nil {
+		return res, fmt.Errorf("isolate: discard journal for %q: %w", task, derr)
+	}
+	return res, nil
+}
+
+// removeCore is the non-journaling teardown core behind Remove. It reclaims an
+// isolate's materialized worktrees under the isolate-state:<task> lock, honoring the
+// evidence-positive reclamation contract (DESIGN §7.1): a repo's
 // worktree is reclaimed ONLY if all three gates pass —
 //
 //  1. wi can PROVE it owns the worktree: the marker ref refs/wi/owned/<task>/<repo>
@@ -218,9 +282,9 @@ type RemoveResult struct {
 // If repos is empty, every repo in the record is targeted (full teardown); otherwise
 // exactly the named repos are. A held lock returns *lock.HeldError (exit 6); a task
 // with no record returns state.ErrNoRecord (the isolate does not exist). A per-repo
-// gate failure is NOT a Go error — it is recorded in the result; Remove's error
+// gate failure is NOT a Go error — it is recorded in the result; removeCore's error
 // return is reserved for failures that prevent the op from running at all.
-func Remove(ctx context.Context, l layout.Layout, g *git.Git, task, opID string, repos []string) (RemoveResult, error) {
+func removeCore(ctx context.Context, l layout.Layout, g *git.Git, task, opID string, repos []string) (RemoveResult, error) {
 	key, err := lock.IsolateState(task)
 	if err != nil {
 		return RemoveResult{}, err

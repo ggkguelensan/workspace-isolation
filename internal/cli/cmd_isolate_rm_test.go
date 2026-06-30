@@ -100,7 +100,7 @@ func TestIsolateRmCompleteRemovesAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
-	res, err := cmd.Run(ctx)
+	res, err := cmd.Run(cli.WithOpID(ctx, "op_rm_test"))
 	if err != nil {
 		t.Fatalf("Run (complete): unexpected error %v", err)
 	}
@@ -134,7 +134,7 @@ func TestIsolateRmDurablePartialBlocksOrphan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
-	res, err := cmd.Run(ctx)
+	res, err := cmd.Run(cli.WithOpID(ctx, "op_rm_test"))
 
 	var ce *cli.CommandError
 	if !errors.As(err, &ce) {
@@ -189,7 +189,7 @@ func TestIsolateRmAllBlockedIsConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
-	res, err := cmd.Run(ctx)
+	res, err := cmd.Run(cli.WithOpID(ctx, "op_rm_test"))
 
 	var ce *cli.CommandError
 	if !errors.As(err, &ce) {
@@ -216,7 +216,7 @@ func TestIsolateRmMissingRecordIsNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
-	res, err := cmd.Run(ctx)
+	res, err := cmd.Run(cli.WithOpID(ctx, "op_rm_test"))
 	if res != nil {
 		t.Errorf("a missing isolate must not produce a result, got %+v", res)
 	}
