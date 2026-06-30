@@ -627,7 +627,40 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (70) ✅ **this firing** — **`repo add` help/usage drift fix + HELP-USAGE-SYNC guard** (guard
+  (71) ✅ **this firing** — **`doctor.DetectDrift` — the three-way isolate-drift detector** (guard
+  `DOCTOR-DRIFT`, commit `d058bd4`; `internal/doctor/drift.go` + `drift_test.go`), HEAL-8 detector #5 (DESIGN
+  §7.5's drift-repair battery). Same shape as detectors #1–#4: a PURE function from injected observations to
+  `[]doctor.Finding`, no IO. The observation is `DriftObservation{Task string; Cell isolate.Cell}` — the doctor
+  command will build the slice by `state.List` (live tasks) + `isolate.Inspect` per task (read-only marker-ref
+  read + worktree stat), tagging each returned `Cell` with its owning task. **Reuse move (the now-canonical
+  pattern, the TIGHTEST coupling of the family):** it consumes `isolate.PlanAction` — the reconciler's pure
+  per-cell `RepairAction` verdict, the EXACT decision `isolate repair` (HEAL-1) acts on — rather than
+  re-deriving "what kind of drift is this" from the raw `Class`+`Stage`. isolate owns that verdict, so doctor
+  diagnoses drift with the SAME eyes the heal acts with; a `--fix → isolate repair` can never disagree with what
+  doctor reported. **Mapping (#DOCTOR-DRIFT-KIND, REVISED at build — see Decisions; SUPERSEDES the pre-build
+  exit-4/`KindConflict` mapping #69's NEXT block forecast):** every drift finding rides the MILD `KindPartial`
+  (exit 2 — "sound workspace, a safe heal just needs to run"), reserving conflict/exit-4 for the ONE genuine
+  hard-block (an unexplained orphan), which this detector DEFERS to its single owner. `RepairRematerialize`
+  (ClassMissingWorktree — marker survives, worktree gone) → ERROR `drift_missing_worktree`/exit 2;
+  `RepairDropRecord` (ClassReclaimed) → ERROR `drift_stale_record`/exit 2; `RepairHealStage` (ClassConsistent,
+  stage lags pending) → WARNING `drift_stage_lag`/exit-neutral; `RepairNone` (healthy) + `RepairBlockOrphan`
+  (ClassOrphanWorktree) → NO finding. **Registered mutants `DOCTOR-DRIFT`** (both two-sided, verified in
+  ISOLATION via Write-revert — the file was untracked at build so `git checkout` cannot revert it; pure function,
+  no build tag): SEVERITY limb = `RepairRematerialize` arm `SeverityError`→`SeverityWarning` makes a
+  missing-worktree drift exit-neutral → `WorstExit` returns ExitOK not ExitPartial → `TestDetectDrift` severity
+  assertion + `TestDetectDriftExit` (got exit 0) RED while `TestDetectDriftSkipsOrphanAndHealthy` count stays
+  GREEN; SELECTION limb = split `RepairBlockOrphan` out of the skip case to emit a spurious finding → an orphan
+  produces a drift finding → `TestDetectDrift` count (4 not 3) + `TestDetectDriftSkipsOrphanAndHealthy` (findings
+  where none should) RED while `TestDetectDriftExit` stays GREEN (a lone missing-worktree still → exit 2),
+  pinning that drift defers `orphan_unexplained` to its single owner DOCTOR-ORPHANS. Both keep `isolate.PlanAction`
+  in use so the RED is BEHAVIORAL. Full gate GREEN (29 pkgs ok + `? schema`) + gofmt clean (internal/doctor) +
+  linux vet clean. NEXT M4 units (HEAL-8, remaining): **SSOT cleanliness** (`ssot_dirty`/`ssot_stray_branch`→
+  dirty_worktree), **lock inventory + liveness** (`fs_unsafe_for_locks`→lock_held), **`.wi` parseability**
+  (KindInternal), **environment probes** (git floor / fs type — needs §7 #7 ruling). Then the `wi doctor`/`check`
+  CLI seam (Scan/Load observations, run detectors, envelope projection + WorstExit exit + HELP-REGISTRY-SYNC),
+  then bounded `--fix`. HEAL-8 is the LAST M4 item.
+
+  (70) ✅ **(prior firing)** — **`repo add` help/usage drift fix + HELP-USAGE-SYNC guard** (guard
   `HELP-USAGE-SYNC`; `internal/help/help.go`, `internal/cli/cmd_repo_add.go` + `cmd_repo_add_test.go`). The
   binary's help advertised `wi repo add <url>` (in BOTH the `repo add` Usage and `init`'s Next), but the handler
   has always REQUIRED `<name> <url>` and accepts `[--base <branch>]` — so `wi help "repo add"` was lying about the
@@ -3353,6 +3386,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | DOCTOR-PENDING (M4 HEAL-8 detector #3) | the journal pending-ops detector `doctor.DetectPendingOps([]journal.OpRecovery) []Finding` (`internal/doctor/pending.go`) — DESIGN §7.5's JOURNAL half of the "pending journal/parked ops" battery (parked-land-state is the sibling unit next). Same shape as DOCTOR-ORPHANS/DOCTOR-MIRROR: a PURE function from injected observations to `[]Finding`, no IO (the command runs `journal.Scan` over `<root>/.wi/journal`; a Scan that can't parse is the `.wi` parseability detector's concern → KindInternal, not here). REUSES the journal `Disposition` verdict (`journal.Classify`, carried on each `OpRecovery`) rather than re-deriving "did this op finish" from raw phases — journal owns that verdict, so doctor diagnoses pending work with the SAME eyes offline recovery acts with (a `--fix` draining via that recovery path can't disagree). Decision #DOCTOR-PENDING-PARTIAL: any op whose furthest phase is NOT `done` → a `KindPartial` ERROR finding (exit 2 — the MILDEST non-ok, the `partial` rank doctor.go already documents). ERROR not WARNING (contrast #66's stale-mirror WARNING): an unfinished op means the workspace is not fully clean, so it must move the exit off 0. Sub-codes: roll_forward (committed, not done) → `op_roll_forward_pending`; abandoned (intent only) → `op_abandoned`; `complete` → no finding. SEVERITY-limb mutant = `SeverityError`→`SeverityWarning` makes a pending op exit-neutral → `WorstExit` returns ExitOK not ExitPartial → `TestDetectPendingOpsIsPartial` (got exit 0) + the severity assertions RED while the count + all-complete test stay GREEN — pinning "a pending op is a real (if mild) error, not an advisory". SELECTION-limb mutant = delete the `if op.Disposition == journal.DispositionComplete { continue }` skip → completed ops fall through and emit spurious findings → `TestDetectPendingOps` count (3 not 2) + `TestDetectPendingOpsFlagsOnlyIncomplete` (2 spurious) RED while `TestDetectPendingOpsIsPartial` stays GREEN (a lone roll-forward still → exit 2). Both keep the journal Disposition consts in use so the RED is BEHAVIORAL. Pure function, no build tag. Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean (internal/doctor) + linux vet clean (29 pkgs ok) |
 | PHASE-PARKED (M4 HEAL-8 detector #4 prereq) | the pure parked-land verdict `landstate.TaskLand.Parked() bool` (`internal/landstate/landstate.go` + `parked_test.go`) — the missing aggregate the doctor parked-land detector (HEAL-8 detector #4, next firing) must REUSE rather than re-derive, just as DOCTOR-PENDING reused `journal.Classify` and DOCTOR-ORPHANS reused `gc.Classify`. ORIENT found landstate exposed only the Phase consts + records; "is this land done?" was re-derived inline by each `land` command (all of which do git IO via `*git.Git`), so there was no pure verdict to point a detector at. This unit homes it in `landstate`, the record's sole owner, BEFORE doctor consumes it (mirroring how unit (64)'s Finding model preceded the detectors). `Parked()` = at least one repo has NOT reached `PhaseLanded` ⟹ awaits `land continue`/`land abort`. **Keys on the ABSENCE of PhaseLanded, not the presence of PhaseBlocked** — a repo a crash left `PhasePending` (before it could block) still counts as parked. All-`PhaseLanded` = a clean finish kept only for the abort window (#CONTINUE-DISPOSE) → NOT parked; empty record → vacuously NOT parked (no cells ⟹ nothing to finish). Pure method, no IO, so per the methodology the non-vacuity check is a registered SOURCE edit (the WI_FAULT seam is for production failure-injection only, not pure functions). Mutant = flip `if rl.Phase != PhaseLanded`→`if rl.Phase == PhaseLanded` (verdict becomes true iff SOME repo IS landed) → RED on `all-landed`/`single-landed` (mutant true on first landed; want false) AND `all-blocked`/`all-pending` (mutant finds no landed → false; want true), while `empty` + mixed `one-blocked`/`one-pending` (contain a landed repo) stay GREEN — proving the test pins the "absence of PhaseLanded" semantics, not merely "non-empty record". Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean (internal/landstate) + linux vet clean (29 pkgs ok) |
 | DOCTOR-PARKED-LANDS (M4 HEAL-8 detector #4) | the parked-land detector `doctor.DetectParkedLands([]landstate.TaskLand) []Finding` (`internal/doctor/parkedlands.go`) — DESIGN §7.5's PARKED-LAND half of the "pending journal/parked ops" battery, the sibling of DOCTOR-PENDING (journal half), completing the battery. PURE function from injected observations to `[]Finding`, no IO (the command loads `<root>/.wi/land/*.json` via `landstate.Load`). REUSES the `landstate.TaskLand.Parked()` verdict (homed by PHASE-PARKED) rather than re-deriving land done-ness from raw phases — landstate owns that verdict, so doctor diagnoses with the SAME eyes `land continue`/`land abort` (HEAL-5) act with (a `--fix` can't disagree). Mapping: `Parked()` true (≥1 repo not `PhaseLanded`) → a `KindPartial` ERROR finding, sub-code `land_parked` (exit 2 — the mildest non-ok, identical to DOCTOR-PENDING's signal). ERROR not WARNING: an unfinished land means the workspace is not fully clean, so it moves the exit off 0. Fully-landed (abort-window) + empty records → NOT parked → no finding. SEVERITY-limb mutant = `SeverityError`→`SeverityWarning` makes a parked land exit-neutral → `WorstExit` returns ExitOK not ExitPartial → `TestDetectParkedLandsIsPartial` (got exit 0) + the severity assertion RED while `TestDetectParkedLandsFlagsOnlyParked` count stays GREEN. SELECTION-limb mutant = delete the `if !rec.Parked() { continue }` skip → settled+empty lands emit spurious findings → `TestDetectParkedLandsFlagsOnlyParked` (findings where none should) + `TestDetectParkedLands` count (4 not 2) RED while `TestDetectParkedLandsIsPartial` stays GREEN (a lone blocked land still → exit 2). Both keep `Parked()` in use so the RED is BEHAVIORAL. Pure function, no build tag. Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean (internal/doctor) + linux vet clean (29 pkgs ok) |
+| DOCTOR-DRIFT (M4 HEAL-8 detector #5) | the three-way isolate-drift detector `doctor.DetectDrift([]doctor.DriftObservation) []Finding` (`internal/doctor/drift.go`) — DESIGN §7.5's drift-repair battery. `DriftObservation{Task; Cell isolate.Cell}` tags each observed cell with its owning task (the command builds the slice by `state.List` + `isolate.Inspect` per task). PURE function from injected observations to `[]Finding`, no IO. REUSES `isolate.PlanAction` (the reconciler's pure per-cell `RepairAction` verdict — the EXACT decision `isolate repair`/HEAL-1 acts on) rather than re-deriving drift from raw `Class`+`Stage`, the tightest coupling of the detector family (DOCTOR-ORPHANS↔gc.Classify, DOCTOR-MIRROR↔mirror.Freshness, DOCTOR-PENDING↔journal.Classify, DOCTOR-PARKED-LANDS↔landstate.Parked) — so a `--fix → isolate repair` can never disagree with the report. Mapping (#DOCTOR-DRIFT-KIND, revised at build): EVERY drift finding rides the mild `KindPartial`, reserving conflict/exit-4 for the one hard-block (orphan) deferred to its owner. `RepairRematerialize` (ClassMissingWorktree) → ERROR `drift_missing_worktree`/exit 2; `RepairDropRecord` (ClassReclaimed) → ERROR `drift_stale_record`/exit 2; `RepairHealStage` (ClassConsistent, stage lags pending) → WARNING `drift_stage_lag`/exit-neutral; `RepairNone` (healthy) + `RepairBlockOrphan` (ClassOrphanWorktree) → NO finding. SEVERITY-limb mutant = `RepairRematerialize` arm `SeverityError`→`SeverityWarning` → a missing-worktree drift goes exit-neutral → `WorstExit` returns ExitOK not ExitPartial → `TestDetectDrift` severity assertion + `TestDetectDriftExit` (got exit 0) RED while `TestDetectDriftSkipsOrphanAndHealthy` count stays GREEN. SELECTION-limb mutant = split `RepairBlockOrphan` out of the skip case so it emits a spurious finding → an orphan produces a drift finding → `TestDetectDrift` count (4 not 3) + `TestDetectDriftSkipsOrphanAndHealthy` (findings where none should) RED while `TestDetectDriftExit` stays GREEN (a lone missing-worktree still → exit 2). The load-bearing skip pins that drift defers `orphan_unexplained` to its single owner DOCTOR-ORPHANS. Both keep `isolate.PlanAction` in use so the RED is BEHAVIORAL. Pure function, no build tag. Both Darwin mutants verified in isolation (Write-revert, the file being untracked at build) RED→revert→GREEN + gofmt clean (internal/doctor) + linux vet clean (29 pkgs ok) |
 | ISOLATE-NEW | drop the stop-on-first-fail `return` in `isolate.New` (turn it into `continue`) → the loop materializes the repo AFTER the failed one → `TestNewStopsOnFirstFailWithDurablePartialSuccess` RED on the 3 "db not attempted" assertions (result stage, durable stage, on-disk worktree); or skip the upfront all-pending `state.Store` → the first repo's `UpdateRepoStage` finds no record (`state: no isolate record`) and no durable registry exists to resume from → both `TestNewMaterializesAllReposComplete` + `TestNewStopsOnFirstFail…` RED |
 | RESOLVE-BUNDLE | wire per-repo `mirror` to the worktree path (`mirror := worktree`) instead of `layout.Repo` in `resolve.Bundle` → the SSOT mirror equals the worktree, reddening both repos' `Mirror` assertions in `TestBundleProjectsRecordPaths` (proves Bundle distinguishes the `isolas/<task>/<repo>` worktree from the `repos/<repo>` SSOT clone); or `continue` on one repo (drop it from the loop) → the projected `Repos` count/second-repo assertions RED (proves every recorded repo is projected, in order) |
 | SHAPE-ONE-ENVELOPE | make `cli.Emit` write the envelope TWICE (a second `w.Write(b)`) → the stream carries two top-level JSON values → `TestEmitWritesExactlyOneEnvelope` RED (second `Decode` returns a document, not `io.EOF`); or drop the trailing `'\n'` (`w.Write` without `append(b,'\n')`) → `TestEmitTerminatesWithSingleNewline` RED |
@@ -3422,30 +3456,39 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   `contract.ExitInterrupted` (130) stays in the closed set + `severityOrder` (reachable via the OS, not via any
   wi code path). DEFERRED to M5 revisit-only if a long-stream/TUI command (`ports`/`hooks`) later appears.
 
-- **#DOCTOR-DRIFT-KIND: three-way isolate-drift detector → error.kind mapping — RESOLVED 2026-06-30** (a
-  doctor-internal ruling, recorded ahead of the unit so a future firing adopts it without re-litigating; the
-  drift detector itself is still UNBUILT — it needs the `domain-verdicts` + `cli-seam` research the design
-  workflow's two agents lost to the session limit). Ruling: `doctor.DetectDrift(cells []isolate.Cell) []Finding`
-  is a PURE function fed the same `isolate.Inspect` output the `isolate repair` reconciler observes, REUSING
-  `isolate.Classify` exactly as DOCTOR-ORPHANS reuses `gc.Classify` — so a `--fix` dispatching to `isolate
-  repair` (HEAL-1) can never disagree with what doctor reported. It surfaces THREE recorded-cell drift classes
-  and is SCOPED to skip the two cases other owners already emit:
-  • `ClassMissingWorktree` (marker present, worktree gone) → `KindConflict` / sub-code `drift_missing_worktree` /
-    `SeverityError` / exit 4 — a surviving marker proves wi still intends the cell but its worktree is gone; the
-    `RepairRematerialize` cell, reported under the SAME kind the heal refuses with.
-  • `ClassReclaimed` + a surviving registry record (stale tombstone) → `KindPartial` / `drift_stale_record` /
-    `SeverityError` / exit 2 — durable bookkeeping debris (`RepairDropRecord`), the mildest non-ok, mirroring
-    DOCTOR-PENDING. ERROR (not WARNING) because the registry disagrees with disk.
-  • `ClassConsistent` + stage lags at `pending` → `KindConflict` / `drift_stage_lag` / **`SeverityWarning`** /
-    exit-neutral — physically correct (worktree right), only the recorded stage is behind (`RepairHealStage`);
-    severity (not kind) keeps it off the exit, like stale mirror.
-  • `ClassConsistent`+`created` (healthy) and `ClassOrphanWorktree` (worktree present, marker absent) → NO
-    finding. **The load-bearing scoping rule:** `DetectDrift` `continue`s on `ClassOrphanWorktree` so the LOUD
-    `orphan_unexplained` surface stays SINGLE-SOURCED in DOCTOR-ORPHANS (gc owns every orphan); a
-    `DOCTOR-DRIFT` non-vacuity mutant will delete that skip and assert the command's combined findings contain
-    `orphan_unexplained` exactly once. The three sub-codes are `Finding.Code` values riding existing frozen
-    kinds (`conflict`/`partial`) — NO `schema_version` bump, NO `contract.lock.json` edit. When `internal/doctor/
-    drift.go` is wired, list these three sub-codes in DESIGN §7.5's drift clause.
+- **#DOCTOR-DRIFT-KIND: three-way isolate-drift detector → error.kind mapping — RESOLVED 2026-06-30, BUILT
+  2026-06-30 (commit d058bd4) — RULING REVISED at build time.** DESIGN §7.5 names the drift detector but does
+  NOT pin its sub-code kinds/exits (confirmed by re-reading DESIGN.md lines 298-305), so the build resolved them
+  from first principles + the sibling pattern, and in doing so SUPERSEDED the pre-build recorded mapping below.
+  As-built: `doctor.DetectDrift(obs []DriftObservation) []Finding` (where `DriftObservation{Task string; Cell
+  isolate.Cell}` tags each observed cell with its owning task) is a PURE function fed the same `isolate.Inspect`
+  output the `isolate repair` reconciler observes. **REUSE move — REVISED:** it consumes `isolate.PlanAction`
+  (the reconciler's pure per-cell verdict — the EXACT `RepairAction` `isolate repair`/HEAL-1 acts on) rather than
+  re-deriving drift from the raw `Class`+`Stage`; that is a strictly tighter coupling than the originally-recorded
+  "reuse `isolate.Classify`", and the same composition DOCTOR-ORPHANS/DOCTOR-MIRROR/DOCTOR-PENDING/
+  DOCTOR-PARKED-LANDS use — so a `--fix → isolate repair` can never disagree with what doctor reported. **The
+  KEY REVISION:** every drift finding rides the MILD frozen `KindPartial` (exit 2 — "the workspace is sound, a
+  safe heal just needs to run", the same rank pending journal ops and parked lands carry); the conflict/exit-4
+  rank is RESERVED for the one genuine hard-block (an unexplained orphan worktree), which this detector DEFERS to
+  its single owner. As-built mapping (keyed on `PlanAction`'s `RepairAction`, NOT raw `Class`):
+  • `RepairRematerialize` (`ClassMissingWorktree` — marker present, worktree gone) → `KindPartial` /
+    `drift_missing_worktree` / `SeverityError` / exit 2. **REVISED from the old `KindConflict`/exit 4:** an
+    `isolate repair`-healable, losslessly re-materializable drift is morally the same "sound, a heal needs to run"
+    class as a pending op or parked land — conflict/exit 4 should be reserved for a genuine hard-block, not a
+    resumable one.
+  • `RepairDropRecord` (`ClassReclaimed` — neither marker nor worktree, a stale registry tombstone) →
+    `KindPartial` / `drift_stale_record` / `SeverityError` / exit 2 — unchanged from the pre-build ruling.
+  • `RepairHealStage` (`ClassConsistent` but the recorded stage lags at `pending`) → `KindPartial` /
+    `drift_stage_lag` / **`SeverityWarning`** / exit-neutral. **REVISED kind from `KindConflict` to `KindPartial`**
+    (severity, not kind, still keeps it off the exit, like stale mirror); the worktree is already correct, only the
+    registry stage trails a completed materialize.
+  • `RepairNone` (healthy steady state) and `RepairBlockOrphan` (`ClassOrphanWorktree`) → NO finding. **The
+    load-bearing scoping rule (unchanged):** `DetectDrift` skips `RepairBlockOrphan` so the LOUD
+    `orphan_unexplained` surface stays SINGLE-SOURCED in DOCTOR-ORPHANS (gc owns every orphan); the
+    `DOCTOR-DRIFT` selection-limb mutant emits a finding on that case and asserts the count/skip tests redden.
+  The three sub-codes are `Finding.Code` values all riding the single frozen kind `partial` — NO `schema_version`
+  bump, NO `contract.lock.json` edit. TODO when the doctor COMMAND is wired: list these three sub-codes in DESIGN
+  §7.5's drift clause.
 
 - **#4 isolate-remove (and crash) recovery policy = roll-FORWARD — RESOLVED 2026-06-30** (the §7 #4 open
   decision, "leaning roll-forward"; stamped RESOLVED in IMPLEMENTATION_PLAN.md §7 #4). Ruling: recovery
