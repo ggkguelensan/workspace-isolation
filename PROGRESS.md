@@ -627,7 +627,48 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (54) ✅ **this firing** — **`wi land --atomic` — the all-or-nothing land flag** (guard
+  (55) ✅ **this firing** — **`wi land status <task>` — the read-only resume-inspection verb** (guard
+  `CMD-LAND-STATUS`; new `internal/cli/cmd_land_status.go` + `cmd_land_status_test.go`), the FIRST and
+  smallest leaf of HEAL-5 (`land continue/abort/status`), decomposed bottom-up like land-atomic was. It
+  establishes the **2-token `land <verb> <task>` routing** the mutating verbs (`continue`/`abort`) will
+  reuse: a `"land status"` registry key beats the 1-token `"land"` via Dispatch's longest-match, so
+  `wi land status feat` routes here while `wi land feat <repo>…` still lands. The command is a PURE local
+  projection (mirror of `resolveCmd`): `newLandStatusCommand(l, args)` takes exactly one safe `<task>`
+  positional (traversal → `usage` at the factory; **no git dep** — status reads only landstate), and
+  `landStatusCmd.Run` does `landstate.Load(l.LandDir(), task)` → projects each `RepoLand` cell onto
+  `repos[]` via `projectLandStatus` (every cell `action=read`, `stage` = the landstate phase
+  landed|blocked|pending, a landed repo surfacing its `BackupSHA` as `SHA` — the anchor `land abort` will
+  restore to). `ErrNoRecord` ("never landed, or the land finished and discarded its record") → a clean
+  `not_found` refusal, NOT internal; any other load error stays unclassified → internal. **NO lock taken**:
+  `landstate.Store` renames atomically, so a lockless reader always sees a whole record, never a torn one.
+  A coupled change the HELP-REGISTRY-SYNC invariant FORCED (caught at the gate, exactly as designed — "help
+  can never lie about the command surface"): adding the registry key reddened `TestHelpTableMatchesRegistry`
+  until a `land status` row was added to `internal/help`'s table (synopsis "show a parked land's per-repo
+  phase…"; `land`'s own `Next` also now points at `wi land status <task>`). **Fitnesses**:
+  `TestLandStatusReportsParkedPhases` (a directly-`Store`d parked partial — api landed+backup, web blocked,
+  db pending — projects to the right per-repo stages in declared order, the landed repo alone carrying its
+  backup sha), `TestLandStatusNoRecordIsNotFound` (missing record → `not_found` naming the task),
+  `TestLandStatusFactoryValidatesArgs` (0/2 args + traversal → usage; one safe arg → a Command).
+  **Registered mutants** (both RED→revert→`(cached)` GREEN, byte-identity, two-sided): PRIMARY = in
+  `projectLandStatus` hardcode `Stage` to `string(landstate.PhaseLanded)` instead of `string(rl.Phase)` →
+  web/db report the wrong stage → ReportsParkedPhases RED (@:80) while not_found + factory stay GREEN;
+  ALTERNATE = classify the `ErrNoRecord` branch `KindInternal` instead of `KindNotFound` → NoRecordIsNotFound
+  RED (@:112) two-sided. (The originally-sketched "drop the branch entirely" alternate was rejected: it
+  orphans the `errors`/`fmt` imports → a build failure, not a clean behavioral RED — the kind-swap is the
+  honest compiling mutant.) Full gate GREEN (28 pkgs ok + `? schema`) + gofmt clean + linux cross-build/vet clean.
+  NEXT M4 unit — HEAL-5 continues bottom-up: the next leaf is the FIRST **mutating** resume verb. Recommend
+  `wi land abort <task>` before `land continue`: abort is the safety-critical one (it must restore each
+  landed repo from its `BackupSHA` via `git update-ref`, NEVER `git reset --hard`, DESIGN §7.2) and is
+  self-contained (no re-land orchestration), whereas `continue` re-drives the stop-at-first-block march over
+  the still-pending/blocked repos (reuses `land.RunJournaled`'s core, larger). Build a `land.Abort` domain
+  core first (load record → for each `PhaseLanded` repo restore base ref to `BackupSHA` under the
+  isolate-state:<task> lock → flip phase / discard record), then a thin `wi land abort` command + a
+  `"land abort"` registry key + help row. The `journal.KindLand` crash-roll-forward Finisher (recovery side)
+  remains a SEPARATE later leaf. (DEFERRED, unchanged: HEAL-GC-NO-LIVE-LOSS case (iii) #GC-AHEAD-V0 — needs a
+  journaled discard verb, do NOT fake with a vacuous test; `wi state get` — NOT in documented M4 scope, do
+  not build without owner direction; `wi doctor`/`check` + bounded `--fix` — LAST.)
+
+  (54) ✅ **(prior firing)** — **`wi land --atomic` — the all-or-nothing land flag** (guard
   `CMD-LAND-ATOMIC`; `internal/cli/cmd_land.go` + `cmd_land_test.go`), the THIRD and FINAL sub-unit of the
   `land-atomic` capability, composing unit (53)'s `land.Preflight`. **`land-atomic` is now LIT.** Three
   parts: (a) `newLandCommand` now parses an optional `--atomic` boolean flag out of `args` (the FIRST flag
@@ -660,14 +701,7 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   backup anchored @:265) while LandsAllWhenClean + FlagParsing stay GREEN (two-sided); ALTERNATE = parse
   `--atomic` but never bind it (`atomic: false` in the factory) → identical RED. Full gate GREEN (28 pkgs
   ok + `? schema`) + gofmt clean + linux cross-build/vet clean.
-  NEXT M4 unit — `land-atomic` is COMPLETE; the M4 capability vocabulary (`land`, `land-atomic`, `state-kv`)
-  is now fully lit and backed. Remaining M4 surface per IMPLEMENTATION_PLAN §4: **HEAL-5 `land continue/
-  abort/status`** (the `journal.KindLand` land-recovery Finisher + the resume verbs — resumes the durable
-  partial a stop-at-first-block land leaves; the journal write-side already records KindLand
-  intent→committed→done, so this is the read-side Finisher + 3 thin commands) is the natural next M4 unit,
-  decomposed bottom-up like land-atomic was. (DEFERRED, unchanged: HEAL-GC-NO-LIVE-LOSS case (iii)
-  #GC-AHEAD-V0 — needs a journaled discard verb, do NOT fake with a vacuous test; `wi state get` — NOT in
-  documented M4 scope, do not build without owner direction; `wi doctor`/`check` + bounded `--fix` — LAST.)
+  NEXT M4 unit — SATISFIED by unit (55): the first HEAL-5 leaf (`wi land status`) is now built.
 
   (53) ✅ **(prior firing)** — **`land.Preflight` — the non-mutating validate-all gate** (guard
   `LAND-PREFLIGHT`; `internal/land/preflight.go` + `preflight_test.go`), the SECOND sub-unit of the
@@ -2700,6 +2734,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | GIT-IS-ANCESTOR (M4 land-atomic) | the non-mutating fast-forward predicate `(*Git).IsAncestor(ctx, dir, maybeAncestor, descendant)` (`internal/git/git.go`): runs `git merge-base --is-ancestor`, exit 0 → `(true,nil)`, exit 1 → `(false,nil)`, any other code → a real error (never silent false). `FastForwardBaseRef` was refactored to reuse it, so the SSOT base advance (DESIGN §5) and `wi land --atomic`'s pre-flight share one predicate. Primary mutant = ignore the exit code, return `(true,nil)` always → `TestIsAncestor` RED on rewind + both-diverged + nonexistent-rev (4 failures, git_test.go:167/:174) — pins that a non-ancestor is reported false, not true. Alternate mutant = collapse the "other exit code = error" branch into the false branch (`return false, nil` for any error) → ONLY the nonexistent-rev case RED (a missing rev must error, not read as "not an ancestor"). Hermetic real-git harness over a 3-commit DAG, no build tag. Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | LAND-PREFLIGHT (M4 land-atomic) | the non-mutating validate-all gate `land.Preflight(ctx, g, l, task, specs) (checks, ok, err)` (`internal/land/preflight.go`): for each repo resolve work tip (worktree HEAD) + base tip and call `git.IsAncestor(baseTip, workTip)` in the SSOT clone (shared object store, DESIGN §1); `ok=true` IFF EVERY repo would fast-forward; writes no backup, advances no base, persists no landstate, takes no lock — a pure read for `wi land --atomic`'s pre-flight (sub-unit 3). Does NOT short-circuit (reports the full blocker set); an unresolvable ref is a Go error, a clean non-ff is `WouldLand=false` (not an error). Primary mutant = drop the `if !ff { ok = false }` accumulation (ok stays true) → `TestPreflightRefusesWhenAnyRepoBlocks` RED (`ok=true, want false`, preflight_test.go:135); `TestPreflightAllReposWouldLand` stays GREEN (two-sided). Alternate mutant = hardcode `WouldLand:true` in the per-repo cell → same test RED on `api WouldLand = true, want false` (preflight_test.go:143), isolating the per-repo verdict from aggregate `ok`. Both tests also assert `assertNothingMoved` (bases untouched / no backup anchor / no landstate record) — the atomic purity property, sharpened by ordering the landable repo FIRST and the blocker SECOND (a sequential land would have advanced the first base). Hermetic real-git harness (isolate.New stands up worktrees), no build tag. Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | CMD-LAND-ATOMIC (M4 land-atomic) | the `wi land --atomic <task> <repo>…` flag (`cmd_land.go`): `newLandCommand` parses an optional `--atomic` boolean out of `args` (accepted in any position; an unknown `--flag` → usage; `<task>` traversal + `≥1 <repo>` positional contract preserved), and `landCmd.Run`, when set, calls `land.Preflight` BEFORE any pointer move — if ANY repo would not fast-forward it refuses the WHOLE op with `*CommandError{conflict, noop}` (blockers ride `repos[]` as per-repo `non_fast_forward` via `projectPreflight`, same wire shape as a parked `projectLandOutcome` block) having advanced NO base; else it falls through to the unchanged `land.RunJournaled` (decision #ATOMIC-1: pre-flight-then-normal-Run, the check→land window covered by RunJournaled's own isolate-state lock + LandRepo's ff-refusal under a race). Primary mutant = neuter the pre-flight branch (`if false && c.atomic`) → `--atomic` degrades to plain stop-at-first-block land → `TestLandCommandAtomicRefusesAndMovesNothing` RED on all 3 atomic-property assertions (Kind partial not conflict @cmd_land_test.go:253, api base advanced @:259, api backup anchored @:265) while `TestLandCommandAtomicLandsAllWhenClean` + `TestLandCommandAtomicFlagParsing` stay GREEN (two-sided). Alternate mutant = parse `--atomic` but never bind it (`atomic: false` in the factory) → identical RED. A SECOND coupled change — lighting `CapLandAtomic` in `contract.Capabilities()` (after `land`, before `state-kv`) — is guarded by the byte-exact `goldenSuccess` (`TestEnvelopeGoldenSuccess`): adding it reddened the golden showing `,"land-atomic"` appended; updated to the honest wire form → RED→GREEN, exactly as CMD-LAND/CMD-STATE-CAS. End-to-end real-git harness through the registry factory + `cmd.Run(WithOpID(...))`, no build tag. Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
+| CMD-LAND-STATUS (M4 HEAL-5) | the read-only `wi land status <task>` verb (`internal/cli/cmd_land_status.go`): `newLandStatusCommand(l, args)` takes exactly one safe `<task>` (traversal → usage; NO git dep), and `landStatusCmd.Run` does `landstate.Load(l.LandDir(), task)` → projects each `RepoLand` onto `repos[]` via `projectLandStatus` (every cell `action=read`, `stage` = the landstate phase, a landed repo surfacing `BackupSHA` as `SHA`); `ErrNoRecord` → `not_found` (not internal); no lock (Store renames atomically). The `"land status"` registry key routes via Dispatch longest-match (2-token beats bare `"land"`). Primary mutant = in `projectLandStatus` hardcode `Stage: string(landstate.PhaseLanded)` instead of `string(rl.Phase)` → blocked/pending repos report the wrong stage → `TestLandStatusReportsParkedPhases` RED (@:80) while `TestLandStatusNoRecordIsNotFound` + `TestLandStatusFactoryValidatesArgs` stay GREEN (two-sided). Alternate mutant = classify the `ErrNoRecord` branch `KindInternal` instead of `KindNotFound` → `TestLandStatusNoRecordIsNotFound` RED (@:112) two-sided. (The sketched "drop the branch" alternate was rejected — it orphans the `errors`/`fmt` imports → build failure, not a clean behavioral RED.) A coupled change FORCED by HELP-REGISTRY-SYNC: the new registry key reddened `TestHelpTableMatchesRegistry` until a `land status` row was added to `internal/help`'s table (RED→GREEN, exactly as the surface invariant intends). Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |

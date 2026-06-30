@@ -83,7 +83,13 @@ var table = []Command{
 		Name:     "land",
 		Synopsis: "fast-forward each repo's isolate work back onto its base branch",
 		Usage:    "wi land <task> <repo>…",
-		Next:     []string{"wi isolate rm <task>"},
+		Next:     []string{"wi land status <task>", "wi isolate rm <task>"},
+	},
+	{
+		Name:     "land status",
+		Synopsis: "show a parked land's per-repo phase (landed / blocked / pending)",
+		Usage:    "wi land status <task>",
+		Next:     []string{"wi land <task> <repo>…"},
 	},
 	{
 		Name:     "isolate rm",
