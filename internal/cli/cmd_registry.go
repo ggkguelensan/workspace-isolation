@@ -37,6 +37,7 @@ func BuildRegistry(d Deps) Registry {
 		"land":           func(args []string) (Command, error) { return newLandCommand(d.Layout, d.Git, args) },
 		"land status":    func(args []string) (Command, error) { return newLandStatusCommand(d.Layout, args) },
 		"land abort":     func(args []string) (Command, error) { return newLandAbortCommand(d.Layout, d.Git, args) },
+		"land continue":  func(args []string) (Command, error) { return newLandContinueCommand(d.Layout, d.Git, args) },
 		"gc":             func(args []string) (Command, error) { return newGCCommand(d.Layout, d.Git, args) },
 		"sync":           func(args []string) (Command, error) { return newSyncCommand(d.Layout, d.Git, d.Clock, args) },
 		"repo add":       func(args []string) (Command, error) { return newRepoAddCommand(d.Layout, args) },

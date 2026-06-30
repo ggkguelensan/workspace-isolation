@@ -98,6 +98,12 @@ var table = []Command{
 		Next:     []string{"wi land status <task>", "wi land <task> <repo>…"},
 	},
 	{
+		Name:     "land continue",
+		Synopsis: "resume a parked land, re-attempting each blocked repo and landing those now reconciled",
+		Usage:    "wi land continue <task>",
+		Next:     []string{"wi land status <task>", "wi land abort <task>"},
+	},
+	{
 		Name:     "isolate rm",
 		Synopsis: "remove a task's isolate and release its worktrees",
 		Usage:    "wi isolate rm <task>",
