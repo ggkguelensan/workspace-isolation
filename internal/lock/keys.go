@@ -3,6 +3,10 @@
 // It sits directly on internal/lockfs.FileLock (flock(2)) and names the closed
 // set of resources concurrent wi processes serialize on:
 //
+//	workspace              the whole project — the coarsest, workspace-wide key,
+//	                       held alone and OUTERMOST (e.g. by the offline startup
+//	                       recovery pass) so a maintenance sweep does not interleave
+//	                       with a concurrent command's finer-grained locks
 //	project-registry       writes to the project registry
 //	repo:<name>            a repo's base-ref mutation — sync and land take the
 //	                       IDENTICAL key, which is what linearizes the freshness
@@ -32,6 +36,7 @@ const lockSuffix = ".lock"
 // and ParseKey (which reverses one) can never drift apart. project-registry is a bare
 // constant key; the other two are "<prefix><safe-segment>".
 const (
+	workspaceKey       = "workspace"
 	projectRegistryKey = "project-registry"
 	repoPrefix         = "repo:"
 	isolateStatePrefix = "isolate-state:"
@@ -56,6 +61,14 @@ func (k Key) Path(locksDir string) string {
 	return filepath.Join(locksDir, k.s+lockSuffix)
 }
 
+// Workspace returns the workspace-wide key — the coarsest lock in the namespace,
+// guarding a whole-project maintenance operation (the offline startup recovery pass).
+// It is a bare constant key like ProjectRegistry (no name segment). It is intended to
+// be held ALONE and OUTERMOST: a holder acquires it before the command body and may
+// then take finer-grained keys (e.g. isolate-state:<task>) nested inside, never the
+// reverse, so the workspace lock can never deadlock against a command's own locks.
+func Workspace() Key { return Key{s: workspaceKey} }
+
 // ProjectRegistry returns the key guarding writes to the project registry.
 func ProjectRegistry() Key { return Key{s: projectRegistryKey} }
 
@@ -72,8 +85,9 @@ func Repo(name string) (Key, error) {
 // the inverse of the constructors, validating the embedded name segment exactly as the
 // constructor would. It is how the lock lister turns a "<key>.lock" filename back into
 // a Key, so a stray non-key file in the locks dir is rejected (error) rather than
-// assessed. The three namespaces are the only valid inputs:
+// assessed. The namespaces are the only valid inputs:
 //
+//	"workspace"             -> Workspace()
 //	"project-registry"      -> ProjectRegistry()
 //	"repo:<name>"           -> Repo(name)
 //	"isolate-state:<name>"  -> IsolateState(name)
@@ -83,6 +97,8 @@ func Repo(name string) (Key, error) {
 // could not have produced.
 func ParseKey(s string) (Key, error) {
 	switch {
+	case s == workspaceKey:
+		return Workspace(), nil
 	case s == projectRegistryKey:
 		return ProjectRegistry(), nil
 	case strings.HasPrefix(s, repoPrefix):

@@ -24,7 +24,7 @@ func TestParseKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []Key{ProjectRegistry(), api, iso} {
+	for _, want := range []Key{ProjectRegistry(), Workspace(), api, iso} {
 		got, err := ParseKey(want.String())
 		if err != nil {
 			t.Errorf("ParseKey(%q): unexpected error %v", want.String(), err)

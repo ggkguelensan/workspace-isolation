@@ -39,6 +39,13 @@ func TestCanonicalKeyStrings(t *testing.T) {
 	if got := is.String(); got != "isolate-state:T1" {
 		t.Errorf("IsolateState(T1) = %q, want isolate-state:T1", got)
 	}
+	// The workspace-wide key is a bare constant (no name segment), like
+	// project-registry. Its concrete string is a durable wire contract: a lock file
+	// one wi build writes must be recognized by another build, so this asserts the
+	// literal "workspace" (a round-trip alone would survive a constant rename).
+	if got := Workspace().String(); got != "workspace" {
+		t.Errorf("Workspace = %q, want workspace", got)
+	}
 }
 
 func TestKeyConstructorsRejectUnsafeNames(t *testing.T) {
