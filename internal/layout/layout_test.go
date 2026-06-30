@@ -55,6 +55,7 @@ func TestPaths(t *testing.T) {
 		{"LandDir", l.LandDir(), rel(".wi", "land")},
 		{"PortsDir", l.PortsDir(), rel(".wi", "ports")},
 		{"TrustDir", l.TrustDir(), rel(".wi", "trust")},
+		{"JournalDir", l.JournalDir(), rel(".wi", "journal")},
 	}
 	for _, c := range fixed {
 		if c.got != c.want {

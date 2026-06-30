@@ -116,12 +116,13 @@ const (
 	subLand    = "land"
 	subPorts   = "ports"
 	subTrust   = "trust"
+	subJournal = "journal"
 )
 
 // WiSubdirs returns the names of every .wi/ runtime subdirectory, in a stable
 // order. Bootstrap creates exactly these.
 func WiSubdirs() []string {
-	return []string{subLocks, subState, subLog, subMirrors, subLand, subPorts, subTrust}
+	return []string{subLocks, subState, subLog, subMirrors, subLand, subPorts, subTrust, subJournal}
 }
 
 // LocksDir returns <root>/.wi/locks.
@@ -144,6 +145,10 @@ func (l Layout) PortsDir() string { return filepath.Join(l.WiDir(), subPorts) }
 
 // TrustDir returns <root>/.wi/trust.
 func (l Layout) TrustDir() string { return filepath.Join(l.WiDir(), subTrust) }
+
+// JournalDir returns <root>/.wi/journal, the durable op-journal subtree (HEAL-4,
+// DESIGN §7.4): one append-only JSONL file per operation, keyed by op_id.
+func (l Layout) JournalDir() string { return filepath.Join(l.WiDir(), subJournal) }
 
 // Repo returns <root>/repos/<repo>, the SSOT clone for repo. The name must be a
 // single safe path segment.
