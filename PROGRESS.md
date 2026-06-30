@@ -627,7 +627,53 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (45) ✅ **this firing** — **the `internal/land` executor's first repo-cell: `land.LandRepo`** (guard
+  (46) ✅ **this firing** — **the per-task land orchestrator `land.Run`** (guard `LAND-RUN`; `internal/land/
+  run.go` + `run_test.go`, package `land_test`). This composes the unit-45 `LandRepo` cell into the actual
+  `wi land` op (DESIGN §1, §7.2), mirroring `isolate.New`'s durable-partial-success orchestration (§6.3): under
+  the **isolate-state:<task> lock** (DESIGN §6.1, `lock.Acquire`+`held.Stamp(opID)`) it first writes an
+  **all-pending `landstate.TaskLand`** record (the durable statement of intent that makes the op resumable),
+  then lands each repo in request order via `LandRepo`, **folding each outcome into the durable record and
+  `landstate.Store`-ing after EVERY repo** so a crash leaves the record reflecting EXACTLY the repos already
+  landed. It is **SEQUENTIAL + STOP-AT-FIRST-BLOCK**: the first repo that refuses (a non-ff parks it
+  `PhaseBlocked`) or faults halts the run at `StatusBlocked` with every later repo left `PhasePending` and
+  **untouched** — the parked record is what HEAL-5 `land continue`/`land abort` resume from. A blocked repo is
+  **NOT a Go error** (a recorded refusal); `Run`'s error return is reserved for op-can't-run failures (held lock
+  → `*lock.HeldError` → exit 6, unwritable record). New types: `RepoSpec{Name,Base}` (CLI resolves from manifest,
+  symmetric with `isolate.RepoSpec` — deliberately its own type to keep land decoupled), `Status` (`landed`|
+  `blocked`), `RepoResult` (Repo/Base/Phase/BackupSHA/LandedSHA/Err), `Result`. An infra fault on a repo parks it
+  blocked (resumable) and records `Err` — same stop-at-first-fail posture as `isolate.New`, not a Go error.
+  **Two fitnesses over the real-git harness** (mirror of isolate_test's `setup`/`cloneSSOT`):
+  `TestRunLandsAllReposComplete` (2-repo isolate, both work tips ff → assert Status=Landed, each base advanced to
+  its work tip, each backup anchors the OLD base tip, AND the durable `.wi/land/feat.json` record shows both
+  landed with backups) and `TestRunParksAtFirstBlockedRepo` (api made non-ff via a competing divergent base; web
+  is perfectly landable but must NOT be reached → assert err=nil, Status=Blocked, api Phase=Blocked, web
+  Phase=Pending, web base UNCHANGED, AND the durable record parks api blocked + leaves web pending). **Two
+  registered mutants, both RED→revert→`(cached)` GREEN (byte-identity):** primary = neuter the stop-at-first-block
+  (`if rr.Phase != PhaseLanded` → `if false`) → ONLY the blocked test RED (web wrongly landed, its base moved,
+  status not blocked, durable web landed; happy stays GREEN — it never blocks); alternate = skip the per-repo
+  `landstate.Store` (record stays all-pending) → BOTH tests RED on the DURABLE-record assertions specifically
+  while the in-memory `Result` stays correct (pinning that the per-repo Store is what makes the record durable).
+  Full gate GREEN (only `? schema` non-ok) + gofmt clean + linux cross-build/vet clean. **Scope kept tight:** Run
+  owns the lock + durable landstate record + the per-repo loop; the **op-journal lifecycle** (`journal.KindLand`
+  crash-recovery wrapper) is the NEXT unit — the same `removeCore` (no journaling) vs `Remove` (journaling) split
+  isolate uses, so the recovery Finisher can re-run the core without re-journaling (DESIGN §7.4).
+  NEXT M4 unit — **the land op-journal lifecycle wrapper** (call it `land.RunJournaled` or fold into a `land.Op`
+  entry point), mirroring `isolate.Remove` around `removeCore`: journal `intent`→`committed` around `land.Run`
+  (Kind `journal.KindLand` already exists), then on a clean `StatusLanded` journal `done`+`Discard`; on
+  `StatusBlocked` (a parked land) LEAVE the journal at `committed` for the offline startup roll-forward (HEAL-4)
+  / `land continue` (HEAL-5) to resume; on a pre-run failure (held lock → zero Result) DROP the journal. **Decide
+  + record** whether land's recovery Finisher re-runs `land.Run` (idempotent: re-landing an already-landed repo is
+  a no-op ff or a now-clean ff) or is a no-op that simply leaves the parked record for `land continue` — the
+  faithful read of DESIGN §7.4 (land roll-forward is offline + idempotent) favors re-running `land.Run`, exactly
+  like `FinishRemove` re-runs `removeCore`. THEN (b) the **`land` CLI command** (`internal/cli/cmd_land.go` +
+  capability `land`/`land-atomic`, PLAN line 137) projecting `Result` onto the envelope (StatusBlocked → exit 2
+  partial, like isolate-new); (c) the **`state cas`** command (DESIGN §8). THEN **HEAL-5** `land continue/abort/
+  status` (resume/abort restoring `BackupSHA`, §7.2 — consumes this record); **HEAL-6** mirror-stale refusal at
+  land (exit 6); **HEAL-7** atomic `.wi/` writes audit; **HEAL-8** `wi doctor`/`check` + bounded `--fix` (LAST).
+  **DEFERRED (not next):** HEAL-GC-NO-LIVE-LOSS **case (iii)** — needs a journaled discard/reset verb that does
+  not exist (journal kinds = `isolate_new`/`isolate_rm`/`land`); do NOT fake with a vacuous test (#GC-AHEAD-V0).
+
+  (45) ✅ **(prior firing)** — **the `internal/land` executor's first repo-cell: `land.LandRepo`** (guard
   `LAND-REPO-FF`; `internal/land/land.go` + `land_test.go`, package `land_test`). This is the irreducible
   single-repo step the per-task land orchestrator composes once per repo — pure git-ref motion over the SSOT
   clone, no LLM, no network (DESIGN §1, §2, §5, §7.2). `LandRepo(ctx, g, ssotDir, worktreePath, task, repo,
@@ -2374,6 +2420,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | GIT-OWNED-REF | flip the namespace `refs/wi/`→`refs/heads/` in `ownedRef` → the marker becomes a stray branch: `refs/wi/owned/` is empty while `refs/heads/` grows a second ref → `TestOwnedRefMarksOwnershipUnderRefsWi` RED on both the "lives under refs/wi at the sha" and "no stray branch" assertions (the round-trip stays GREEN, isolating the decision-#2 namespace property; a no-op `CreateOwnedRef` additionally reddens the absent→present round-trip) |
 | GIT-BACKUP-REF (M4 land) | the land pre-move safety anchor `CreateBackupRef`/`BackupRefSHA` over `refs/wi/backup/<task>/<repo>` (DESIGN §7.2). Registered mutant = point `backupRefPrefix` at the owned namespace (`refs/wi/backup/`→`refs/wi/owned/`) → `TestBackupRefAnchorsUnderRefsWiBackup` RED on BOTH the raw-git "lives under refs/wi/backup at the sha" assertion (nothing there) AND the `ListOwnedRefs`-returns-empty assertion (the anchor is now wrongly enumerated as an owned/gc candidate) — pinning that the backup-vs-owned namespace separation IS the §7.1 gc-protection that keeps the abort restore point from being collected. Alternate: no-op `CreateBackupRef` → the absent→present round-trip (`BackupRefSHA`) RED. Hermetic real-git harness, no build tag. Confirmed RED→revert→`(cached)` GREEN + linux cross-build/vet clean |
 | LAND-REPO-FF (M4 land) | the `internal/land` executor's single repo-cell `land.LandRepo`: anchor the base's current tip via `CreateBackupRef`, then `FastForwardBaseRef` the base to the worktree's HEAD (the work tip), mapping a `*git.NonFastForwardError` to a clean `PhaseBlocked` refusal (err=nil, base untouched) vs `PhaseLanded` on a true ff (DESIGN §5, §7.2). Primary mutant = skip the `FastForwardBaseRef` call (claim `PhaseLanded`+`LandedSHA` without moving the base) → BOTH `TestLandRepoAdvancesBaseToWorkTip` (base ref not advanced to the work tip) AND `TestLandRepoRefusesNonFastForward` (no error → falls through to landed, never blocked) RED. Alternate = on `NonFastForwardError` set `PhaseLanded`+`LandedSHA` instead of `PhaseBlocked` → ONLY `TestLandRepoRefusesNonFastForward` RED (isolates the refusal-mapping safety property; happy stays GREEN — a true ff never reaches that branch). Alternate = no-op `CreateBackupRef` → the happy-path backup-anchor assertion RED. Hermetic real-git harness, no build tag. Confirmed RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
+| LAND-RUN (M4 land) | the per-task land orchestrator `land.Run`: under the isolate-state:<task> lock, write an all-pending `landstate.TaskLand`, then land each repo via `LandRepo`, folding+`Store`-ing after every repo, STOP-AT-FIRST-BLOCK (a non-ff/fault parks the repo blocked and leaves later repos pending+untouched). Primary mutant = neuter the stop (`if rr.Phase != PhaseLanded` → `if false`) → ONLY `TestRunParksAtFirstBlockedRepo` RED (the later repo `web` is wrongly landed — its base moves, it is no longer pending, Status not blocked, durable web landed; `TestRunLandsAllReposComplete` stays GREEN since it never blocks). Alternate = skip the per-repo `landstate.Store` (record stays all-pending) → BOTH tests RED on the DURABLE-record assertions specifically while the in-memory `Result` stays correct (pins that the per-repo Store is what makes the parked record durable+resumable). Hermetic real-git harness (isolate.New stands up the worktrees), no build tag. Confirmed RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |
