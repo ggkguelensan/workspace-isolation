@@ -17,10 +17,12 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   → `unknown command` (exit 64) while the envelope advertises the `help-json` capability (violating
   PLAN line 108 "capabilities ⇒ backing command"); the `contract.Error` `Help`/`DidYouMean` fields and
   the `cli`/`text` plumbing exist but **nothing ever populated them**. **Now closing the gap, one unit
-  per firing:** ✅ `internal/suggest` landed this firing (the did-you-mean Levenshtein engine, guard
-  `SUGGEST-DIDYOUMEAN`, commit `b043457`). Remaining for true MVP: `internal/help` (the help model +
-  a `help` command backing `help-json`), then WIRE both into `dispatch` (unknown command → populate
-  `did_you_mean[]` via `suggest`; `wi help [topic]` → help model), then re-verify M0–M3 end-to-end.
+  per firing:** ✅ `internal/suggest` (did-you-mean Levenshtein engine, guard `SUGGEST-DIDYOUMEAN`,
+  commit `b043457`) and ✅ `internal/help` (progressive-disclosure help model + `next[]` rules, guard
+  `HELP-MODEL`) have both landed as pure packages. Remaining for true MVP: WIRE both into `dispatch`
+  (unknown command → populate `did_you_mean[]` via `suggest`; register a `help` command so
+  `wi help [topic]` → help model backs the `help-json` capability; + help↔registry sync fitness), then
+  re-verify M0–M3 end-to-end.
   Everything still builds/vets/tests green throughout. _What WAS genuinely done (six commands, cmd/wi,
   full release scaffolding incl. Node-24-current CI) stands; it just wasn't the whole of M3._
 
@@ -1026,21 +1028,28 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 > follow-ups (HOMEBREW_TAP_GITHUB_TOKEN PAT secret · LICENSE + cask license · `wi version` unit) remain
 > owner-gated and unchanged.
 
-- ✅ **DONE (this firing) — `internal/suggest`** (commit `b043457`, guard `SUGGEST-DIDYOUMEAN`): the
+- ✅ **DONE (earlier firing) — `internal/suggest`** (commit `b043457`, guard `SUGGEST-DIDYOUMEAN`): the
   pure did-you-mean Levenshtein engine, SOLE owner per DESIGN §3.1. `For(input, candidates)` → typo
   (edit dist ≤ 2, case-insensitive) or prefix matches, sorted (dist asc, name asc), nil on no-match.
   Decision #S recorded (reproduce cobra's `SuggestionsFor`; hand-rolled, no `agnivade/levenshtein` dep,
   consistent with #F dropping cobra).
-- **NEXT — `internal/help`**: the progressive-disclosure help model + `next[]` rules, SOLE owner
-  (DESIGN line 158). A pure package mapping a topic (none = top-level overview; a command name = that
-  command's synopsis) to help text + suggested `next[]` actions, sourced from one command-metadata
-  table so help can never lie about the command surface. Test-first with its non-vacuity mutant.
-- **THEN — wire suggest + help into `dispatch`** (the `cli` envelope writer is the sole injector,
+- ✅ **DONE (this firing) — `internal/help`** (guard `HELP-MODEL`): the pure progressive-disclosure
+  help model + `next[]` rules, SOLE owner (DESIGN line 158). One command-metadata `table` (the single
+  source of truth for the command surface, ordered as the canonical workflow) backs both `Commands()`
+  and `For(topic)`. `For("")` → overview (tagline + full table + getting-started `next[]`);
+  `For("<command>")` → that command's synopsis/usage/runnable `next[]`; unknown topic → zero Model +
+  ok=false (so the caller can refuse with a `did_you_mean` hint). Non-vacuity mutant: described
+  source-edits (ignore the topic / ok=true on unknown / drop the `wi ` prefix / blank a row) — each
+  reddens a distinct guard test. Pure, zero-dep, no contract/cli coupling yet.
+- **NEXT — wire suggest + help into `dispatch`** (the `cli` envelope writer is the sole injector,
   DESIGN line 156 / §7): (1) on the unknown-command path (`dispatch.go:55`) populate the error
   envelope's `did_you_mean[]` from `suggest.For(attempted, registeredNames)` and set `help` to the
   relevant `wi help …` pointer; (2) register a `help` command so `wi help [topic]` returns the help
   model and the advertised `help-json` capability actually has a backing command (closes the PLAN
-  line 108 "capabilities ⇒ backing command" violation).
+  line 108 "capabilities ⇒ backing command" violation); (3) add the help↔registry SYNC fitness — a
+  `cli`-layer test (it can import both `help` and the registry without a cycle, since `help` stays
+  pure) asserting `help.Commands()` names == `BuildRegistry` keys, so the metadata table can never
+  drift from the live command surface ("help can never lie", DESIGN §3.1).
 - **THEN — re-verify M0–M3 end-to-end** (build/vet/test/gofmt + `goreleaser check` + binary smoke incl.
   `wi help` exit 0 and an unknown command carrying `did_you_mean`). Only then is the MVP genuinely green
   and the STOP condition real.
@@ -1194,6 +1203,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CMD-ISOLATE-RM | in `isolateRmCmd.Run`, on the mixed outcome (`removed > 0` with blocks) return `(result, nil)` instead of `(result, *CommandError{Kind:partial, Action:removed})` → a partial teardown is mis-reported as a clean success (no error, exit 0) → `TestIsolateRmDurablePartialBlocksOrphan` RED (`want *cli.CommandError, got <nil>`), while complete-teardown + all-blocked stay GREEN (isolates the mutant to the partial-mapping path); alternate: in `projectRemoveOutcome` map an orphan hard-block to `Kind:internal` (or drop the `Code:"orphan_unexplained"`) → same test RED on the repos[] `web.Error.Kind == conflict` / `Code == orphan_unexplained` assertions — pins the loud `orphan_unexplained` surface (DESIGN §7.1) riding in repos[] not Blocked[] (decision #RD) |
 | CMD-MAIN | in `run` (cmd/wi) `_ = code; return contract.ExitOK` instead of `return code` → run swallows Dispatch's computed exit and always exits 0 → `TestRunUnknownCommandExitsUsage` RED (got 0, want 64), while `TestRunInitScaffoldsWorkspace` stays GREEN (init already exits 0) — isolates the mutant to exit-code propagation; alternate: hand `cli.Dispatch` an empty `Registry{}` instead of `BuildRegistry(deps)` → every command is unknown → `TestRunInitScaffoldsWorkspace` RED (no `.wi/` scaffolded, ok:false/usage not created) — pins that the REAL registry over a cwd-resolved root is wired |
 | SUGGEST-DIDYOUMEAN | in `suggest.For` return `nil` regardless (the shipped test-first stub) → every typo/prefix case loses its suggestion → `TestForSuggestsClosest` RED on the `reslove`/`snc`/`re`/`RESLOVE` rows (got nil, want the match) while the `xyzzy`/empty rows stay GREEN (isolates the mutant to the match path); alternate: drop the threshold/prefix filter and `return candidates` unfiltered → the `xyzzy`/empty "nothing close → nil" rows RED (got the whole command set); alternate: remove the `input==""` guard → empty input prefix-matches everything → `empty input is never a suggestion` RED |
+| HELP-MODEL | in `help.For` ignore the topic and always `return Model{Synopsis:overview, Commands:Commands(), Next:…}, true` → drilling into a command no longer yields its detail → `TestForCommandDetail` RED (Usage/Next mismatch, Commands non-nil) and `TestForUnknownTopic` RED (got ok=true for `frobnicate`); alternate: `return Model{}, true` for an unknown topic → `TestForUnknownTopic` RED (want ok=false); alternate: drop the `"wi "` prefix on a `table` row's `Next` (or the overview's) → `TestNextIsRunnable` RED (not a runnable `wi …` line); alternate: blank a row's `Usage`/`Synopsis` → `TestTableIsFullyPopulated` RED (help would lie about the surface). Overview/empty-topic rows stay GREEN under the first mutant, isolating it to the per-command path |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
