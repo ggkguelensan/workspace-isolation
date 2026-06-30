@@ -258,6 +258,40 @@ func Remove(ctx context.Context, l layout.Layout, g *git.Git, task, opID string,
 	return res, nil
 }
 
+// FinishRemove is the recovery Finisher for a rolled-forward isolate-rm op (HEAL-4
+// sub-unit 3d-ii, decision #4: roll FORWARD). The offline executor injects it for a
+// journal left at `committed` (a `wi isolate rm` interrupted after its commit point):
+// it re-runs the non-journaling teardown core for the op's recorded task/repos and
+// journals NOTHING — the executor owns every journal mutation during recovery
+// (DESIGN §7.4), so re-running removeCore here would otherwise double-journal.
+//
+// It is OFFLINE and IDEMPOTENT, which removeCore is: reclamation is evidence-positive
+// per-repo, so re-running reclaims only what it can still prove it owns. The return
+// value answers the executor's only question — "did the durable effect complete?":
+//
+//   - RemoveComplete             → nil: teardown finished; the executor closes the
+//     lifecycle (`done`) and discards the journal.
+//   - already gone (ErrNoRecord) → nil: the teardown completed before the crash (the
+//     record is already deleted) — idempotent success, nothing left to do. An error
+//     here would wedge the op in perpetual retry.
+//   - RemoveBlocked              → error: a hard-block orphan still stands; returning
+//     an error LEAVES the journal in place so the NEXT offline startup retries it
+//     (reclaiming any now-unblocked repos) — recovery rolls forward incrementally.
+//   - any other fault            → error: surfaced so the journal is left for retry.
+func FinishRemove(ctx context.Context, l layout.Layout, g *git.Git, op journal.OpRecovery) error {
+	res, err := removeCore(ctx, l, g, op.Task, op.OpID, op.Repos)
+	if errors.Is(err, state.ErrNoRecord) {
+		return nil // teardown already completed before the crash — idempotent no-op
+	}
+	if err != nil {
+		return fmt.Errorf("isolate: finish rm %q: %w", op.Task, err)
+	}
+	if res.Status != RemoveComplete {
+		return fmt.Errorf("isolate: finish rm %q: still %s (orphan persists) — left for retry", op.Task, res.Status)
+	}
+	return nil
+}
+
 // removeCore is the non-journaling teardown core behind Remove. It reclaims an
 // isolate's materialized worktrees under the isolate-state:<task> lock, honoring the
 // evidence-positive reclamation contract (DESIGN §7.1): a repo's
