@@ -627,7 +627,25 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (43) ✅ **this firing** — **the `internal/landstate` keystone: the durable `.wi/land/<task>.json` parked-land
+  (44) ✅ **this firing** — **the git backup-ref primitives `CreateBackupRef` + `BackupRefSHA`** (guard
+  `GIT-BACKUP-REF`; `internal/git/git.go` + `git_test.go`), the land pre-move safety anchor. `land` writes
+  `refs/wi/backup/<task>/<repo>` at the base's CURRENT sha BEFORE advancing the base via `FastForwardBaseRef`
+  (DESIGN §7.2), so the pre-land tip stays gc-reachable and `land abort`/recovery can restore it WITHOUT a
+  `git reset --hard` (§7.2 forbids that). `BackupRefSHA` reads it back, distinguishing an absent anchor (a
+  still-pending repo) from a read error — the value `land` also mirrors durably into `landstate.RepoLand.
+  BackupSHA` (unit 43). Mirrors `CreateOwnedRef`/`OwnedRefSHA` exactly. **Load-bearing namespace separation:**
+  `backupRefPrefix = refs/wi/backup/` is DELIBERATELY distinct from `ownedRefPrefix = refs/wi/owned/` —
+  DESIGN §7.1 protects backup refs from gc by keeping them OUT of the owned-marker candidate population
+  (`ListOwnedRefs` scopes to `ownedRefPrefix`), so a backup anchor is never classified reclaimable and
+  collected (which would destroy the abort restore point). The test asserts both `ListOwnedRefs` returns
+  EMPTY with a backup ref present AND the anchor lives under refs/wi/backup at the sha. Registered mutant =
+  point `backupRefPrefix` at the owned namespace → BOTH the raw-git anchor assertion AND the `ListOwnedRefs`-
+  exclusion assertion RED — pinning the separation IS the §7.1 protection. Confirmed RED→revert→`(cached)`
+  GREEN (byte-identity); full gate GREEN (only `? schema` non-ok) + gofmt clean + linux cross-build/vet clean.
+  Scope kept tight: only Create + read-back (no `DeleteBackupRef`/`ListBackupRefs` — those land test-first with
+  their `land abort`/completion + gc-protection-audit consumers; no speculative untested code).
+
+  (43) ✅ **(prior firing)** — **the `internal/landstate` keystone: the durable `.wi/land/<task>.json` parked-land
   record + phase vocabulary + codec** (guards `LANDSTATE-PERSIST` + `LANDSTATE-WIRE`; `internal/landstate/
   landstate.go` + `_test.go`, package `landstate_test`). This is the foundation the whole `land` domain stands
   on — the executor (rebase-onto-mirror + freshness-guarded update-ref) writes it, and HEAL-5's `land continue/
@@ -693,13 +711,16 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   genuinely-stuck (failed) op still surfaces (its journal survives), so doctor's value holds, but if HEAL-8 wants
   doctor to observe PRE-recovery pending ops it must add a no-recovery path; revisit at HEAL-8. Full gate GREEN
   (only `? schema` non-ok) + gofmt clean + linux cross-build/vet clean.
-  NEXT M4 unit — **the `land` domain build-out** (the major unbuilt M4 deliverable; keystone `internal/landstate`
-  is DONE as of unit 43). Build order: (a) the **`internal/land` executor** — rebase the isolate's per-repo work
-  onto the mirror base, write a **backup ref BEFORE any pointer move** (DESIGN §7.2; never `git reset --hard`),
-  advance the base via the freshness-guarded `git.FastForwardBaseRef` (SSOT detached-HEAD + update-ref ONLY,
-  DESIGN §2), and persist each repo's phase through `landstate.Store` (PhasePending → PhaseLanded / PhaseBlocked);
-  a refusal parks the record for resume. Build it test-first over the hermetic real-git harness, one repo-cell
-  unit at a time. THEN (b) the **`land` CLI command** + (c) the **`state cas`** command (DESIGN §8: ownership =
+  NEXT M4 unit — **the `land` domain build-out** (the major unbuilt M4 deliverable). Foundations now DONE:
+  the `internal/landstate` durable record (unit 43) and the git backup-ref primitives (unit 44). Build order:
+  (a) the **`internal/land` executor**, composed test-first over the hermetic real-git harness ONE repo-cell at
+  a time — the natural first sub-unit is a single-repo land `land.LandRepo` (or similar): resolve the isolate's
+  work tip, `git.CreateBackupRef` (unit 44) the base's CURRENT sha BEFORE any move, advance the base via the
+  freshness-guarded `git.FastForwardBaseRef` (SSOT detached-HEAD + update-ref ONLY, DESIGN §2; never `git reset
+  --hard`), then `landstate.Store` the phase flip (PhasePending → PhaseLanded). A non-ff / stale base / conflict
+  is a REFUSAL that parks the record at PhaseBlocked for resume (it must NOT force or rewind). Rebase-onto-mirror
+  + the `--atomic` validate-all-then-apply (merge-tree pre-check, DESIGN §8) come as later repo-cell units.
+  THEN (b) the **`land` CLI command** + (c) the **`state cas`** command (DESIGN §8: ownership =
   `internal/state`, land consumes; `--expected __ABSENT__` sentinel frozen). THEN: **HEAL-5** `land continue/
   abort/status` (parked-land resume/abort restoring `BackupSHA`, §7.2 — consumes this keystone); **HEAL-6**
   mirror-stale refusal at land (exit 6, never auto-rebase; offline reconciliation NEVER flips a phase to
@@ -2311,6 +2332,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | GIT-DIVERGED | swap the two `rev-list --left-right --count` columns in `DivergedCounts` (read ahead from `fields[1]`, behind from `fields[0]`) → `TestDivergedCountsAheadBehind` RED |
 | GIT-WORKTREE | materialize via a standalone `git clone <ssotDir> <path>` instead of `git worktree add --detach` in `AddWorktree` → the result checks out `main` (not detached) and has its own `.git` dir + object store (common-dir ≠ SSOT) → `TestAddWorktreeIsDetachedLinkedAndShared` RED on all three assertions (proves the guard verifies genuine linked-worktree sharing, not just a checkout) |
 | GIT-OWNED-REF | flip the namespace `refs/wi/`→`refs/heads/` in `ownedRef` → the marker becomes a stray branch: `refs/wi/owned/` is empty while `refs/heads/` grows a second ref → `TestOwnedRefMarksOwnershipUnderRefsWi` RED on both the "lives under refs/wi at the sha" and "no stray branch" assertions (the round-trip stays GREEN, isolating the decision-#2 namespace property; a no-op `CreateOwnedRef` additionally reddens the absent→present round-trip) |
+| GIT-BACKUP-REF (M4 land) | the land pre-move safety anchor `CreateBackupRef`/`BackupRefSHA` over `refs/wi/backup/<task>/<repo>` (DESIGN §7.2). Registered mutant = point `backupRefPrefix` at the owned namespace (`refs/wi/backup/`→`refs/wi/owned/`) → `TestBackupRefAnchorsUnderRefsWiBackup` RED on BOTH the raw-git "lives under refs/wi/backup at the sha" assertion (nothing there) AND the `ListOwnedRefs`-returns-empty assertion (the anchor is now wrongly enumerated as an owned/gc candidate) — pinning that the backup-vs-owned namespace separation IS the §7.1 gc-protection that keeps the abort restore point from being collected. Alternate: no-op `CreateBackupRef` → the absent→present round-trip (`BackupRefSHA`) RED. Hermetic real-git harness, no build tag. Confirmed RED→revert→`(cached)` GREEN + linux cross-build/vet clean |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |

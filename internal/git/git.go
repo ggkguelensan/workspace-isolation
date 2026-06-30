@@ -158,6 +158,18 @@ func ownedRef(task, repo string) string {
 	return ownedRefPrefix + task + "/" + repo
 }
 
+// backupRefPrefix is the ref namespace every land pre-move backup anchor lives under
+// (refs/wi/backup/<task>/<repo>). It is DELIBERATELY DISTINCT from ownedRefPrefix:
+// DESIGN §7.1 protects refs/wi/backup/* from gc by keeping it out of the owned-marker
+// candidate population (ListOwnedRefs scopes to ownedRefPrefix), so a backup anchor is
+// never classified as a reclaimable cell and collected — which would destroy the
+// `land abort` restore point. The single-source-of-truth posture mirrors ownedRefPrefix.
+const backupRefPrefix = "refs/wi/backup/"
+
+func backupRef(task, repo string) string {
+	return backupRefPrefix + task + "/" + repo
+}
+
 // CreateOwnedRef records wi's ownership of the (task, repo) worktree by atomically
 // creating the marker ref refs/wi/owned/<task>/<repo> at sha (a single update-ref).
 // This is the POSITIVE evidence reclamation requires (DESIGN §7.1, decision #2): a
@@ -191,6 +203,40 @@ func (g *Git) OwnedRefSHA(ctx context.Context, ssotDir, task, repo string) (sha 
 			return "", false, nil
 		}
 		return "", false, fmt.Errorf("git: read owned ref %s in %s: %w", ref, ssotDir, runErr)
+	}
+	return strings.TrimSpace(res.Stdout), true, nil
+}
+
+// CreateBackupRef captures sha in the land pre-move anchor refs/wi/backup/<task>/<repo>
+// (a single atomic update-ref). `land` writes this BEFORE advancing a base ref so the
+// pre-land tip stays gc-reachable and `land abort`/recovery can restore it WITHOUT a
+// `git reset --hard` (DESIGN §7.2). It lives in a namespace distinct from owned markers
+// so gc never treats it as a reclamation candidate (DESIGN §7.1). It is a local
+// operation. task/repo are wi-internal and already segment-validated by the caller
+// before they reach here, exactly as in CreateOwnedRef.
+func (g *Git) CreateBackupRef(ctx context.Context, ssotDir, task, repo, sha string) error {
+	ref := backupRef(task, repo)
+	if _, err := g.r.Run(ctx, ssotDir, "update-ref", ref, sha); err != nil {
+		return fmt.Errorf("git: create backup ref %s -> %s in %s: %w", ref, sha, ssotDir, err)
+	}
+	return nil
+}
+
+// BackupRefSHA reports the sha the land anchor refs/wi/backup/<task>/<repo> points at
+// and whether it exists, cleanly distinguishing a genuinely absent anchor (exists=false,
+// nil error — a still-pending repo has none) from a real read failure. `land abort`
+// reads it to find the restore point; `land status` reports it. It is a local,
+// read-only operation, mirroring OwnedRefSHA's `rev-parse --verify --quiet` contract
+// (sha + exit 0 when the ref resolves, exit 1 with no output for a valid-but-absent ref).
+func (g *Git) BackupRefSHA(ctx context.Context, ssotDir, task, repo string) (sha string, exists bool, err error) {
+	ref := backupRef(task, repo)
+	res, runErr := g.r.Run(ctx, ssotDir, "rev-parse", "--verify", "--quiet", "--end-of-options", ref)
+	if runErr != nil {
+		var ee *gitexec.ExitError
+		if errors.As(runErr, &ee) && ee.Result.ExitCode == 1 {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("git: read backup ref %s in %s: %w", ref, ssotDir, runErr)
 	}
 	return strings.TrimSpace(res.Stdout), true, nil
 }

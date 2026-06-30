@@ -506,6 +506,94 @@ func TestOwnedRefMarksOwnershipUnderRefsWi(t *testing.T) {
 	}
 }
 
+// Guard GIT-BACKUP-REF — the pre-move safety anchor land writes before any pointer
+// move (DESIGN §7.2).
+//
+// `land` advances a base ref with FastForwardBaseRef, but FIRST it captures the base's
+// current sha in a backup ref refs/wi/backup/<task>/<repo> so `land abort`/recovery can
+// restore it WITHOUT `git reset --hard` (DESIGN §7.2 forbids that). CreateBackupRef
+// writes the anchor (a single atomic update-ref); BackupRefSHA reads it back, cleanly
+// distinguishing an absent anchor (exists=false, nil error — a still-pending repo has
+// none) from a real read error. The backup record is mirrored durably in
+// landstate.RepoLand.BackupSHA; this ref additionally keeps the pre-land commit
+// gc-reachable.
+//
+// Two load-bearing properties:
+//
+//	(1) the anchor lives under refs/wi/BACKUP/* — a DISTINCT namespace from
+//	    refs/wi/owned/*. DESIGN §7.1 PROTECTS refs/wi/backup/* from gc precisely by
+//	    keeping it OUT of the owned-marker candidate population: a backup ref must NEVER
+//	    be enumerated by ListOwnedRefs (or it would be classified as a reclaimable cell
+//	    and collected, destroying the abort anchor). It is also not a branch (refs/heads
+//	    stays clean), so it leaks no stray branch into the SSOT (DESIGN §5);
+//	(2) creation is atomic and the read round-trips absent→present at the recorded sha.
+//
+// Non-vacuity: point backupRef at the OWNED namespace (refs/wi/owned/ instead of
+// refs/wi/backup/) → the raw-git "lives under refs/wi/backup at the sha" assertion RED
+// (nothing there) AND ListOwnedRefs now ENUMERATES the anchor as an owned candidate →
+// the "backup must not be an owned/gc candidate" assertion RED. This is the faithful
+// mutant because the backup-vs-owned namespace separation IS exactly the §7.1 gc-
+// protection the anchor depends on. (A no-op CreateBackupRef additionally reddens the
+// round-trip absent→present, proving the verb does real work.)
+func TestBackupRefAnchorsUnderRefsWiBackup(t *testing.T) {
+	env := testenv.New(t)
+	origin := env.SeedOrigin(t, "acme")
+	ssot := filepath.Join(env.Root, "ssot")
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	if err := g.EnsureClone(ctx, ssot, "file://"+origin, testenv.DefaultBranch); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+	baseTip := env.Git(t, ssot, "rev-parse", "refs/heads/"+testenv.DefaultBranch)
+	const task, repo = "taskx", "acme"
+
+	// Absent before: a still-pending repo has no backup anchor — read reports that
+	// cleanly, not as an error.
+	if sha, exists, err := g.BackupRefSHA(ctx, ssot, task, repo); err != nil || exists {
+		t.Fatalf("BackupRefSHA before create = (%q, %v, %v), want (\"\", false, nil)", sha, exists, err)
+	}
+
+	if err := g.CreateBackupRef(ctx, ssot, task, repo, baseTip); err != nil {
+		t.Fatalf("CreateBackupRef: %v", err)
+	}
+
+	// Present after, at the recorded sha — read back through the verb...
+	sha, exists, err := g.BackupRefSHA(ctx, ssot, task, repo)
+	if err != nil {
+		t.Fatalf("BackupRefSHA after create: %v", err)
+	}
+	if !exists || sha != baseTip {
+		t.Errorf("BackupRefSHA after create = (%q, %v), want (%q, true)", sha, exists, baseTip)
+	}
+
+	// ...and the anchor really lives under refs/wi/backup/ at that sha (raw git, not the
+	// verb under test).
+	rawBackup := env.Git(t, ssot, "for-each-ref", "--format=%(objectname)", "refs/wi/backup/"+task+"/"+repo)
+	if rawBackup != baseTip {
+		t.Errorf("refs/wi/backup/%s/%s = %q, want the pre-move base sha %q", task, repo, rawBackup, baseTip)
+	}
+
+	// The §7.1 protection: the backup anchor must NOT be classified as a reclamation
+	// candidate. ListOwnedRefs enumerates only refs/wi/owned/*, so it must return NOTHING
+	// here — a backup ref enumerated as owned would be collected, destroying the abort
+	// anchor.
+	owned, err := g.ListOwnedRefs(ctx, ssot)
+	if err != nil {
+		t.Fatalf("ListOwnedRefs: %v", err)
+	}
+	if len(owned) != 0 {
+		t.Errorf("ListOwnedRefs = %v, want empty (a backup anchor must never be an owned/gc candidate)", owned)
+	}
+
+	// The anchor is NOT a branch: refs/heads/ still holds only the base ref.
+	branches := env.Git(t, ssot, "for-each-ref", "--format=%(refname)", "refs/heads/")
+	if want := "refs/heads/" + testenv.DefaultBranch; branches != want {
+		t.Errorf("refs/heads/ = %q, want only %q (backup anchor must not leak a branch)", branches, want)
+	}
+}
+
 // Guard GIT-RECLAIM — evidence-positive worktree reclamation primitives (DESIGN §7.1, §7.2).
 //
 // `isolate rm` reclaims a worktree ONLY after proving wi owns it (the marker ref,
