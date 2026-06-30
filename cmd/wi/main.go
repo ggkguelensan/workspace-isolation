@@ -22,6 +22,15 @@ import (
 )
 
 func main() {
+	// DELIBERATELY no signal.Notify for SIGINT (decision #5, IMPLEMENTATION_PLAN §7 #5):
+	// SIGINT keeps Go's default disposition, so exit-130 is the BARE interrupt — the process
+	// dies mid-syscall with no envelope on stdout, and an agent treats a 130 with empty/truncated
+	// output as "indeterminate → re-observe," never as a structured result. Durability across an
+	// interrupt is carried by the WRITE protocol that already survives SIGKILL / power loss (atomic
+	// .wi/ writes §6.2, durable per-repo partial success §6.3, the HEAL-4 op journal + offline
+	// roll-forward, and the evidence-positive heals), NOT by a shutdown hook — a handler racing to
+	// self-report partial state would make the mid-flight claim §7.1 rejects and a second stdout
+	// writer from a signal goroutine would break the one-envelope contract (§3.1). Do not add one.
 	exitcontract.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }
 

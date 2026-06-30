@@ -224,6 +224,26 @@ starts. Only `wi version` is wired (a stub proving the pipeline shape compiles).
    any partial artifacts to the evidence-positive heals (isolate repair / gc). Guard `HEAL-CRASH-RECOVER`.
 5. **SIGINT / exit-130 coverage** — add an explicit per-long-running-command SIGINT row (clean
    partial-state flush + exit 130 + well-formed envelope) or accept the SIGKILL-sweep folding.
+   **RESOLVED 2026-06-30: accept the SIGKILL-sweep folding — NO per-command SIGINT handler in v1.**
+   exit-130 is the BARE interrupt: SIGINT keeps Go's default disposition (the process dies
+   mid-syscall with no envelope on stdout), so a 130 means exactly "the operator interrupted me; I
+   make no claim about what I'd done" and an agent treats a 130 + empty/truncated stdout as
+   "indeterminate — re-observe," never as a structured result. Durability across an interrupt is
+   already carried by the SAME mechanisms that survive SIGKILL / power loss — events that give NO
+   chance to run a handler — so a SIGINT-only graceful flush would protect a strictly weaker failure
+   mode while duplicating (and risking weakening) the real story: atomic `.wi/` writes
+   (temp→fsync→rename, HEAL-7 / §6.2 — every write is all-or-nothing, so there is no "partial state
+   to flush"), durable per-repo partial success (§6.3), the HEAL-4 op journal + offline roll-forward
+   (decision #4), and the evidence-positive heals (isolate repair / gc) that reconcile any debris. A
+   handler racing to self-report partial state is exactly the mid-flight claim the evidence-positive
+   posture (§7.1) rejects, and a second stdout writer from a signal goroutine would break the
+   one-envelope contract (§3.1). **Code implication: effectively none** — `cmd/wi/main.go` installs no
+   `signal.Notify` and threads plain `context.Background()` (confirmed); a comment there pins the
+   deliberate non-handler so a future contributor doesn't add a partial-envelope handler and silently
+   break §3.1. `contract.ExitInterrupted` (130) stays in the closed set + `severityOrder` (reachable
+   via the OS, not via any wi code path). DEFERRED to M5 revisit-only: a graceful SIGINT row becomes
+   worth reconsidering ONLY if a long-running stream/TUI command (`ports`/`hooks`) later appears.
+   *Was blocking: the doctor env-probe detector + the v1 signal posture — now unblocked.*
 6. **Go libs sign-off** — **RESOLVED 2026-06-30: zero new deps, both halves hand-rolled.**
    `WriteFileAtomic` hand-rolled (keeps the `WI_FAULT` crash-window seam in-tree for HEAL-ATOMIC-WRITE
    non-vacuity); `FileLock` hand-rolled on `syscall.Flock` (`flock_unix.go`, unix-only) rather than

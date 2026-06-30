@@ -3382,6 +3382,49 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
+- **#5 SIGINT / exit-130 coverage = accept the SIGKILL-sweep folding (NO per-command SIGINT handler) —
+  RESOLVED 2026-06-30** (the §7 #5 open decision; stamped RESOLVED in IMPLEMENTATION_PLAN.md §7 #5). Ruling:
+  v1 installs NO `signal.Notify` SIGINT handler. exit-130 is the BARE interrupt — SIGINT keeps Go's default
+  disposition (process dies mid-syscall, no envelope on stdout), so a 130 means "the operator interrupted me;
+  no claim about what I'd done," and an agent treats 130 + empty/truncated stdout as "indeterminate →
+  re-observe," never as a structured result. WHY a graceful-flush handler is the WRONG call: wi's durability is
+  a property of the WRITE protocol, not a shutdown hook — it must survive SIGKILL / power loss (which give no
+  chance to run a handler), so a SIGINT-only flush protects a strictly weaker mode while duplicating the real
+  mechanisms: atomic `.wi/` writes (temp→fsync→rename, HEAL-7 / §6.2 — each write is all-or-nothing, there is no
+  "partial state to flush"), durable per-repo partial success (§6.3), the HEAL-4 op journal + offline
+  roll-forward (#4), and the evidence-positive heals (isolate repair / gc) that reconcile debris. A handler
+  self-reporting partial state is the mid-flight claim the evidence-positive posture (§7.1) rejects, and a second
+  stdout writer from a signal goroutine would break the one-envelope contract (§3.1). Code implication:
+  effectively none — confirmed `cmd/wi/main.go` has no `signal.Notify` and threads `context.Background()`; added
+  a comment in `main()` pinning the deliberate non-handler so nobody silently adds one and breaks §3.1.
+  `contract.ExitInterrupted` (130) stays in the closed set + `severityOrder` (reachable via the OS, not via any
+  wi code path). DEFERRED to M5 revisit-only if a long-stream/TUI command (`ports`/`hooks`) later appears.
+
+- **#DOCTOR-DRIFT-KIND: three-way isolate-drift detector → error.kind mapping — RESOLVED 2026-06-30** (a
+  doctor-internal ruling, recorded ahead of the unit so a future firing adopts it without re-litigating; the
+  drift detector itself is still UNBUILT — it needs the `domain-verdicts` + `cli-seam` research the design
+  workflow's two agents lost to the session limit). Ruling: `doctor.DetectDrift(cells []isolate.Cell) []Finding`
+  is a PURE function fed the same `isolate.Inspect` output the `isolate repair` reconciler observes, REUSING
+  `isolate.Classify` exactly as DOCTOR-ORPHANS reuses `gc.Classify` — so a `--fix` dispatching to `isolate
+  repair` (HEAL-1) can never disagree with what doctor reported. It surfaces THREE recorded-cell drift classes
+  and is SCOPED to skip the two cases other owners already emit:
+  • `ClassMissingWorktree` (marker present, worktree gone) → `KindConflict` / sub-code `drift_missing_worktree` /
+    `SeverityError` / exit 4 — a surviving marker proves wi still intends the cell but its worktree is gone; the
+    `RepairRematerialize` cell, reported under the SAME kind the heal refuses with.
+  • `ClassReclaimed` + a surviving registry record (stale tombstone) → `KindPartial` / `drift_stale_record` /
+    `SeverityError` / exit 2 — durable bookkeeping debris (`RepairDropRecord`), the mildest non-ok, mirroring
+    DOCTOR-PENDING. ERROR (not WARNING) because the registry disagrees with disk.
+  • `ClassConsistent` + stage lags at `pending` → `KindConflict` / `drift_stage_lag` / **`SeverityWarning`** /
+    exit-neutral — physically correct (worktree right), only the recorded stage is behind (`RepairHealStage`);
+    severity (not kind) keeps it off the exit, like stale mirror.
+  • `ClassConsistent`+`created` (healthy) and `ClassOrphanWorktree` (worktree present, marker absent) → NO
+    finding. **The load-bearing scoping rule:** `DetectDrift` `continue`s on `ClassOrphanWorktree` so the LOUD
+    `orphan_unexplained` surface stays SINGLE-SOURCED in DOCTOR-ORPHANS (gc owns every orphan); a
+    `DOCTOR-DRIFT` non-vacuity mutant will delete that skip and assert the command's combined findings contain
+    `orphan_unexplained` exactly once. The three sub-codes are `Finding.Code` values riding existing frozen
+    kinds (`conflict`/`partial`) — NO `schema_version` bump, NO `contract.lock.json` edit. When `internal/doctor/
+    drift.go` is wired, list these three sub-codes in DESIGN §7.5's drift clause.
+
 - **#4 isolate-remove (and crash) recovery policy = roll-FORWARD — RESOLVED 2026-06-30** (the §7 #4 open
   decision, "leaning roll-forward"; stamped RESOLVED in IMPLEMENTATION_PLAN.md §7 #4). Ruling: recovery
   rolls FORWARD, never back, and the action for each interrupted op is decided per-op from its durable
