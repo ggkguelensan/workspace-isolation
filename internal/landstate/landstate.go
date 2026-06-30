@@ -76,6 +76,31 @@ type TaskLand struct {
 	Repos []RepoLand `json:"repos"`
 }
 
+// Parked reports whether this land is still parked — at least one repo has NOT
+// reached PhaseLanded, so the task awaits `land continue` (to finish the
+// blocked/pending repos) or `land abort` (to rewind the ones already landed). It
+// is the pure aggregate verdict over the durable record, the single home for
+// "is this land done?" that the land commands currently re-derive inline and
+// that `wi doctor`'s parked-land detector consumes (mapping Parked → a partial
+// finding, the same exit-2 "resumable pending op" signal the journal detector
+// gives an unfinished op).
+//
+// A record whose EVERY repo is PhaseLanded is a land that finished cleanly, kept
+// only for the abort window (#CONTINUE-DISPOSE keeps it rather than deleting on a
+// clean continue) — nothing pends, so it is NOT parked. An empty record (no repos)
+// is likewise not parked: the existential "some repo unlanded" is vacuously false,
+// which is the sensible answer (no cells ⟹ nothing to finish). The verdict keys on
+// the absence of PhaseLanded, not the presence of PhaseBlocked, so a repo left
+// PhasePending by a crash BEFORE it could block still counts as parked.
+func (r TaskLand) Parked() bool {
+	for _, rl := range r.Repos {
+		if rl.Phase != PhaseLanded {
+			return true
+		}
+	}
+	return false
+}
+
 // NewTaskLand builds a fresh parked-land record for task/opID with every repo at
 // PhasePending and no backup yet — the state land persists before moving any ref, so
 // the "all pending" starting point lives in exactly one place (mirror of
