@@ -130,7 +130,7 @@ func Run(ctx context.Context, l layout.Layout, g *git.Git, task, opID string, sp
 
 		// Fold this repo's cell into the durable record and persist before moving on, so
 		// a crash leaves the record reflecting exactly what happened (§6.3).
-		setCell(&rec, s.Name, rr.Phase, rr.BackupSHA)
+		setCell(&rec, s.Name, rr.Phase, rr.BackupSHA, rr.LandedSHA)
 		if serr := landstate.Store(landDir, rec); serr != nil {
 			return res, fmt.Errorf("land: persist record for %q after %s: %w", task, s.Name, serr)
 		}
@@ -221,13 +221,18 @@ func RunJournaled(ctx context.Context, l layout.Layout, g *git.Git, task, opID s
 	return res, nil
 }
 
-// setCell folds a repo's phase + backup anchor into the durable record in place. The
-// repo is always present (NewTaskLand created a cell for every spec).
-func setCell(rec *landstate.TaskLand, repo string, phase landstate.Phase, backup string) {
+// setCell folds a repo's phase + backup anchor + landed tip into the durable record in
+// place. The repo is always present (NewTaskLand created a cell for every spec). The
+// landed tip is persisted (not just held in the live Result) because `land abort`
+// rewinds the base from it after a crash — it is the value the exact-match guard of
+// git.RestoreBaseRef asserts the base is still at (empty for a pending/blocked repo,
+// whose base never advanced).
+func setCell(rec *landstate.TaskLand, repo string, phase landstate.Phase, backup, landed string) {
 	for i := range rec.Repos {
 		if rec.Repos[i].Repo == repo {
 			rec.Repos[i].Phase = phase
 			rec.Repos[i].BackupSHA = backup
+			rec.Repos[i].LandedSHA = landed
 			return
 		}
 	}

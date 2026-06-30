@@ -52,14 +52,19 @@ const (
 )
 
 // RepoLand is one repo's cell in a parked land: its wi-internal name, current phase,
-// and the backup ref sha captured BEFORE any pointer move (DESIGN §7.2 — `land abort`
-// restores this sha rather than reset --hard). BackupSHA is empty until the backup ref
-// is written, so a still-pending repo carries none (json:omitempty keeps it off the
-// wire until earned).
+// the backup ref sha captured BEFORE any pointer move, and the landed tip the base was
+// advanced to (DESIGN §7.2). BackupSHA is the sha `land abort` restores the base to
+// (rather than reset --hard); LandedSHA is the sha the base was fast-forwarded to on a
+// land — the value `land abort` asserts the base is STILL at before rewinding (the
+// exact-match guard of git.RestoreBaseRef), so abort refuses to clobber work
+// fast-forwarded past the landed tip since. Both are empty until earned (a still-pending
+// or blocked repo never advanced its base, so it carries no LandedSHA), and json:omitempty
+// keeps each off the wire until then.
 type RepoLand struct {
 	Repo      string `json:"repo"`
 	Phase     Phase  `json:"phase"`
 	BackupSHA string `json:"backup_sha,omitempty"`
+	LandedSHA string `json:"landed_sha,omitempty"`
 }
 
 // TaskLand is the durable parked-land record for one task. OpID ties it to the land op

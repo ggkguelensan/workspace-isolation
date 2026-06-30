@@ -31,7 +31,11 @@ import (
 //     run keeps landing past a refusal → TestRunParksAtFirstBlockedRepo RED (the later
 //     repo's base moves / it is no longer pending);
 //   - skip the per-repo landstate.Store inside the loop (the record stays all-pending)
-//     → BOTH tests RED on the durable-record assertion.
+//     → BOTH tests RED on the durable-record assertion;
+//   - drop the landed-tip threading in setCell (persist phase+backup but not LandedSHA)
+//     → TestRunLandsAllReposComplete RED on the durable LandedSHA assertion ONLY, while
+//     its in-memory rr.LandedSHA assertion stays GREEN (two-sided) — pinning that the
+//     landed tip `land abort` rewinds from is DURABLE, not merely in the live Result.
 
 // landSetup returns a Bootstrap'd layout over a hermetic env (so .wi/land exists for the
 // landstate writer), plus a Git and ctx — the land mirror of isolate_test's setup.
@@ -158,6 +162,13 @@ func TestRunLandsAllReposComplete(t *testing.T) {
 		}
 		if c.BackupSHA != baseTip[n] {
 			t.Errorf("durable %s BackupSHA = %q, want %q", n, c.BackupSHA, baseTip[n])
+		}
+		// The durable record must persist the landed tip too — the value `land abort`
+		// asserts the base is STILL at before rewinding it to BackupSHA (the exact-match
+		// guard of git.RestoreBaseRef). Distinct from the in-memory rr.LandedSHA above:
+		// it is what survives a crash for HEAL-5 to resume from.
+		if c.LandedSHA != workTip[n] {
+			t.Errorf("durable %s LandedSHA = %q, want work tip %q", n, c.LandedSHA, workTip[n])
 		}
 	}
 }

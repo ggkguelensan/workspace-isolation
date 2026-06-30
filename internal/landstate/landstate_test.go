@@ -21,25 +21,31 @@ import (
 //   LANDSTATE-PERSIST — Store/Load round-trip, fresh = all pending, missing →
 //                       ErrNoRecord, unsafe task name rejected (never written).
 //   LANDSTATE-WIRE    — the DURABLE on-disk wire is stable: the concrete JSON keys
-//                       (task/op_id/repo/phase/backup_sha) and phase values a land
-//                       written by one wi build, recovered by another, must agree on.
-//                       Asserting the literal bytes (not just a round-trip) is what
+//                       (task/op_id/repo/phase/backup_sha/landed_sha) and phase values a
+//                       land written by one wi build, recovered by another, must agree
+//                       on. Asserting the literal bytes (not just a round-trip) is what
 //                       kills a json-tag / phase-constant rename — a round-trip alone
 //                       is VACUOUS because Marshal+Unmarshal share the tag (the
 //                       LOCK-HOLDER lesson, PROGRESS).
 //
-// Non-vacuity mutant (registered): rename the `backup_sha` json tag (→ `backupSha`)
-// OR change PhaseBlocked's value ("blocked"→"blocked-MUT"). TestTaskLandRoundTrips
-// STAYS GREEN (Marshal/Unmarshal stay symmetric), but TestStoredWireIsStable RED (the
-// literal "backup_sha"/"blocked" is absent from the bytes) — pinning the durable wire,
-// surgically, against the rename a round-trip cannot see.
+// Non-vacuity mutant (registered): rename the `backup_sha` (or `landed_sha`) json tag
+// (→ `backupSha`) OR change PhaseBlocked's value ("blocked"→"blocked-MUT").
+// TestTaskLandRoundTrips STAYS GREEN (Marshal/Unmarshal stay symmetric), but
+// TestStoredWireIsStable RED (the literal "backup_sha"/"landed_sha"/"blocked" is absent
+// from the bytes) — pinning the durable wire, surgically, against the rename a round-trip
+// cannot see.
 
 func newRec() landstate.TaskLand {
-	// A mixed record: a still-pending repo (no backup) and a blocked repo carrying its
-	// pre-move backup sha — the shape `land status` reports mid-park.
-	rec := landstate.NewTaskLand("task-x", "op_abc_def", []string{"api", "web"})
+	// A mixed record exercising all three phases: a still-pending repo (no shas), a
+	// blocked repo carrying its pre-move backup sha, and a landed repo carrying BOTH its
+	// backup anchor and the landed tip the base advanced to — the shape `land status`
+	// reports mid-park and `land abort` rewinds from.
+	rec := landstate.NewTaskLand("task-x", "op_abc_def", []string{"api", "web", "db"})
 	rec.Repos[1].Phase = landstate.PhaseBlocked
 	rec.Repos[1].BackupSHA = "0123456789abcdef0123456789abcdef01234567"
+	rec.Repos[2].Phase = landstate.PhaseLanded
+	rec.Repos[2].BackupSHA = "89abcdef0123456789abcdef0123456789abcdef"
+	rec.Repos[2].LandedSHA = "fedcba9876543210fedcba9876543210fedcba98"
 	return rec
 }
 
@@ -104,15 +110,19 @@ func TestStoredWireIsStable(t *testing.T) {
 	}
 	got := string(data)
 	// The closed durable wire: every key another wi build reads back by, plus the
-	// concrete blocked-phase value and the backup sha captured before the pointer move.
+	// concrete blocked-phase value, the backup sha captured before the pointer move, and
+	// the landed tip a landed repo records (the abort exact-match anchor).
 	for _, want := range []string{
 		`"task"`,
 		`"op_id"`,
 		`"repo"`,
 		`"phase"`,
 		`"backup_sha"`,
+		`"landed_sha"`,
 		`"blocked"`,
+		`"landed"`,
 		"0123456789abcdef0123456789abcdef01234567",
+		"fedcba9876543210fedcba9876543210fedcba98",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("stored record missing durable wire token %s\nin: %s", want, got)
