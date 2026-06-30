@@ -2,6 +2,7 @@ package land
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/ggkguelensan/workspace-isolation/internal/git"
@@ -135,4 +136,49 @@ func Continue(ctx context.Context, l layout.Layout, g *git.Git, task, opID strin
 	// parked for a further continue/abort. The per-repo Store above already wrote every
 	// change, so the durable record is current; no final write is needed.
 	return res, nil
+}
+
+// FinishLand is the recovery Finisher core for a rolled-forward land op (HEAL-5, DESIGN
+// §7.4) — the land mirror of isolate.FinishRemove. The offline executor (via recovery, which
+// resolves each repo's base from the manifest because the durable record stores shas, not
+// base names) injects it for a land journal left at `committed`: a `wi land` that DIED
+// mid-run, leaving a landstate record reflecting exactly the repos landed before the crash.
+//
+// It re-runs the NON-journaling Continue core — NOT Run: Continue LOADS the record and carries
+// every already-PhaseLanded cell through untouched (preserving the backup anchor `land abort`
+// rewinds from), re-attempting only the pending/blocked cells; a fresh Run would overwrite the
+// record all-pending and re-anchor a new backup over an already-advanced base, corrupting the
+// abort restore point. It journals NOTHING — the executor owns every journal mutation during
+// recovery, so re-journaling here would double-write (DESIGN §7.4).
+//
+// The return value answers the executor's only question — "did the durable effect complete?":
+//
+//   - StatusLanded OR a residual StatusBlocked → nil. THE RULING (land DIVERGES from
+//     isolate.FinishRemove, which errors on a still-blocked orphan): a land block is a
+//     non-fast-forward that a BLIND re-run cannot resolve (it needs a rebase, HEAL-6), so
+//     returning an error would pin a futile retry forever. The block's full state is durable
+//     in the landstate record; `land continue`/`land abort` resume from THAT, not the journal
+//     — so a recovered land is "done" the moment Continue completes, whether or not every repo
+//     landed. (FinishRemove errors on a still-blocked orphan because an orphan CAN later
+//     resolve and a re-run reclaims it — a land block cannot self-resolve; the same asymmetry
+//     RunJournaled records when it self-cleans the journal on a parked block.)
+//   - landstate.ErrNoRecord → nil: the land was torn down (a completed `land abort`) or
+//     otherwise gone before the crash — idempotent no-op success, nothing left to roll forward
+//     (mirrors FinishRemove's ErrNoRecord → nil).
+//   - any other fault (a held lock, an unwritable record, an unknown base) → error: surfaced
+//     so the executor LEAVES the journal for the next offline startup to retry.
+//
+// Guard HEAL-FINISH-LAND.
+func FinishLand(ctx context.Context, l layout.Layout, g *git.Git, task, opID string, specs []RepoSpec) error {
+	_, err := Continue(ctx, l, g, task, opID, specs)
+	if errors.Is(err, landstate.ErrNoRecord) {
+		return nil // land completed / torn down before the crash — idempotent no-op
+	}
+	if err != nil {
+		return fmt.Errorf("land: finish land %q: %w", task, err)
+	}
+	// A clean Continue — StatusLanded OR a residual StatusBlocked — both roll forward: see THE
+	// RULING above. We deliberately ignore the returned Status; a non-ff block is "done" for
+	// roll-forward, not a retriable fault.
+	return nil
 }
