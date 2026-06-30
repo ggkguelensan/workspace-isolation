@@ -627,7 +627,47 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (44) ✅ **this firing** — **the git backup-ref primitives `CreateBackupRef` + `BackupRefSHA`** (guard
+  (45) ✅ **this firing** — **the `internal/land` executor's first repo-cell: `land.LandRepo`** (guard
+  `LAND-REPO-FF`; `internal/land/land.go` + `land_test.go`, package `land_test`). This is the irreducible
+  single-repo step the per-task land orchestrator composes once per repo — pure git-ref motion over the SSOT
+  clone, no LLM, no network (DESIGN §1, §2, §5, §7.2). `LandRepo(ctx, g, ssotDir, worktreePath, task, repo,
+  base) (RepoLandOutcome, error)` does exactly three ordered steps: (1) resolve the worktree's HEAD = the
+  agent's **work tip**; (2) `g.CreateBackupRef` (unit 44) the base's CURRENT tip under `refs/wi/backup` BEFORE
+  any pointer move (DESIGN §7.2 — the anchor `land abort` restores, never `git reset --hard`); (3) advance the
+  base via `g.FastForwardBaseRef` (unit's SOLE base-mutation path, ff-ONLY, detached-HEAD + update-ref, DESIGN
+  §5). A true ff → `RepoLandOutcome{Phase: PhaseLanded, LandedSHA: workTip, BackupSHA: oldBaseTip}`. A
+  **non-fast-forward is a clean REFUSAL, not an error** (`errors.As` on `*git.NonFastForwardError`): the outcome
+  parks at `PhaseBlocked`, `LandedSHA` empty, the base **left exactly untouched** (never forced/rewound), and the
+  returned error is **nil** so the orchestrator records "blocked, resume later" — the non-nil error is reserved
+  for genuine infra faults (unresolvable ref, failed anchor/update). **Scope kept tight (cell, not orchestrator):**
+  this is git-level only — it does NOT `landstate.Store` (the orchestrator owns the durable record + the
+  isolate-state:<task> lock, DESIGN §6.1), and rebase-onto-mirror + the `--atomic` validate-all merge-tree
+  pre-check (DESIGN §8) are later repo-cell units. **Two fitnesses over the hermetic real-git harness:**
+  `TestLandRepoAdvancesBaseToWorkTip` (happy path: commit work in the worktree → assert base ref advanced to the
+  work tip via raw git, backup anchor holds the OLD base tip, Phase=Landed) and `TestLandRepoRefusesNonFastForward`
+  (a competing land moves the base to a DIVERGENT commit via a 2nd worktree + update-ref → assert err=nil,
+  Phase=Blocked, LandedSHA="", base UNCHANGED at the divergent tip). **Two registered mutants, both run RED→revert
+  →`(cached)` GREEN (byte-identity):** primary = skip the `FastForwardBaseRef` call (claim Landed without moving)
+  → BOTH tests RED (happy: base not advanced; refusal: never blocked); alternate = on `NonFastForwardError` report
+  `PhaseLanded`+`LandedSHA` → ONLY the refusal test RED (isolates the refusal-mapping safety property; happy stays
+  GREEN since a true ff never reaches that branch). Full gate GREEN (only `? schema` non-ok) + gofmt clean + linux
+  cross-build/vet clean.
+  NEXT M4 unit — **the `land` domain build-out, continued.** Repo-cell foundation now DONE: `land.LandRepo` (this
+  unit) over the `internal/landstate` record (unit 43) + git backup-ref primitives (unit 44). Build order from
+  here: (a-cont.) the **per-task land orchestrator** — compose `LandRepo` across a task's repos test-first: take
+  the isolate-state:<task> lock (DESIGN §6.1), `landstate.NewTaskLand`/`Store` the all-pending record, then for
+  each repo run `LandRepo` and fold its `RepoLandOutcome` into the durable `landstate.RepoLand` cell (flipping
+  `Phase` + recording `BackupSHA`), parking at the first `PhaseBlocked` for `land continue` resume. The `--atomic`
+  validate-all-then-apply (merge-tree pre-check, DESIGN §8) + rebase-onto-mirror are the repo-cell units layered
+  in here. THEN (b) the **`land` CLI command** projecting the orchestrator result onto the envelope; (c) the
+  **`state cas`** command (DESIGN §8: ownership = `internal/state`, land consumes; `--expected __ABSENT__`
+  sentinel frozen). THEN **HEAL-5** `land continue/abort/status` (resume/abort restoring `BackupSHA`, §7.2);
+  **HEAL-6** mirror-stale refusal at land (exit 6, never auto-rebase; offline reconciliation NEVER flips a phase
+  to `landed`); **HEAL-7** atomic `.wi/` writes audit; **HEAL-8** `wi doctor`/`check` + bounded `--fix` (LAST).
+  **DEFERRED (not next):** HEAL-GC-NO-LIVE-LOSS **case (iii)** — needs a journaled discard/reset verb that does
+  not exist (journal kinds = `isolate_new`/`isolate_rm`/`land`); do NOT fake with a vacuous test (#GC-AHEAD-V0).
+
+  (44) ✅ **(prior firing)** — **the git backup-ref primitives `CreateBackupRef` + `BackupRefSHA`** (guard
   `GIT-BACKUP-REF`; `internal/git/git.go` + `git_test.go`), the land pre-move safety anchor. `land` writes
   `refs/wi/backup/<task>/<repo>` at the base's CURRENT sha BEFORE advancing the base via `FastForwardBaseRef`
   (DESIGN §7.2), so the pre-land tip stays gc-reachable and `land abort`/recovery can restore it WITHOUT a
@@ -2333,6 +2373,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | GIT-WORKTREE | materialize via a standalone `git clone <ssotDir> <path>` instead of `git worktree add --detach` in `AddWorktree` → the result checks out `main` (not detached) and has its own `.git` dir + object store (common-dir ≠ SSOT) → `TestAddWorktreeIsDetachedLinkedAndShared` RED on all three assertions (proves the guard verifies genuine linked-worktree sharing, not just a checkout) |
 | GIT-OWNED-REF | flip the namespace `refs/wi/`→`refs/heads/` in `ownedRef` → the marker becomes a stray branch: `refs/wi/owned/` is empty while `refs/heads/` grows a second ref → `TestOwnedRefMarksOwnershipUnderRefsWi` RED on both the "lives under refs/wi at the sha" and "no stray branch" assertions (the round-trip stays GREEN, isolating the decision-#2 namespace property; a no-op `CreateOwnedRef` additionally reddens the absent→present round-trip) |
 | GIT-BACKUP-REF (M4 land) | the land pre-move safety anchor `CreateBackupRef`/`BackupRefSHA` over `refs/wi/backup/<task>/<repo>` (DESIGN §7.2). Registered mutant = point `backupRefPrefix` at the owned namespace (`refs/wi/backup/`→`refs/wi/owned/`) → `TestBackupRefAnchorsUnderRefsWiBackup` RED on BOTH the raw-git "lives under refs/wi/backup at the sha" assertion (nothing there) AND the `ListOwnedRefs`-returns-empty assertion (the anchor is now wrongly enumerated as an owned/gc candidate) — pinning that the backup-vs-owned namespace separation IS the §7.1 gc-protection that keeps the abort restore point from being collected. Alternate: no-op `CreateBackupRef` → the absent→present round-trip (`BackupRefSHA`) RED. Hermetic real-git harness, no build tag. Confirmed RED→revert→`(cached)` GREEN + linux cross-build/vet clean |
+| LAND-REPO-FF (M4 land) | the `internal/land` executor's single repo-cell `land.LandRepo`: anchor the base's current tip via `CreateBackupRef`, then `FastForwardBaseRef` the base to the worktree's HEAD (the work tip), mapping a `*git.NonFastForwardError` to a clean `PhaseBlocked` refusal (err=nil, base untouched) vs `PhaseLanded` on a true ff (DESIGN §5, §7.2). Primary mutant = skip the `FastForwardBaseRef` call (claim `PhaseLanded`+`LandedSHA` without moving the base) → BOTH `TestLandRepoAdvancesBaseToWorkTip` (base ref not advanced to the work tip) AND `TestLandRepoRefusesNonFastForward` (no error → falls through to landed, never blocked) RED. Alternate = on `NonFastForwardError` set `PhaseLanded`+`LandedSHA` instead of `PhaseBlocked` → ONLY `TestLandRepoRefusesNonFastForward` RED (isolates the refusal-mapping safety property; happy stays GREEN — a true ff never reaches that branch). Alternate = no-op `CreateBackupRef` → the happy-path backup-anchor assertion RED. Hermetic real-git harness, no build tag. Confirmed RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |
