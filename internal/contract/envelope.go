@@ -31,6 +31,7 @@ type Envelope struct {
 	Planned []PlanItem    `json:"planned,omitempty"`
 	Blocked []BlockItem   `json:"blocked,omitempty"`
 	Help    *HelpBlock    `json:"help,omitempty"`
+	Locks   []LockInfo    `json:"locks,omitempty"`
 
 	// Error is null on success and MUST NOT carry omitempty — the null is contractual.
 	Error *Error `json:"error"`
@@ -135,6 +136,34 @@ type HelpCommand struct {
 	Name     string `json:"name"`
 	Synopsis string `json:"synopsis"`
 	Usage    string `json:"usage"`
+}
+
+// LockInfo is one row of the `wi lock ls` inventory: a lock present in the project's
+// locks dir, its read-only break-safety assessment, and the identity of its holder when
+// known (DESIGN §7.3 / §7.4). It is an additive, omitempty block folded in at M4 — nil on
+// every command that is not a lock inventory (lock ls / doctor). The four booleans are the
+// machine-branchable verdict and are ALWAYS present (no omitempty) so an agent can index
+// them blind; Reason is a human diagnostic an agent never branches on. Safe is the
+// conjunction the heal layer gates on: true ONLY when the holder is proven dead on a
+// flock-trustworthy filesystem (the other three booleans expose why).
+type LockInfo struct {
+	Key           string      `json:"key"`
+	Safe          bool        `json:"safe"`
+	FSTrustworthy bool        `json:"fs_trustworthy"`
+	HolderKnown   bool        `json:"holder_known"`
+	ProvenDead    bool        `json:"proven_dead"`
+	Reason        string      `json:"reason"`
+	Holder        *LockHolder `json:"holder,omitempty"`
+}
+
+// LockHolder is the identity recorded in a lock body: the process that took the lock.
+// It is present (non-nil) on a LockInfo exactly when holder_known is true — a body-less
+// or unparseable lock has no holder identity and is conservatively never breakable.
+type LockHolder struct {
+	PID    int    `json:"pid"`
+	Host   string `json:"host"`
+	BootID string `json:"boot_id"`
+	OpID   string `json:"op_id"`
 }
 
 // PlanItem is a single planned action surfaced under --dry-run.

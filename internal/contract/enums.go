@@ -8,7 +8,11 @@ package contract
 // SchemaVersion is the wire-contract version embedded in every envelope.
 // Bump (minor for additive, major for breaking) on any envelope shape change;
 // the contract.lock.json drift guard fails CI if the shape moves without it.
-const SchemaVersion = "1.0"
+//
+// 1.1 (M4, additive): folded in the `locks` block (the `wi lock ls` inventory) —
+// a new optional, omitempty block; v0 output is unchanged (the block is nil on
+// every M0–M3 command), so consumers pinned to 1.0 shapes keep parsing.
+const SchemaVersion = "1.1"
 
 // Action is the closed set of mutation outcomes reported in Envelope.Action.
 type Action string

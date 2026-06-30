@@ -181,19 +181,37 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   ./...`/`go test ./...` all GREEN (24 packages). This completes the read-only + action lock-self-heal
   PRIMITIVES (AssessBreak → List → Break) entirely inside `internal/lock` — the MVP wire contract is still
   100% frozen (no `internal/contract` touch yet).
-  NEXT M4 unit — the CLI surface for the lock-self-heal primitives (`lock ls` + `lock break`), the FIRST M4
-  step that crosses `internal/contract`. `lock ls` needs (i) a new additive Envelope payload carrying the lock
-  list (a `[]LockInfo{key, holder pid/host/op_id, safe, reason}` block, omitempty, following the
-  Resolve/Planned/Blocked/Help precedent) + a **SchemaVersion bump 1.0 → 1.1 (additive minor)** + the schema
-  kept in lockstep (`schema/envelope.schema.json` / `schema.EnvelopeSchema`) + a `contract.lock.json`
-  fingerprint regen (`WI_UPDATE_CONTRACT_LOCK=1`); (ii) a `Result` field + `assemble.go` wiring; (iii) a
-  `cmd_lock_ls.go` handler calling `lock.List(layout.LocksDir())` and projecting it (read-only, `ActionRead`);
-  (iv) a `"lock ls"` row in `BuildRegistry` + the help table (`help_registry_sync_test` enforces they match).
-  `lock break` (ACTION) then calls `lock.Break`, exits 0 on a safe break, exit 6 lock_held otherwise.
-  **FLAG for the owner:** this is the first wire-contract change since M0 froze it — fully additive (new
-  optional block + minor version bump, anticipated by the envelope/schema comments), but it MOVES THE SCHEMA.
-  The owner may prefer to hold here, since the MVP and all lock-heal primitives are green and the CLI surface
-  for them is the first thing that touches the frozen contract.
+  (16) ✅ **this firing** — the additive `locks` wire block (guard `SHAPE-LOCKS-BLOCK`,
+  `internal/contract/locks_test.go`), the **FIRST wire-contract change since M0 froze the envelope**. Added
+  `contract.LockInfo{key, safe, fs_trustworthy, holder_known, proven_dead, reason, holder?}` +
+  `contract.LockHolder{pid, host, boot_id, op_id}`, an `Envelope.Locks []LockInfo` omitempty block declared
+  after `help`/before `error` (the Resolve/Planned/Blocked/Help additive-block precedent), and **bumped
+  `SchemaVersion` 1.0 → 1.1 (additive minor)**. The four LockInfo booleans are always-present (no omitempty,
+  agents index blind); `holder` is a nested pointer present iff `holder_known`; `reason` is a human diagnostic
+  agents never branch on. Kept the published schema in lockstep — `schema/envelope.schema.json`: `const`
+  1.0→1.1, new `locks` property (additionalProperties:false demanded it), new `lockInfo`/`lockHolder` `$defs`,
+  reserved-block note updated — and regenerated `testdata/contract.lock.json` via `WI_UPDATE_CONTRACT_LOCK=1`
+  (new schema_sha + struct_shape with the `locks` block). Test-first RED→GREEN: the dedicated
+  `SHAPE-LOCKS-BLOCK` fitness froze the locks-bearing envelope's golden bytes (field set/order, holder-present
+  AND body-less-holder-omitted rows in one golden) + the omitempty invariant; the existing `SHAPE-FINGERPRINT`
+  tripwire (`TestContractFrozen`) reddened on the un-regenerated shape/version/schema, proving the guard
+  catches the move; `TestSchemaAcceptsGolden` now validates the `goldenLocks` envelope against the published
+  schema (exercising the new defs); the reject-corpus versions were bumped 1.0→1.1 so each case is still
+  rejected for its NAMED defect, not the version. Mutant = drop `,omitempty` from `Envelope.Locks` →
+  `"locks":null` on every envelope → `TestEnvelopeLocksOmittedWhenNil` + all 3 goldens + field-order + the
+  fingerprint all RED (decisive multi-angle non-vacuity); reverted to green. Caught + fixed an over-loose
+  test assertion mid-RED (`strings.Contains(b,"holder")` matched the `holder_known` substring; switched to a
+  decoded key-set check). `gofmt`/`go vet`/`go build ./...`/`go test ./...` all GREEN (24 packages). The v0
+  (M0–M3) wire output is UNCHANGED — the block is nil on every MVP command, so a 1.0-pinned consumer keeps
+  parsing; this is a clean additive minor.
+  NEXT M4 unit — the CLI handler half of `lock ls` now that the wire block exists: (i) a `Result.Locks
+  []contract.LockInfo` field + `assemble.go` mapping `lock.List(layout.LocksDir())` → the block (project each
+  `LockStatus`: Key.String()→key, Decision.{Safe,FSTrustworthy,HolderKnown,ProvenDead,Reason}→bools/reason,
+  Holder→`*LockHolder` iff HolderKnown); (ii) a `cmd_lock_ls.go` read-only handler (`ActionRead`, takes the
+  project-registry lock? — no: read-only, NO flock, just enumerate); (iii) a `"lock ls"` row in
+  `BuildRegistry` + the help table (`HELP-REGISTRY-SYNC` enforces registry⇔help parity). Then `lock break`
+  (ACTION) calls `lock.Break`, exit 0 on a safe break / exit 6 lock_held otherwise. The contract no longer
+  needs to move for these (the block + version are in).
   AFTER that: wiring auto-break into `Acquire`'s `*HeldError` path is DEFERRED as a deliberate judgment call —
   on a trustworthy local fs an `EWOULDBLOCK` from `TryLock` means the holder's flock is LIVE (the kernel
   released it if the holder had died), so a silent auto-break there would risk stealing a live peer's lock;

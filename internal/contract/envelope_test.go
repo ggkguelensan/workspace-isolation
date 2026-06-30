@@ -18,9 +18,9 @@ import (
 // TestEnvelopeErrorAlwaysPresent / TestEnvelopeReposAlwaysArray RED.
 // TestFieldOrderCheckerIsNonVacuous proves the order extractor detects a reorder.
 
-const goldenSuccess = `{"schema_version":"1.0","capabilities":["help-json","resolve-block","dry-run","partial-success"],"op_id":"op_test","command":"isolate new","ok":true,"action":"created","dry_run":false,"repos":[],"warnings":[],"next":[],"error":null}`
+const goldenSuccess = `{"schema_version":"1.1","capabilities":["help-json","resolve-block","dry-run","partial-success"],"op_id":"op_test","command":"isolate new","ok":true,"action":"created","dry_run":false,"repos":[],"warnings":[],"next":[],"error":null}`
 
-const goldenError = `{"schema_version":"1.0","capabilities":["help-json"],"op_id":"op_test","command":"isolate new","ok":false,"action":"noop","dry_run":false,"repos":[],"warnings":[],"next":[],"error":{"kind":"already_exists","message":"isolate exists"}}`
+const goldenError = `{"schema_version":"1.1","capabilities":["help-json"],"op_id":"op_test","command":"isolate new","ok":false,"action":"noop","dry_run":false,"repos":[],"warnings":[],"next":[],"error":{"kind":"already_exists","message":"isolate exists"}}`
 
 // goldenHelp is the `wi help sync` shape: a success envelope whose additive `help` block
 // (decision #HB) carries the topic/synopsis/usage, with the model's runnable follow-ups
@@ -29,7 +29,7 @@ const goldenError = `{"schema_version":"1.0","capabilities":["help-json"],"op_id
 // The angle brackets in next[] marshal HTML-escaped (</>) — the same compact
 // json.Marshal path Emit uses — which JSON consumers unescape transparently; this golden
 // freezes that honest wire form.
-const goldenHelp = `{"schema_version":"1.0","capabilities":["help-json"],"op_id":"op_test","command":"help","ok":true,"action":"read","dry_run":false,"repos":[],"warnings":[],"next":["wi isolate new \u003ctask\u003e \u003crepo\u003e…"],"help":{"topic":"sync","synopsis":"fetch every registered repo into its local mirror","usage":"wi sync"},"error":null}`
+const goldenHelp = `{"schema_version":"1.1","capabilities":["help-json"],"op_id":"op_test","command":"help","ok":true,"action":"read","dry_run":false,"repos":[],"warnings":[],"next":["wi isolate new \u003ctask\u003e \u003crepo\u003e…"],"help":{"topic":"sync","synopsis":"fetch every registered repo into its local mirror","usage":"wi sync"},"error":null}`
 
 func successEnvelope() Envelope {
 	return Envelope{

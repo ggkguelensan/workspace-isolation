@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ggkguelensan/workspace-isolation/schema/envelope.schema.json",
   "title": "wi envelope",
-  "description": "The single wire type every wi command emits, exactly one per invocation. This schema is the SOURCE OF TRUTH for envelope shape; the Go contract.Envelope struct is built to satisfy it and kept in lockstep by the SHAPE-FINGERPRINT tripwire. Reserved additive blocks (land_state/ports/hooks/tethers) are intentionally NOT declared here; they are added to schema AND struct together at their milestone as a minor version bump, so this schema stays an exact mirror of the current struct.",
+  "description": "The single wire type every wi command emits, exactly one per invocation. This schema is the SOURCE OF TRUTH for envelope shape; the Go contract.Envelope struct is built to satisfy it and kept in lockstep by the SHAPE-FINGERPRINT tripwire. The `locks` block was folded in at M4 (v1.1, additive). Remaining reserved additive blocks (land_state/ports/hooks/tethers) are intentionally NOT declared here; they are added to schema AND struct together at their milestone as a minor version bump, so this schema stays an exact mirror of the current struct.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -20,8 +20,8 @@
   ],
   "properties": {
     "schema_version": {
-      "description": "Wire-contract version this envelope conforms to. const because this document describes exactly v1.0; a bump ships a new schema.",
-      "const": "1.0"
+      "description": "Wire-contract version this envelope conforms to. const because this document describes exactly v1.1; a bump ships a new schema.",
+      "const": "1.1"
     },
     "capabilities": {
       "type": "array",
@@ -63,7 +63,11 @@
       "type": "array",
       "items": { "$ref": "#/$defs/blockItem" }
     },
-    "help": { "$ref": "#/$defs/helpBlock" }
+    "help": { "$ref": "#/$defs/helpBlock" },
+    "locks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/lockInfo" }
+    }
   },
   "$defs": {
     "action": {
@@ -209,6 +213,31 @@
         "name": { "type": "string" },
         "synopsis": { "type": "string" },
         "usage": { "type": "string" }
+      }
+    },
+    "lockInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "safe", "fs_trustworthy", "holder_known", "proven_dead", "reason"],
+      "properties": {
+        "key": { "type": "string" },
+        "safe": { "type": "boolean" },
+        "fs_trustworthy": { "type": "boolean" },
+        "holder_known": { "type": "boolean" },
+        "proven_dead": { "type": "boolean" },
+        "reason": { "type": "string" },
+        "holder": { "$ref": "#/$defs/lockHolder" }
+      }
+    },
+    "lockHolder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "host", "boot_id", "op_id"],
+      "properties": {
+        "pid": { "type": "integer" },
+        "host": { "type": "string" },
+        "boot_id": { "type": "string" },
+        "op_id": { "type": "string" }
       }
     }
   }

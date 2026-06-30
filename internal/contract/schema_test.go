@@ -56,6 +56,7 @@ func TestSchemaAcceptsGolden(t *testing.T) {
 		"success": goldenSuccess,
 		"error":   goldenError,
 		"help":    goldenHelp,
+		"locks":   goldenLocks,
 	} {
 		if err := validateInstance(t, sch, env); err != nil {
 			t.Errorf("golden %s envelope must validate against the schema, got: %v", name, err)
@@ -67,19 +68,19 @@ func TestSchemaRejectsInvalid(t *testing.T) {
 	sch := compileEnvelopeSchema(t)
 	cases := map[string]string{
 		// extra unknown top-level key — only rejected if additionalProperties:false holds
-		"unknown top-level key": `{"schema_version":"1.0","capabilities":[],"op_id":"op_test","command":"x","ok":true,"action":"created","dry_run":false,"repos":[],"warnings":[],"next":[],"error":null,"bogus":1}`,
+		"unknown top-level key": `{"schema_version":"1.1","capabilities":[],"op_id":"op_test","command":"x","ok":true,"action":"created","dry_run":false,"repos":[],"warnings":[],"next":[],"error":null,"bogus":1}`,
 		// "error" key omitted — only rejected if "error" is in required
-		"missing error key": `{"schema_version":"1.0","capabilities":[],"op_id":"op_test","command":"x","ok":true,"action":"created","dry_run":false,"repos":[],"warnings":[],"next":[]}`,
+		"missing error key": `{"schema_version":"1.1","capabilities":[],"op_id":"op_test","command":"x","ok":true,"action":"created","dry_run":false,"repos":[],"warnings":[],"next":[]}`,
 		// action outside the closed enum
-		"unknown action": `{"schema_version":"1.0","capabilities":[],"op_id":"op_test","command":"x","ok":true,"action":"frobnicate","dry_run":false,"repos":[],"warnings":[],"next":[],"error":null}`,
+		"unknown action": `{"schema_version":"1.1","capabilities":[],"op_id":"op_test","command":"x","ok":true,"action":"frobnicate","dry_run":false,"repos":[],"warnings":[],"next":[],"error":null}`,
 		// error.kind outside the closed enum
-		"unknown error kind": `{"schema_version":"1.0","capabilities":[],"op_id":"op_test","command":"x","ok":false,"action":"noop","dry_run":false,"repos":[],"warnings":[],"next":[],"error":{"kind":"kaboom","message":"x"}}`,
+		"unknown error kind": `{"schema_version":"1.1","capabilities":[],"op_id":"op_test","command":"x","ok":false,"action":"noop","dry_run":false,"repos":[],"warnings":[],"next":[],"error":{"kind":"kaboom","message":"x"}}`,
 		// warning.code outside the closed vocab
-		"unknown warning code": `{"schema_version":"1.0","capabilities":[],"op_id":"op_test","command":"x","ok":true,"action":"created","dry_run":false,"repos":[],"warnings":[{"code":"made_up","message":"x"}],"next":[],"error":null}`,
+		"unknown warning code": `{"schema_version":"1.1","capabilities":[],"op_id":"op_test","command":"x","ok":true,"action":"created","dry_run":false,"repos":[],"warnings":[{"code":"made_up","message":"x"}],"next":[],"error":null}`,
 		// wrong schema_version (const "1.0")
 		"wrong schema_version": `{"schema_version":"9.9","capabilities":[],"op_id":"op_test","command":"x","ok":true,"action":"created","dry_run":false,"repos":[],"warnings":[],"next":[],"error":null}`,
 		// repos as null instead of an array
-		"repos null": `{"schema_version":"1.0","capabilities":[],"op_id":"op_test","command":"x","ok":true,"action":"created","dry_run":false,"repos":null,"warnings":[],"next":[],"error":null}`,
+		"repos null": `{"schema_version":"1.1","capabilities":[],"op_id":"op_test","command":"x","ok":true,"action":"created","dry_run":false,"repos":null,"warnings":[],"next":[],"error":null}`,
 	}
 	for name, env := range cases {
 		if err := validateInstance(t, sch, env); err == nil {
