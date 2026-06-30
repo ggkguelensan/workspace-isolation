@@ -580,6 +580,53 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   negative fitnesses (PLAN 123-125): no reclaim of reflog-only/equal-to-base work; no resurrection of a
   completed-then-deleted isolate; HEAL-4-reset + HEAL-6-gc composition cannot prune a discarded sha.
 
+  (30) ✅ **this firing** — `wi gc [--dry-run]` CLI handler (guard `CMD-GC`, `internal/cli/cmd_gc.go` +
+  `_test`), HEAL-2 sub-unit (c) — the command that wires the gc sweep to the envelope contract, COMPLETING
+  HEAL-2's Classify→Inspect→Collect→CLI spine. plan/act split on the `--dry-run` context seam (mirror of the
+  `isolate repair` handler): `--dry-run` → `gc.Inspect` → `planned[]` (reclaimable) + `blocked[]`
+  (blocked_work/orphan), action `read`, NO top-level error (exit 0, SHAPE-DRYRUN-EXIT0), zero mutation; the
+  act path → `gc.Collect` → per-cell outcomes projected onto `repos[]`, refusal `*CommandError` on any block.
+  Wired into `BuildRegistry` (`"gc"`) + the `internal/help` command table (HELP-REGISTRY-SYNC stays green:
+  the two surfaces now both carry gc). **DECISIONS RECORDED this unit:**
+  • **#GC-ID (composite cell identity)** — gc is the one WORKSPACE-WIDE verb, so a row spans multiple tasks,
+    but the frozen `repos[]`/`planned[]`/`blocked[]` entries key on a single `repo` string (no task field, and
+    adding one would move the frozen envelope shape → schema bump). So each cell is identified by the composite
+    `"<task>/<repo>"` projected into that free-text field. Wire shape UNTOUCHED (no schema bump); every row
+    unambiguous. `internal/contract` stays the sole owner of the wire enums — gc adds none.
+  • **#GC-EXIT (refusal kind reflects the actionable cause)** — a `blocked_work`/`orphan`/per-cell-fault block
+    is a **conflict (exit 4)**: deliberate intervention required. A sweep blocked ONLY because a task is busy
+    (its lock is held by an in-flight op) is **lock_held (exit 6)**: transient retry-later contention, a
+    materially different recovery signal. Conflict DOMINATES a mix (an orphan does not become transient just
+    because another task is also busy). This refines the unit-29 NEXT pointer's loose "exit 6 / nonzero on any
+    block" into the precise two-bucket rule.
+  • **headline Action = noop on the act path** (mirror of decision #RP) — a sweep has no single verb in the
+    closed Action enum; its heterogeneous per-cell effects (reclaim→`removed`, block→`noop`) are authoritative
+    in `repos[].action`. The reclaimable cell projects to `contract.ActionRemoved` (no `ActionReclaimed` exists;
+    `removed` is the honest verb, matching `isolate rm`).
+  • per-cell sub-codes: reclaimable→no error; blocked_work→`{conflict, code:"blocked_work"}`;
+    orphan→`{conflict, code:"orphan_unexplained"}` (the §7.5 loud surface, matching `isolate repair`); busy
+    skip (the one per-TASK, repo-less outcome `gc.Collect` emits)→`{lock_held}` keyed on the task alone; a
+    per-cell git/IO fault→`{internal}`.
+  Test-first → RED (no `gc` factory; harness built the four-class workspace fine) → GREEN. Five fitnesses:
+  `TestGCReclaimsAndRefuses` (real run over the four-class workspace — conflict refusal, web `removed`,
+  db/ledger `blocked_work`, auth `orphan_unexplained`, live api OMITTED, physical effect: only web's
+  worktree+marker gone), `TestGCDryRunDoesNotMutate` (read plan, exit-neutral, nothing reclaimed),
+  `TestGCBusyTaskIsLockHeld` (busy-only sweep → lock_held exit 6, worktree untouched), `TestGCFactoryRejectsOperands`
+  (workspace-wide ⟹ no operand), `TestGCEmptyWorkspaceIsCleanNoop` (idempotent empty success). Two mutants
+  confirmed RED-then-reverted (registry below): blocked-sweep→`(result,nil)` mis-reported as clean → RED;
+  `--dry-run` falls through to the mutating sweep → RED. Full gate GREEN (25 packages) + `go vet` + linux
+  cross-build/vet clean.
+  NEXT M4 unit — HEAL-2's spine is COMPLETE; what remains for HEAL-2 is the explicit **HEAL-GC-NO-LIVE-LOSS**
+  negative-fitness battery (PLAN 123-125), best added as a focused `internal/gc` test unit: (i) no reclaim of
+  reflog-only / equal-to-base work (a cell whose HEAD == marker is `ClassReclaimable` ONLY when also clean —
+  pin that an equal-to-base-but-dirty cell stays blocked, and that a reflog-only commit that left HEAD == marker
+  is still reclaimable, i.e. AheadOfBase keys on HEAD-vs-marker not reflog); (ii) no resurrection of a
+  completed-then-deleted isolate (gc removes the worktree+marker but never re-creates a record or re-adds a
+  worktree); (iii) HEAL-4-reset + HEAL-6-gc composition cannot prune a discarded sha (deferred until HEAL-4
+  lands the op journal). THEN, past HEAL-2: HEAL-5 `land continue/abort/status`; HEAL-4 durable op journal +
+  roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
+  `--fix` (LAST — composes the safe heals repair+gc).
+
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
   the MVP has been re-verified END TO END this firing. `gofmt -l .` clean · `go build ./...` · `go vet
@@ -1779,6 +1826,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | GIT-LIST-OWNED-REFS (M4 HEAL-2) | in `git.ListOwnedRefs`, **(primary — scoping limb)** widen the `for-each-ref` pattern from `ownedRefPrefix` (`refs/wi/owned/`) to `"refs/wi/"` → a `refs/wi/backup/*` ref (PROTECTED from gc by §7.1) surfaces, fails the `CutPrefix(refname, ownedRefPrefix)` owned-prefix guard, and `ListOwnedRefs` errors → `TestListOwnedRefsScopedToOwnedNamespace` RED (`for-each-ref returned non-owned ref "refs/wi/backup/feat/api"`) — pinning that backup refs/branches are never enumerated as gc candidates. **(alternate — completeness limb)** `break` after the first `out = append(...)` → only 1 of 3 markers returned → `TestListOwnedRefsEnumeratesAllMarkers` RED (`got [bugfix/api], want all three sorted`). Read-only, no build tag. Darwin RED→GREEN, both confirmed-then-reverted |
 | GC-INSPECT (M4 HEAL-2) | in `gc.Inspect`, **(primary — live-join limb)** stop populating the live-set in `liveSet` (replace `live[cellKey{rec.Task, rr.Repo}] = true` with `_ = rr`) → the live cell loses its `Live` signal and `gc.Classify` reclassifies it from `ClassLive` to `ClassReclaimable` → `TestInspectClassifiesEachWorktree` RED (`active/api classified "reclaimable", want "live"`) — pinning that Inspect threads `state.List`'s Live signal into the §7.1 never-collect-live gate. **(alternate — enumeration-completeness limb)** `break` after the first `cands = append(...)` per task → only the first repo of each task is enumerated → 2-of-5 candidates → `TestInspectClassifiesEachWorktree` RED (`Inspect returned 2 candidates, want 5`). End-to-end over a real git workspace, no build tag. Darwin RED→GREEN, both confirmed-then-reverted + linux cross-build/vet clean |
 | GC-COLLECT (M4 HEAL-2) | in `gc.collectTask`, **(primary — no-live-loss limb)** make the `case ClassBlockedWork:` arm call `reclaim(...)` instead of recording a hard block → `gone/ledger` (clean but AHEAD of marker — committed unmerged work) is removed by `RemoveWorktree` → `TestCollectReclaimsOnlyReclaimable` RED (`gone/ledger worktree must be left intact, was removed`) — pinning HEAL-GC-NO-LIVE-LOSS (gc never destroys committed-but-unlanded work). **(alternate — evidence-positive limb)** make the `case ClassOrphanUnexplained:` arm call `reclaim(...)` → the markerless `gone/auth` worktree is removed → RED (`gone/auth worktree must be left intact, was removed`) — pinning §7.1 (wi reclaims only what a marker proves it owns; an unexplained orphan is a hard block). End-to-end over a real git workspace, no build tag. Darwin RED→GREEN, both confirmed-then-reverted + linux cross-build/vet clean. (Busy-task skip additionally guarded by `TestCollectSkipsBusyTask`.) |
+| CMD-GC (M4 HEAL-2) | in `gcCmd.collect`, **(primary — blocked-sweep-is-a-refusal limb)** on the `conflictBlock` arm return `(result, nil)` instead of `(result, *CommandError{conflict})` → a sweep with blocked_work/orphan cells is mis-reported as a clean exit-0 success → `TestGCReclaimsAndRefuses` RED (`want *cli.CommandError, got <nil>`); the busy test is UNAFFECTED (it routes through the untouched `busyBlock` arm), localizing the regression. **(alternate — dry-run-is-read-only limb)** guard the `Run` dry-run branch with `if false && DryRunFrom(ctx)` so `--dry-run` falls through to the mutating `collect` → `TestGCDryRunDoesNotMutate` RED (the read plan now errors with the conflict refusal, `--dry-run must not error … got workspace not fully reclaimed`). End-to-end through the real registry+handler over the four-class git workspace, no build tag. Darwin RED→GREEN, both confirmed-then-reverted + linux cross-build/vet clean. (busy→lock_held exit-6 distinction additionally guarded by `TestGCBusyTaskIsLockHeld`; empty-workspace noop by `TestGCEmptyWorkspaceIsCleanNoop`.) |
 | REPAIR-PLAN | change the `ClassOrphanWorktree` arm of `isolate.PlanAction` to `return RepairDropRecord` (auto-clean an orphan) → exactly the two `orphan_worktree` rows of `TestPlanActionTruthTable` + `TestPlanActionNeverAutoRemovesOrphan` RED, the other 6 rows GREEN — proving the §7.1 orphan hard-block is load-bearing (a `ClassReclaimed`→`RepairRematerialize` mutant likewise reddens the resurrection guard) |
 | GIT-WORKTREE-PRUNE | make `git.PruneWorktrees` a no-op (`return nil` without running `git worktree prune`) → the stale `.git/worktrees/<id>` admin entry left by an out-of-band worktree-dir removal survives → the post-prune `AddWorktree` in `TestPruneWorktreesClearsStaleAdminEntry` fails "missing but already registered" (exit 128) → RED (the pre-prune failed re-add additionally pins that AddWorktree itself does not silently `--force`) |
 | REPAIR-EXEC | skip the `PruneWorktrees` call in `isolate.Repair`'s `rematerialize` arm (call only `AddWorktree`) → the `web` MissingWorktree cell's re-add fails "missing but already registered" → exactly the `web` rematerialize assertions of `TestRepairReconcilesAllDriftStates` (Done, worktree-present, HEAD-at-marker) RED while the other four arms (`api`/`auth`/`db`/`cache`) stay GREEN — pinning that the executor composes the unit-22 prune primitive before re-adding; alternates: drop a Reclaimed repo from the `drop` set → cache survives in the record RED; turn the `block_orphan` arm into a removal → db orphan-left-intact RED |

@@ -92,6 +92,12 @@ var table = []Command{
 		Next:     []string{"wi resolve <task>", "wi isolate rm <task>"},
 	},
 	{
+		Name:     "gc",
+		Synopsis: "reclaim leftover isolate worktrees wi can prove it owns; preview with --dry-run",
+		Usage:    "wi gc [--dry-run]",
+		Next:     []string{"wi gc --dry-run", "wi lock ls"},
+	},
+	{
 		Name:     "lock ls",
 		Synopsis: "list workspace locks and whether each is safe to break",
 		Usage:    "wi lock ls",
