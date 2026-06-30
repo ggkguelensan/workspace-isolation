@@ -86,6 +86,12 @@ var table = []Command{
 		Next:     []string{"wi isolate new <task> <repo>…"},
 	},
 	{
+		Name:     "isolate repair",
+		Synopsis: "reconcile a task's isolate with its on-disk worktrees and ownership markers",
+		Usage:    "wi isolate repair <task>",
+		Next:     []string{"wi resolve <task>", "wi isolate rm <task>"},
+	},
+	{
 		Name:     "lock ls",
 		Synopsis: "list workspace locks and whether each is safe to break",
 		Usage:    "wi lock ls",

@@ -93,8 +93,10 @@ func Render(w io.Writer, env contract.Envelope, format Format) error {
 // the emitted envelope with its mapped non-zero exit code.
 func Execute(ctx context.Context, w io.Writer, m Meta, format Format, cmd Command) (contract.ExitCode, error) {
 	// Thread the minted op_id down to the Command so a handler records the SAME
-	// correlation id in durable state that the envelope reports (CTX-OPID).
+	// correlation id in durable state that the envelope reports (CTX-OPID), plus the
+	// --dry-run flag so a handler with a plan/act split (isolate repair) honors it.
 	ctx = WithOpID(ctx, m.OpID)
+	ctx = WithDryRun(ctx, m.DryRun)
 	r, err := cmd.Run(ctx)
 	env := envelopeFor(m, r, err)
 	if werr := Render(w, env, format); werr != nil {

@@ -29,13 +29,14 @@ type Deps struct {
 // command is one line here plus its cmd_<name>.go handler — no change to Dispatch.
 func BuildRegistry(d Deps) Registry {
 	r := Registry{
-		"init":        func(args []string) (Command, error) { return newInitCommand(d.Layout, args) },
-		"resolve":     func(args []string) (Command, error) { return newResolveCommand(d.Layout, args) },
-		"isolate new": func(args []string) (Command, error) { return newIsolateNewCommand(d.Layout, d.Git, args) },
-		"isolate rm":  func(args []string) (Command, error) { return newIsolateRmCommand(d.Layout, d.Git, args) },
-		"sync":        func(args []string) (Command, error) { return newSyncCommand(d.Layout, d.Git, d.Clock, args) },
-		"repo add":    func(args []string) (Command, error) { return newRepoAddCommand(d.Layout, args) },
-		"help":        func(args []string) (Command, error) { return newHelpCommand(args) },
+		"init":           func(args []string) (Command, error) { return newInitCommand(d.Layout, args) },
+		"resolve":        func(args []string) (Command, error) { return newResolveCommand(d.Layout, args) },
+		"isolate new":    func(args []string) (Command, error) { return newIsolateNewCommand(d.Layout, d.Git, args) },
+		"isolate rm":     func(args []string) (Command, error) { return newIsolateRmCommand(d.Layout, d.Git, args) },
+		"isolate repair": func(args []string) (Command, error) { return newIsolateRepairCommand(d.Layout, d.Git, args) },
+		"sync":           func(args []string) (Command, error) { return newSyncCommand(d.Layout, d.Git, d.Clock, args) },
+		"repo add":       func(args []string) (Command, error) { return newRepoAddCommand(d.Layout, args) },
+		"help":           func(args []string) (Command, error) { return newHelpCommand(args) },
 	}
 	// Platform-specific commands merge in here. The unix-only lock-self-heal surface
 	// (lock ls / lock break) is contributed by lockCommands; on non-unix the stub adds none.

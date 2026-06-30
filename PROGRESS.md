@@ -377,14 +377,39 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   rematerialize arm → web's re-add fails "missing but already registered" → exactly the web rematerialize
   assertions RED, the other four arms GREEN (confirmed then reverted). `gofmt`/`go vet`/`go build
   ./...`/`go test ./...` all GREEN (24 packages) + linux cross-build/vet clean.
-  NEXT M4 unit — **build order (recorded):** `wi doctor` (HEAL-8) stays LAST in M4 (PLAN line 84; its
-  `--fix` COMPOSES the safe heals). Finish HEAL-1: the `isolate repair` **CLI handler** (the domain core —
-  `Inspect` read + `Repair` action — now both exist). Register `isolate repair <task>` in the cli registry +
-  help table (keeping HELP-REGISTRY-SYNC set-equality and a runnable `wi …` Next); project `RepairResult`
-  onto the envelope's repos[]/blocked[] with a `RepairBlocked`→non-zero exit; honor the `--dry-run` flag
-  (read-only `Inspect`-and-report path, exit-neutral per SHAPE-DRYRUN-EXIT0). THEN evidence-positive gc
-  (HEAL-2, §7.1 — marker refs, `refs/wi/{backup,owned}` protected, unexplained = hard block); and only after
-  those, `wi doctor` (HEAL-8) as the read-only aggregate + `--fix` dispatcher.
+  (24) ✅ **this firing** — the `isolate repair <task>` **CLI handler** (`internal/cli/cmd_isolate_repair.go`
+  + `_test`, guard `CMD-ISOLATE-REPAIR`) — **HEAL-1 is now COMPLETE end-to-end** (domain core + command). The
+  handler is the seam between the three-way reconciler and the envelope, with a plan/act split keyed on a NEW
+  `--dry-run` context seam (`cli.WithDryRun`/`DryRunFrom`, injected by `Execute` next to the op_id — the same
+  per-invocation-context pattern; `run.go`): `--dry-run` → `isolate.Inspect` (read-only, lock-free) projecting
+  every reconcilable cell into `planned[]` (its `PlanAction` verdict + a human detail) and every orphan into
+  `blocked[]` as a would-block, with NO top-level error so the plan stays exit 0 (SHAPE-DRYRUN-EXIT0 / decision
+  #D — verdicts ride the additive blocks, never the error); otherwise → `isolate.Repair` under the lock,
+  projecting each `RepairOutcome` into `repos[]` (re-materialize→`created`, drop→`removed`, none/heal→`noop`,
+  orphan→per-repo `conflict`/`orphan_unexplained`, per-cell fault→`internal`) and, on `RepairBlocked`, returning
+  a `(result, *CommandError{conflict})` refusal (exit 4) — the blocking cells ride `repos[]` because
+  `envelopeFor` threads `Repos` (NOT `Blocked`) onto a failure envelope, the exact shape `isolate rm` uses.
+  Factory rejects a missing/extra operand as usage (repair has NO repo subset — it reconciles the whole
+  isolate); `state.ErrNoRecord`→not_found (+`wi isolate new`), held lock→lock_held. Registered in
+  `BuildRegistry` + a new `help.table` row (HELP-REGISTRY-SYNC set-equality held; runnable `wi resolve`/`wi
+  isolate rm` Next). **Decision #RP (recorded):** repair has no single mutation verb in the closed Action enum,
+  so its headline `action` is `noop` on the mutating path (per-cell effects are authoritative in `repos[].action`)
+  and `read` on the dry-run path — avoiding a schema-bumping enum expansion. Test-first RED (`undefined:
+  cli.WithDryRun`) → GREEN: reconcile-missing-worktree (web re-materialized, api consistent), orphan→conflict
+  refusal (db left intact), dry-run plans-without-mutating (web stays missing + db stays present, action read,
+  no error despite the orphan), missing-record→not_found, factory arg validation. Two mutants confirmed RED
+  then reverted: (a) `RepairBlocked`→`(result,nil)` → blocked-is-conflict RED; (b) `--dry-run` falls through to
+  the mutating path → dry-run-does-not-mutate RED. `gofmt`/`go vet`/`go build ./...`/`go test ./...` all GREEN
+  (24 packages) + linux cross-build/vet clean.
+  NEXT M4 unit — **build order (recorded):** HEAL-1 is DONE. Next is **evidence-positive gc (HEAL-2,
+  PLAN line 83, DESIGN §7.1):** a read-only sweep for unreferenced wi objects/worktrees with `refs/wi/owned/*`
+  and `refs/wi/backup/*` PROTECTED from collection and any unexplained candidate a HARD BLOCK (never
+  auto-pruned) — the same evidence-positive posture HEAL-1 just shipped, applied workspace-wide. Likely shape:
+  an `internal/gc` domain core (pure candidate-classification first, mirroring Classify/PlanAction) then a
+  `wi gc [--dry-run]` CLI handler reusing the new `--dry-run` seam. AFTER HEAL-2: `land continue/abort/status`
+  (HEAL-5, backup-ref-before-pointer-move) and the durable op journal + offline roll-forward (HEAL-4). `wi
+  doctor`/`check` (HEAL-8) stays LAST in M4 (PLAN line 84) because its bounded `--fix` COMPOSES the safe heals
+  (repair + gc), so it can only be built once they exist.
   THEN evidence-positive gc (HEAL-2, §7.1 — marker refs, `refs/wi/{backup,owned}` protected, unexplained =
   hard block); and only after those, `wi doctor` (HEAL-8) as the read-only aggregate + `--fix` dispatcher.
   AFTER that: wiring auto-break into `Acquire`'s `*HeldError` path is DEFERRED as a deliberate judgment call —
@@ -1590,6 +1615,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | REPAIR-PLAN | change the `ClassOrphanWorktree` arm of `isolate.PlanAction` to `return RepairDropRecord` (auto-clean an orphan) → exactly the two `orphan_worktree` rows of `TestPlanActionTruthTable` + `TestPlanActionNeverAutoRemovesOrphan` RED, the other 6 rows GREEN — proving the §7.1 orphan hard-block is load-bearing (a `ClassReclaimed`→`RepairRematerialize` mutant likewise reddens the resurrection guard) |
 | GIT-WORKTREE-PRUNE | make `git.PruneWorktrees` a no-op (`return nil` without running `git worktree prune`) → the stale `.git/worktrees/<id>` admin entry left by an out-of-band worktree-dir removal survives → the post-prune `AddWorktree` in `TestPruneWorktreesClearsStaleAdminEntry` fails "missing but already registered" (exit 128) → RED (the pre-prune failed re-add additionally pins that AddWorktree itself does not silently `--force`) |
 | REPAIR-EXEC | skip the `PruneWorktrees` call in `isolate.Repair`'s `rematerialize` arm (call only `AddWorktree`) → the `web` MissingWorktree cell's re-add fails "missing but already registered" → exactly the `web` rematerialize assertions of `TestRepairReconcilesAllDriftStates` (Done, worktree-present, HEAD-at-marker) RED while the other four arms (`api`/`auth`/`db`/`cache`) stay GREEN — pinning that the executor composes the unit-22 prune primitive before re-adding; alternates: drop a Reclaimed repo from the `drop` set → cache survives in the record RED; turn the `block_orphan` arm into a removal → db orphan-left-intact RED |
+| CMD-ISOLATE-REPAIR | in `isolateRepairCmd.Run`, on `RepairBlocked` return `(result, nil)` instead of `(result, *CommandError{Kind: conflict})` → a blocked reconcile is mis-reported as a clean success (exit 0) → `TestIsolateRepairBlockedIsConflict` RED (want `*cli.CommandError{conflict}`, got nil). Alternate (the `--dry-run` seam): make the dry-run branch fall through to the mutating `repair` path (`if false && DryRunFrom(ctx)`) → `TestIsolateRepairDryRunDoesNotMutate` RED (the run errors on the orphan instead of staying exit-neutral, and would re-materialize the missing worktree) — pinning that the read-only plan path is genuinely lock/mutation-free |
 | SHAPE-ENUM-DOUBLE-ENTRY | add/reorder a value in any `All*()` without editing the `want*()` literal copy |
 | SHAPE-ENVELOPE-INVARIANTS | add `,omitempty` to `Envelope.Error`, or drop the nil→`[]` coercion for repos/capabilities/warnings/next in `MarshalJSON`; **help block (decision #HB):** drop `,omitempty` from `Envelope.Help` → `"help":null` appears on every envelope → `TestEnvelopeHelpOmittedWhenNil` + the success/error goldens RED; reorder/rename a `HelpBlock` json tag or move the `Help` field → the frozen bytes drift → `TestEnvelopeHelpBlockGolden` RED |
 | SHAPE-SCHEMA | set top-level `additionalProperties:true` (or drop `error` from `required`, or widen a closed enum) in `schema/envelope.schema.json` → `TestSchemaRejectsInvalid` RED |
