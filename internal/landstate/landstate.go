@@ -120,6 +120,25 @@ func Load(landDir, task string) (TaskLand, error) {
 	return rec, nil
 }
 
+// Delete removes the parked-land record for task from landDir. It is the disposition
+// `land abort` uses once every landed repo has been rewound: an aborted land is GONE, so
+// the honest post-abort signal is no record at all (`land status` → not_found), not a
+// terminal "aborted" phase to garbage-collect later (decision #ABORT-DISPOSE). Delete is
+// IDEMPOTENT — a task with no record is already in that desired state, so a missing file
+// is not an error (a re-run of `land abort`, or an abort of a never-parked task, still
+// succeeds). The task name passes the same traversal chokepoint as Load/Store. Pure
+// local I/O, no network.
+func Delete(landDir, task string) error {
+	p, err := recordPath(landDir, task)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("landstate: delete record %s: %w", p, err)
+	}
+	return nil
+}
+
 // Store atomically persists rec under landDir via the single .wi/ atomic writer
 // (DESIGN §6.2). landDir must already exist (layout.Bootstrap creates .wi/land).
 func Store(landDir string, rec TaskLand) error {

@@ -27,6 +27,10 @@ import (
 //                       kills a json-tag / phase-constant rename — a round-trip alone
 //                       is VACUOUS because Marshal+Unmarshal share the tag (the
 //                       LOCK-HOLDER lesson, PROGRESS).
+//   LANDSTATE-DELETE  — Delete removes a record (Load then → ErrNoRecord, the post-abort
+//                       signal `land status` projects to not_found) and is IDEMPOTENT (a
+//                       missing record is the desired state, not an error — a re-run of
+//                       `land abort` succeeds), through the same traversal chokepoint.
 //
 // Non-vacuity mutant (registered): rename the `backup_sha` (or `landed_sha`) json tag
 // (→ `backupSha`) OR change PhaseBlocked's value ("blocked"→"blocked-MUT").
@@ -127,5 +131,41 @@ func TestStoredWireIsStable(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("stored record missing durable wire token %s\nin: %s", want, got)
 		}
+	}
+}
+
+func TestDeleteRemovesRecord(t *testing.T) {
+	dir := t.TempDir()
+	rec := newRec()
+	if err := landstate.Store(dir, rec); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	// Precondition: the record is loadable.
+	if _, err := landstate.Load(dir, rec.Task); err != nil {
+		t.Fatalf("Load before Delete: %v", err)
+	}
+	if err := landstate.Delete(dir, rec.Task); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	// Post: the record is gone — Load reports ErrNoRecord, exactly the post-abort signal
+	// `land status` projects to not_found (an aborted land is gone, not parked).
+	if _, err := landstate.Load(dir, rec.Task); !errors.Is(err, landstate.ErrNoRecord) {
+		t.Errorf("Load after Delete: want ErrNoRecord, got %v", err)
+	}
+}
+
+func TestDeleteMissingIsIdempotent(t *testing.T) {
+	// Deleting a record that was never written is the desired post-abort state already, so
+	// a re-run of `land abort` (or aborting a never-parked task) must succeed, not error.
+	if err := landstate.Delete(t.TempDir(), "never-parked"); err != nil {
+		t.Errorf("Delete(missing): want nil (idempotent), got %v", err)
+	}
+}
+
+func TestDeleteRejectsUnsafeTaskName(t *testing.T) {
+	// The task name becomes a filename, so Delete must reject traversal through the same
+	// chokepoint as Store/Load — never letting `../evil` reach an os.Remove outside landDir.
+	if err := landstate.Delete(t.TempDir(), "../evil"); err == nil {
+		t.Errorf("Delete(unsafe task): want error, got nil")
 	}
 }
