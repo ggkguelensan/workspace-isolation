@@ -9,15 +9,27 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Current position
 
-- **Milestone:** **✅ MVP M0–M3 COMPLETE AND GREEN (2026-06-30) — STOP condition reached.** All six MVP
-  commands run end-to-end through the uniform pipeline, plus full release scaffolding: CI gate
-  (gofmt/build/vet/test on ubuntu+macos) + `goreleaser check` + `.goreleaser.yaml` (cross-compile, 4
-  targets) + Homebrew cask + tag-push `v*` `release.yml`. Verified this firing: gofmt clean, go
-  build/vet/test green, goreleaser check PASS, both workflows parse, binary smoke (init→0, resolve
-  ghost→3, reinit→4, bogus→64). Owner follow-ups before first release: set `HOMEBREW_TAP_GITHUB_TOKEN`
-  PAT secret; add a LICENSE; (optional) a `wi version` unit to enable `-X` version stamping. M4/M5
-  remain unstarted by design (additive on the frozen M0 contract; await owner go-ahead). _Prior
-  milestone history retained below._
+- **Milestone:** **⚠️ MVP M0–M3 NOT COMPLETE — prior "green/STOP" claims were premature (corrected
+  2026-06-30).** ORIENT caught a real gap: PLAN line 136 lists **`help` and `suggest`** as M3
+  deliverables ("MVP = M0–M3", line 140), but neither `internal/help` nor `internal/suggest` had been
+  built. The earlier firings counted the six command handlers + `cmd/wi` + CI/goreleaser/cask as "the
+  MVP" and skipped these two — the build disagreed with PROGRESS.md, so the build wins. Tells: `wi help`
+  → `unknown command` (exit 64) while the envelope advertises the `help-json` capability (violating
+  PLAN line 108 "capabilities ⇒ backing command"); the `contract.Error` `Help`/`DidYouMean` fields and
+  the `cli`/`text` plumbing exist but **nothing ever populated them**. **Now closing the gap, one unit
+  per firing:** ✅ `internal/suggest` landed this firing (the did-you-mean Levenshtein engine, guard
+  `SUGGEST-DIDYOUMEAN`, commit `b043457`). Remaining for true MVP: `internal/help` (the help model +
+  a `help` command backing `help-json`), then WIRE both into `dispatch` (unknown command → populate
+  `did_you_mean[]` via `suggest`; `wi help [topic]` → help model), then re-verify M0–M3 end-to-end.
+  Everything still builds/vets/tests green throughout. _What WAS genuinely done (six commands, cmd/wi,
+  full release scaffolding incl. Node-24-current CI) stands; it just wasn't the whole of M3._
+
+- **Milestone (superseded — was wrongly marked complete):** ~~✅ MVP M0–M3 COMPLETE AND GREEN — STOP~~.
+  All six MVP commands run end-to-end through the uniform pipeline, plus full release scaffolding: CI
+  gate (gofmt/build/vet/test on ubuntu+macos) + `goreleaser check` + `.goreleaser.yaml` (cross-compile,
+  4 targets) + Homebrew cask + tag-push `v*` `release.yml`. Owner follow-ups before first release: set
+  `HOMEBREW_TAP_GITHUB_TOKEN` PAT secret; add a LICENSE; (optional) a `wi version` unit to enable `-X`
+  version stamping. M4/M5 remain unstarted by design. _Prior milestone history retained below._
 
 - **Post-MVP (owner-driven, 2026-06-30):** Owner pushed `build/wi` to `origin`
   (`git@github.com:ggkguelensan/workspace-isolation.git`); first remote CI run (28411028448) passed
@@ -1005,19 +1017,33 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   v0 `branch` empty because worktrees are detached) recorded below. **M2 is now COMPLETE** (config +
   state + isolate + resolve); next is M3 — the CLI surface.
 
-## Next unit (pick this on the next firing) — ✅ MVP COMPLETE; M4 GATED ON OWNER GO-AHEAD
+## Next unit (pick this on the next firing) — FINISH M3 (help/suggest gap)
 
-> **STOP state (2026-06-30).** Every M0–M3 unit below is DONE and the tree is green (gofmt · build ·
-> vet · test · `goreleaser check` all pass; both workflows parse). The locked build loop's stop
-> condition — "if the full MVP (M0–M3) is green … say so plainly and stop making changes" — is reached.
-> Do NOT start M4 (land / landstate / gc) or M5 (step / ports / hooks / discovery) on the next firing
-> without explicit owner confirmation: they are additive on the now-frozen M0 contract and represent a
-> scope expansion past the MVP, not a continuation of it. Three owner follow-ups gate a real release:
-> (1) set the `HOMEBREW_TAP_GITHUB_TOKEN` PAT secret before the first `v*` tag (the default Actions
-> `GITHUB_TOKEN` cannot push the cask cross-repo to ggkguelensan/homebrew-tap); (2) add a LICENSE file
-> and set the cask `license`; (3) add a `wi version` unit (declaring version/commit/date vars) before
-> goreleaser `-X` version stamping can be turned on. None of these are code the loop should write
-> unprompted — (1) and (2) are owner decisions, (3) is post-MVP scope.
+> **Corrected status (2026-06-30): MVP M0–M3 is NOT yet complete.** `help` and `suggest` are M3
+> deliverables (PLAN line 136) that earlier firings skipped before wrongly declaring STOP. The loop's
+> stop condition ("if the full MVP M0–M3 is green … stop") therefore has NOT actually been met. Keep
+> going on M3 — this is finishing the MVP, NOT starting M4/M5 (those stay gated). The three release
+> follow-ups (HOMEBREW_TAP_GITHUB_TOKEN PAT secret · LICENSE + cask license · `wi version` unit) remain
+> owner-gated and unchanged.
+
+- ✅ **DONE (this firing) — `internal/suggest`** (commit `b043457`, guard `SUGGEST-DIDYOUMEAN`): the
+  pure did-you-mean Levenshtein engine, SOLE owner per DESIGN §3.1. `For(input, candidates)` → typo
+  (edit dist ≤ 2, case-insensitive) or prefix matches, sorted (dist asc, name asc), nil on no-match.
+  Decision #S recorded (reproduce cobra's `SuggestionsFor`; hand-rolled, no `agnivade/levenshtein` dep,
+  consistent with #F dropping cobra).
+- **NEXT — `internal/help`**: the progressive-disclosure help model + `next[]` rules, SOLE owner
+  (DESIGN line 158). A pure package mapping a topic (none = top-level overview; a command name = that
+  command's synopsis) to help text + suggested `next[]` actions, sourced from one command-metadata
+  table so help can never lie about the command surface. Test-first with its non-vacuity mutant.
+- **THEN — wire suggest + help into `dispatch`** (the `cli` envelope writer is the sole injector,
+  DESIGN line 156 / §7): (1) on the unknown-command path (`dispatch.go:55`) populate the error
+  envelope's `did_you_mean[]` from `suggest.For(attempted, registeredNames)` and set `help` to the
+  relevant `wi help …` pointer; (2) register a `help` command so `wi help [topic]` returns the help
+  model and the advertised `help-json` capability actually has a backing command (closes the PLAN
+  line 108 "capabilities ⇒ backing command" violation).
+- **THEN — re-verify M0–M3 end-to-end** (build/vet/test/gofmt + `goreleaser check` + binary smoke incl.
+  `wi help` exit 0 and an unknown command carrying `did_you_mean`). Only then is the MVP genuinely green
+  and the STOP condition real.
 
 M3 (DESIGN §3, IMPLEMENTATION_PLAN §M3 + Wave B) wires the green domain core through the uniform
 pipeline into the runnable `wi` binary: `internal/cli` (parse → dispatch → **one** envelope out →
@@ -1167,8 +1193,19 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | ISOLATE-REMOVE-TEARDOWN | in `isolate.Remove`'s `len(rec.Repos)==0` branch replace `state.Delete` with `state.Store(stateDir, rec)` (keep an empty-repos husk instead of deleting) → a fully-reclaimed isolate's record survives → `TestRemoveAllCleanDeletesRecord` RED (`state.Load` returns a record, want `state.ErrNoRecord`) — pins that full teardown removes the registry entry so a later `isolate rm` correctly reports not_found |
 | CMD-ISOLATE-RM | in `isolateRmCmd.Run`, on the mixed outcome (`removed > 0` with blocks) return `(result, nil)` instead of `(result, *CommandError{Kind:partial, Action:removed})` → a partial teardown is mis-reported as a clean success (no error, exit 0) → `TestIsolateRmDurablePartialBlocksOrphan` RED (`want *cli.CommandError, got <nil>`), while complete-teardown + all-blocked stay GREEN (isolates the mutant to the partial-mapping path); alternate: in `projectRemoveOutcome` map an orphan hard-block to `Kind:internal` (or drop the `Code:"orphan_unexplained"`) → same test RED on the repos[] `web.Error.Kind == conflict` / `Code == orphan_unexplained` assertions — pins the loud `orphan_unexplained` surface (DESIGN §7.1) riding in repos[] not Blocked[] (decision #RD) |
 | CMD-MAIN | in `run` (cmd/wi) `_ = code; return contract.ExitOK` instead of `return code` → run swallows Dispatch's computed exit and always exits 0 → `TestRunUnknownCommandExitsUsage` RED (got 0, want 64), while `TestRunInitScaffoldsWorkspace` stays GREEN (init already exits 0) — isolates the mutant to exit-code propagation; alternate: hand `cli.Dispatch` an empty `Registry{}` instead of `BuildRegistry(deps)` → every command is unknown → `TestRunInitScaffoldsWorkspace` RED (no `.wi/` scaffolded, ok:false/usage not created) — pins that the REAL registry over a cwd-resolved root is wired |
+| SUGGEST-DIDYOUMEAN | in `suggest.For` return `nil` regardless (the shipped test-first stub) → every typo/prefix case loses its suggestion → `TestForSuggestsClosest` RED on the `reslove`/`snc`/`re`/`RESLOVE` rows (got nil, want the match) while the `xyzzy`/empty rows stay GREEN (isolates the mutant to the match path); alternate: drop the threshold/prefix filter and `return candidates` unfiltered → the `xyzzy`/empty "nothing close → nil" rows RED (got the whole command set); alternate: remove the `input==""` guard → empty input prefix-matches everything → `empty input is never a suggestion` RED |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
+
+- **#S did-you-mean engine = hand-rolled cobra-`SuggestionsFor` clone — RESOLVED 2026-06-30** (settles
+  the §7 "help/did_you_mean/next ownership" decision's typo-suggestion half). DESIGN §7 said "defer
+  unknown-command typos to cobra's `SuggestionsFor`," but decision #F dropped cobra entirely, so there
+  is nothing to defer to. Ruling: `internal/suggest` reproduces cobra's algorithm exactly — a candidate
+  qualifies when case-insensitive Levenshtein distance ≤ 2 (cobra's default `minDistance`) OR the
+  candidate has the input as a case-insensitive prefix. Levenshtein is hand-rolled (two-row DP over
+  runes), NOT the `agnivade/levenshtein` dep PLAN line 37 floated — consistent with #F's zero-dep,
+  hand-rolled-stdlib posture and DESIGN §2's minimal-surface invariant. Ordering (distance asc, name
+  asc) and nil-on-no-match are wi additions for a deterministic, omitempty-friendly `did_you_mean[]`.
 
 - **#HC Homebrew cask over formula — RESOLVED 2026-06-30** (overrides PLAN §6's "cask rejected" risk
   note; not a §7 ruling). goreleaser **hard-deprecated `brews` (formula) within the `~> v2` range** we
