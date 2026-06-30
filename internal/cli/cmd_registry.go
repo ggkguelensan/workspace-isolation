@@ -38,6 +38,7 @@ func BuildRegistry(d Deps) Registry {
 		"gc":             func(args []string) (Command, error) { return newGCCommand(d.Layout, d.Git, args) },
 		"sync":           func(args []string) (Command, error) { return newSyncCommand(d.Layout, d.Git, d.Clock, args) },
 		"repo add":       func(args []string) (Command, error) { return newRepoAddCommand(d.Layout, args) },
+		"state cas":      func(args []string) (Command, error) { return newStateCasCommand(d.Layout, args) },
 		"help":           func(args []string) (Command, error) { return newHelpCommand(args) },
 	}
 	// Platform-specific commands merge in here. The unix-only lock-self-heal surface

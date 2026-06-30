@@ -104,6 +104,12 @@ var table = []Command{
 		Next:     []string{"wi gc --dry-run", "wi lock ls"},
 	},
 	{
+		Name:     "state cas",
+		Synopsis: "atomically set a namespaced key only if it matches --expected (use __ABSENT__ to claim it)",
+		Usage:    "wi state cas <namespace> <key> --expected <value|__ABSENT__> --new <value>",
+		Next:     []string{"wi state cas <namespace> <key> --expected <value> --new <value>"},
+	},
+	{
 		Name:     "lock ls",
 		Synopsis: "list workspace locks and whether each is safe to break",
 		Usage:    "wi lock ls",

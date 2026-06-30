@@ -627,7 +627,52 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (50) ✅ **this firing** — **the `internal/state` KV + CAS core** (guard `STATE-KV-CAS`; `internal/state/kv.go`
+  (51) ✅ **this firing** — **the `wi state cas` CLI command + lit `CapStateKV`** (guard `CMD-STATE-CAS`;
+  `internal/cli/cmd_state_cas.go` + `cmd_state_cas_test.go`, package `cli_test`), sub-unit **(3)** of `state cas`
+  (DESIGN §8) — the seam wiring unit (50)'s `KVCompareAndSwap` core to the envelope, the FIRST command to back the
+  state-kv capability. **Surface:** `wi state cas <namespace> <key> --expected <value|__ABSENT__> --new <value>`,
+  registered as the 2-token `"state cas"` (longest-match beats a 1-token `state`). It is the FIRST command carrying
+  its OWN flags — `parseGlobals` strips only `--dry-run`/`--format`, so `--expected`/`--new` and their values arrive
+  in `args` and `parseStateCasArgs` parses them (both `--flag value` and `--flag=value` forms; both flags REQUIRED;
+  exactly two positionals; non-empty key). **Mapping (decision #SKV-3, see below):** a won CAS → `*Result{action=created}`
+  (exit 0); a lost CAS (`swapped=false`) → `*CommandError{conflict, noop}` (exit 4) — a TYPED refusal, NOT an infra
+  error, so an agent distinguishes win/loss by exit code alone; `*lock.HeldError` → `*CommandError{lock_held}`
+  (exit 6); bad operands/flags → usage (exit 64) at the factory before any I/O (namespace traversal-checked HERE via
+  `layout.ValidateSegment`, like `land` checks `<task>`); `--dry-run` → `*Result{action=noop}` (exit 0) with NO write.
+  **DECISION #SKV-3 recorded** (resolving (50)'s NEXT open question — verb surface + flag spelling + action mapping +
+  dry-run posture): (a) **cas-only this unit** — `state get` deferred (DESIGN §8 freezes only ownership + the
+  `__ABSENT__` sentinel; the verb surface is mine); (b) **both flags required** — forces the caller to state its
+  precondition and makes `--new ""` (write empty) distinct from "flag omitted"; (c) **won → `ActionCreated`**, reusing
+  the existing closed Action even on overwrite rather than widening the enum for an "updated" (no such Action exists —
+  internal/contract owns the closed set); (d) **lost → `conflict`/exit 4, NOT an error** — a CAS loss is a normal
+  coordination outcome an agent retries, not a fault; (e) **dry-run is minimal-safe** (no write, exit 0, `noop`) —
+  v1 does NOT predict would-swap (it would race the live value the instant it returned), mirroring `land`'s dry-run.
+  **Fitnesses** (end-to-end through the registry factory + `cmd.Run(WithOpID(...))`, no build tag):
+  `TestStateCasSwapFromAbsent` (claim-from-absent via the sentinel → `created` + durable, then a value-matched
+  `--expected=…`/`--new=…` swap); `TestStateCasCompareMiss` (lost CAS → `*cli.CommandError{conflict, noop}`, writes
+  nothing); `TestStateCasLockHeld` (with `state-kv:ports` held externally → `lock_held`); `TestStateCasDryRunNoWrite`
+  (`--dry-run` → `noop` + key stays absent); `TestStateCasFactoryValidation` (8 bad arg shapes → usage). **Registered
+  mutants** (both RED→revert→`(cached)` GREEN, byte-identity): PRIMARY = map the lost CAS (`!swapped`) to a `created`
+  success instead of the conflict → `TestStateCasCompareMiss` RED (`err=<nil>, want *cli.CommandError`,
+  cmd_state_cas_test.go:100); ALTERNATE = drop the `DryRunFrom(ctx)` guard so `--dry-run` executes the swap →
+  `TestStateCasDryRunNoWrite` RED (the value it must NOT have written is present). **`CapStateKV` LIT** in
+  `contract.Capabilities()` — the coupled byte-exact `goldenSuccess` drift (`TestEnvelopeGoldenSuccess`) reddened
+  showing `,"state-kv"` appended; the golden was updated to the honest wire form (RED→GREEN confirmed), exactly as
+  CMD-LAND did for `CapLand`. `emit_test`/`assemble_test` compute their expected caps from `contract.Capabilities()`
+  dynamically, so only the one hardcoded golden moved; `TestCapabilitiesIsSubsetOfVocabulary` stayed green
+  (`state-kv` was already in `AllCapabilities()`). HELP-REGISTRY-SYNC satisfied with a new `state cas` help row. The
+  "capability ⇒ backing command" invariant now holds for state-kv: it lit in the SAME unit that wired its command.
+  Full gate GREEN (28 pkgs ok + `? schema`) + gofmt clean + linux cross-build/vet clean.
+  NEXT M4 unit — **`wi state get <ns> <key>`** (the read companion: wire `state.KVGet` to the envelope as
+  `action=read`; absent key → a clean `not_found` refusal so an agent can probe a slot without a CAS), OR pivot back to
+  **Wave C self-heal** — the `§7.3` auto-lock-break composing the now-complete liveness stack (`processAlive` +
+  `BootID` + `Holder` + `Stamp`/`ReadHolder`, units 1–7): `lock break <key>` should consult `ReadHolder` and refuse
+  unless the holder is proven dead (different boot_id, or same-host dead pid). Reuse `cmd_state_cas.go`'s
+  flag-parsing + `cmd_land.go`'s registry/help/CommandError shape as the template. (DEFERRED, unchanged: the
+  `journal.KindLand` land-recovery Finisher (HEAL-5); HEAL-GC-NO-LIVE-LOSS case (iii) #GC-AHEAD-V0 — needs a journaled
+  discard verb, do NOT fake with a vacuous test.)
+
+  (50) ✅ **(prior firing)** — **the `internal/state` KV + CAS core** (guard `STATE-KV-CAS`; `internal/state/kv.go`
   + `kv_test.go`, package `state_test`), sub-unit **(2)** of `state cas` (DESIGN §8) — composing unit (49)'s
   `lock.StateKV` key into the namespaced compare-and-swap primitive agents coordinate on. **API:**
   `state.KVGet(l layout.Layout, ns, key) (value string, ok bool, err error)` — a pure local read taking NO lock
@@ -658,14 +703,8 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   key) → `TestKVCompareAndSwapSerializesOnLock` RED (no `*lock.HeldError` under contention, kv_test.go:111). Full
   gate GREEN (28 pkgs ok + `? schema`) + gofmt clean + linux cross-build/vet clean. `CapStateKV` STILL DARK in
   `Capabilities()` (capability ⇒ backing command — lit only when sub-unit (3) wires `state cas`).
-  NEXT M4 unit — **sub-unit (3): the `state` CLI command(s)** (`wi state cas <ns> <key> --expected <v|__ABSENT__>
-  --new <v>`, plus likely `wi state get <ns> <key>`) wiring `KVCompareAndSwap`/`KVGet` to the envelope, mapping
-  swapped=true → an `ok` success (action `created`/`updated`), swapped=false (compare miss) → a typed refusal
-  (lean: exit 4 conflict, action `noop` — NOT an infra error), and `*lock.HeldError` → exit 6 via the existing
-  `*cli.CommandError` mapping. THEN **advertise `CapStateKV`** in `contract.Capabilities()` (a byte-exact
-  `goldenSuccess` drift like CMD-LAND's `CapLand` — update the golden to the honest wire form). Decide the verb
-  surface (cas-only vs cas+get+set) and the `--expected`/`--new` flag spelling when wiring; reuse `cmd_land.go`'s
-  registry+help+CommandError shape as the template.
+  (NEXT pointer SATISFIED by unit (51) above — `state cas` is wired and `CapStateKV` is lit; verb-surface and
+  flag-spelling decided as #SKV-3.)
 
   (49) ✅ **(prior firing)** — **the `state-kv:<namespace>` lock key** (guard `LOCK-KEY-STATE-KV`; `internal/lock/
   keys.go` + `keys_test.go` + `parsekey_test.go`), the FIRST sub-unit of `state cas` (DESIGN §8). **Build-over-doc
@@ -2552,6 +2591,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CMD-LAND (M4 land) | the `wi land <task> <repo>…` handler (`landCmd.Run`): resolve specs from the manifest, call `land.RunJournaled`, map Status onto the return convention MIRRORING `isolate rm` (decision #LD) — all landed → landed Result (exit 0); ≥1 landed then blocked → DURABLE PARTIAL `(result, *CommandError{partial, Action: landed})` (exit 2); nothing landed → full refusal `*CommandError{conflict}` (exit 4); a parked non-ff block rides in `repos[]` as a per-repo conflict coded `non_fast_forward`. Primary mutant = on the mixed outcome return `(result, nil)` instead of the partial CommandError → `TestLandCommandPartialBlocksOneRepo` RED (a partial land mis-reported as a clean success — want `*cli.CommandError{partial}`, got nil). Alternate = map the all-blocked outcome to `KindPartial` instead of `KindConflict` → `TestLandCommandAllBlockedIsConflict` RED (a nothing-changed refusal must be exit 4, not 2). A SECOND coupled change — advertising `CapLand` in `contract.Capabilities()` — is guarded by the byte-exact `goldenSuccess` (`TestEnvelopeGoldenSuccess`): adding `CapLand` reddened it (drift showing `,"land"` appended), the golden was updated to the honest wire form → RED→GREEN confirmed. End-to-end over the real-git harness through the registry factory + `cmd.Run(WithOpID(...))`, no build tag. Full gate GREEN (only `? schema` non-ok) + gofmt clean + linux cross-build/vet clean |
 | LOCK-KEY-STATE-KV (M4 state cas) | the `state-kv:<namespace>` key in the closed `lock.Key` namespace (`internal/lock/keys.go`) — the key `wi state cas` takes around its load-compare-store so a CAS is atomic across processes. `StateKV(namespace)` validates the namespace via `layout.ValidateSegment` and yields the canonical string `state-kv:<namespace>`; `ParseKey` reverses it (so a `state-kv:<ns>.lock` file is recognized as a real key, not rejected as a stray). Registered mutant = drop the `case strings.HasPrefix(s, stateKVPrefix)` arm of `ParseKey` → `TestParseKey` RED (`ParseKey("state-kv:ports"): unexpected error … is not a valid key`) — pinning the round-trip the lock lister relies on. Also pinned: `TestCanonicalKeyStrings` (literal `state-kv:ports`) + `TestKeyConstructorsRejectUnsafeNames` (traversal/separator/empty namespace rejected). Pure key namespace, no I/O, no build tag. Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | STATE-KV-CAS (M4 state cas) | the `internal/state` namespaced compare-and-swap core (`KVCompareAndSwap`/`KVGet`, `internal/state/kv.go`): a CAS sets `ns/key` to newval IFF the current value equals `expected` (with `AbsentSentinel == "__ABSENT__"` meaning "iff absent"), serializing the load-compare-store on `lock.StateKV(ns)` taken from `l.LocksDir()` — owns the lock end-to-end + `Stamp(opID)`s it, symmetric with `isolate.New` (decision #SKV-2). A mismatch returns `(false, nil)` writing nothing; a contended namespace surfaces `*lock.HeldError` → exit 6. Store = `.wi/state/kv/<ns>.json` (`map[string]string`, atomic write, `kv/` lazily made + skipped by `state.List`). Primary mutant = drop the compare and store newval unconditionally → `TestKVCompareAndSwap` RED at the mismatch case (`swapped=true, want false`, kv_test.go:52). Alternate mutant = acquire `lock.Workspace()` instead of `lock.StateKV(ns)` (lock the wrong key) → `TestKVCompareAndSwapSerializesOnLock` RED (with `state-kv:ports` held externally the CAS no longer sees `*lock.HeldError`, kv_test.go:111). Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
+| CMD-STATE-CAS (M4 state cas) | the `wi state cas <ns> <key> --expected <v\|__ABSENT__> --new <v>` handler (`cmd_state_cas.go`): the FIRST command with its own flags (`parseStateCasArgs` handles `--flag value` + `--flag=value`, both required, exactly two positionals, non-empty key, namespace traversal-checked at the factory → usage exit 64). `stateCasCmd.Run` maps `state.KVCompareAndSwap`: won → `*Result{action=created}` (exit 0); lost (`!swapped`) → `*CommandError{conflict, noop}` (exit 4, a TYPED refusal not an infra error); `*lock.HeldError` → `*CommandError{lock_held}` (exit 6); `--dry-run` → `*Result{action=noop}` no write (exit 0). Primary mutant = map the lost CAS to a `created` success instead of the conflict → `TestStateCasCompareMiss` RED (`err=<nil>, want *cli.CommandError`, cmd_state_cas_test.go:100 — a lost race mis-reported as a win). Alternate mutant = drop the `DryRunFrom(ctx)` guard so `--dry-run` executes the swap → `TestStateCasDryRunNoWrite` RED (the value it must NOT have written is present). A SECOND coupled change — lighting `CapStateKV` in `contract.Capabilities()` — is guarded by the byte-exact `goldenSuccess` (`TestEnvelopeGoldenSuccess`): adding it reddened the golden showing `,"state-kv"` appended; updated to the honest wire form → RED→GREEN. End-to-end through the registry factory + `cmd.Run(WithOpID(...))`, no build tag. Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |
