@@ -28,7 +28,7 @@ type Deps struct {
 // args and returns a runnable Command (or a *CommandError{Kind: usage}). Adding a
 // command is one line here plus its cmd_<name>.go handler — no change to Dispatch.
 func BuildRegistry(d Deps) Registry {
-	return Registry{
+	r := Registry{
 		"init":        func(args []string) (Command, error) { return newInitCommand(d.Layout, args) },
 		"resolve":     func(args []string) (Command, error) { return newResolveCommand(d.Layout, args) },
 		"isolate new": func(args []string) (Command, error) { return newIsolateNewCommand(d.Layout, d.Git, args) },
@@ -37,4 +37,10 @@ func BuildRegistry(d Deps) Registry {
 		"repo add":    func(args []string) (Command, error) { return newRepoAddCommand(d.Layout, args) },
 		"help":        func(args []string) (Command, error) { return newHelpCommand(args) },
 	}
+	// Platform-specific commands merge in here. The unix-only lock-self-heal surface
+	// (lock ls / lock break) is contributed by lockCommands; on non-unix the stub adds none.
+	for k, f := range lockCommands(d) {
+		r[k] = f
+	}
+	return r
 }

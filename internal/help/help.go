@@ -44,8 +44,9 @@ const overview = "wi — deterministic multi-repo workspace isolation for parall
 // table is wi's command-metadata table: the single source of truth for the command
 // surface, ordered as the canonical MVP workflow (init → repo add → sync → isolate new →
 // resolve → isolate rm) so the overview reads as a runbook and each command's Next points
-// at the natural following step. The cli-layer sync fitness checks this against the live
-// registry so the two can never drift.
+// at the natural following step, FOLLOWED BY the maintenance commands (lock ls) that are
+// not workflow steps but real commands an operator runs out-of-band. The cli-layer sync
+// fitness checks this against the live registry so the two can never drift.
 var table = []Command{
 	{
 		Name:     "init",
@@ -82,6 +83,12 @@ var table = []Command{
 		Synopsis: "remove a task's isolate and release its worktrees",
 		Usage:    "wi isolate rm <task>",
 		Next:     []string{"wi isolate new <task> <repo>…"},
+	},
+	{
+		Name:     "lock ls",
+		Synopsis: "list workspace locks and whether each is safe to break",
+		Usage:    "wi lock ls",
+		Next:     []string{"wi lock break <key>"},
 	},
 }
 

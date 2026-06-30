@@ -204,14 +204,47 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   decoded key-set check). `gofmt`/`go vet`/`go build ./...`/`go test ./...` all GREEN (24 packages). The v0
   (M0–M3) wire output is UNCHANGED — the block is nil on every MVP command, so a 1.0-pinned consumer keeps
   parsing; this is a clean additive minor.
-  NEXT M4 unit — the CLI handler half of `lock ls` now that the wire block exists: (i) a `Result.Locks
-  []contract.LockInfo` field + `assemble.go` mapping `lock.List(layout.LocksDir())` → the block (project each
-  `LockStatus`: Key.String()→key, Decision.{Safe,FSTrustworthy,HolderKnown,ProvenDead,Reason}→bools/reason,
-  Holder→`*LockHolder` iff HolderKnown); (ii) a `cmd_lock_ls.go` read-only handler (`ActionRead`, takes the
-  project-registry lock? — no: read-only, NO flock, just enumerate); (iii) a `"lock ls"` row in
-  `BuildRegistry` + the help table (`HELP-REGISTRY-SYNC` enforces registry⇔help parity). Then `lock break`
-  (ACTION) calls `lock.Break`, exit 0 on a safe break / exit 6 lock_held otherwise. The contract no longer
-  needs to move for these (the block + version are in).
+  (17) ✅ **this firing** — the **`wi lock ls` CLI handler** (guard `CMD-LOCK-LS`,
+  `internal/cli/cmd_lock_ls_unix.go` + `_test`), the first command of the lock-self-heal surface and the
+  first consumer of the M4 `locks` wire block. A READ-ONLY command (`ActionRead`, takes NO flock, dials no
+  network): `lockLsCmd.Run` calls `lock.List(layout.LocksDir())` and `lockInfoOf` projects each `LockStatus`
+  → `contract.LockInfo` (Key.String()→key; Decision.{Safe,FSTrustworthy,HolderKnown,ProvenDead,Reason}→the
+  four always-present bools + reason; `Decision.Holder` → a nested `*LockHolder` **iff HolderKnown**, else a
+  nil holder — a body-less lock projects an omitted holder, never a misleading zero-value one). Wired the
+  block onto the envelope: added `Result.Locks []contract.LockInfo` + the `env.Locks = r.Locks` line in
+  `envelopeFor`'s success arm (the only edit to the generic pipeline). Factory takes NO operand (any arg →
+  kind=usage/exit 64). **PLATFORM RULING (recorded):** `lock.List`/`AssessBreak`/`Break` are `//go:build
+  unix` (flock + statfs trust), and the whole binary is already unix-only (`GOOS=windows go build` fails in
+  `internal/host`). Rather than leave an untagged file calling unix-only symbols, registered the lock
+  commands through a build-tagged hook: `cmd_lock_ls_unix.go` (`//go:build unix`) defines
+  `lockCommands(d) Registry` returning `{"lock ls": …}`; `cmd_lock_other.go` (`//go:build !unix`) returns
+  nil; `BuildRegistry` merges `lockCommands(d)` into the base map. So every file's build constraint is
+  honest and a future non-unix port cleanly excludes the lock surface. Added the `lock ls` row to the
+  `internal/help` table (so `wi help` discovers it and `HELP-REGISTRY-SYNC` stays satisfied — registry and
+  table both carry it on the only platforms that build). **NEXT RULING (recorded):** `TestNextIsRunnable`
+  requires every table command to suggest a runnable follow-up, so `lock ls`'s `Next` is `wi lock break
+  <key>` — a command built NEXT firing. This matches the codebase's own incremental-construction precedent
+  (`init`'s Next pointed at `wi repo add` before `repo add` existed); the whole M4 layer is unreleased
+  (build/wi, unpushed), so the transient forward reference resolves before any release and no fitness
+  requires a Next target to already be a table row. Test-first RED→GREEN over a `bootstrappedLayout` whose
+  LocksDir holds a proven-dead (boot-mismatched) lock + a body-less lock: asserts Action=read, two rows
+  sorted by key, the dead row's four bools all true + Reason set + a populated holder (pid/host/op_id), and
+  the body-less row unknown/not-safe with a NIL holder. Mutant = drop the `if d.HolderKnown { li.Holder=… }`
+  guard in `lockInfoOf` → the known-holder row's identity goes nil → `TestLockLsProjectsHolders` RED on the
+  non-nil-holder assertion (confirmed: `repo:api has a known holder; its nested holder identity must be
+  projected, got nil`), body-less row stays green — isolating the holder projection. `gofmt`/`go vet
+  ./...`/`go build ./...`/`go test ./...` all GREEN (24 packages) + linux cross-compile/vet clean. Live
+  binary smoke: `wi lock ls` (empty) → exit 0, one envelope, `locks` block omitted (empty additive block,
+  per the omitempty convention); `wi lock ls bogus` → usage/exit 64; `wi help` overview lists `lock ls` as
+  the 7th command.
+  NEXT M4 unit — **`wi lock break <key>`** (the ACTION half, makes `lock ls`'s Next runnable and honest): a
+  factory taking exactly one `<key>` operand parsed via `lock.ParseKey` (junk → kind=usage), a handler
+  calling `lock.Break(layout.LocksDir(), key)` and mapping the verdict — `Safe` (proven-dead displaced) →
+  `Result{Action: removed}` + the broken lock's `LockInfo` row / exit 0; not-Safe (live / unknown / fs-
+  untrustworthy holder) → `*CommandError{Kind: KindLockHeld}` carrying the same `LockInfo` so the agent sees
+  WHY / exit 6. Register `"lock break"` in `lockCommands` (unix hook) — NO help-table row needed (its Next
+  is already authored as `lock ls`'s follow-up, and adding a second `lock *` table row is optional). The
+  contract does not move (the `locks` block already carries the break verdict).
   AFTER that: wiring auto-break into `Acquire`'s `*HeldError` path is DEFERRED as a deliberate judgment call —
   on a trustworthy local fs an `EWOULDBLOCK` from `TryLock` means the holder's flock is LIVE (the kernel
   released it if the holder had died), so a silent auto-break there would risk stealing a live peer's lock;

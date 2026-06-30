@@ -21,6 +21,7 @@ type Result struct {
 	Planned  []contract.PlanItem
 	Blocked  []contract.BlockItem
 	Help     *contract.HelpBlock
+	Locks    []contract.LockInfo
 	Warnings []contract.Warning
 	Next     []string
 }
@@ -143,6 +144,7 @@ func envelopeFor(m Meta, r *Result, err error) contract.Envelope {
 		env.Planned = r.Planned
 		env.Blocked = r.Blocked
 		env.Help = r.Help
+		env.Locks = r.Locks
 		env.Warnings = r.Warnings
 		env.Next = r.Next
 		return env
