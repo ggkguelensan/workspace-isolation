@@ -1,5 +1,14 @@
 package isolate
 
+import (
+	"context"
+	"os"
+
+	"github.com/ggkguelensan/workspace-isolation/internal/git"
+	"github.com/ggkguelensan/workspace-isolation/internal/layout"
+	"github.com/ggkguelensan/workspace-isolation/internal/state"
+)
+
 // This file is the evidence-positive classification core of the three-way isolate
 // drift reconciler (`isolate repair`, DESIGN §7.4 HEAL-1). The reconciler reconciles
 // three sources for each repo cell of an isolate — the durable registry stage
@@ -64,4 +73,82 @@ func Classify(markerExists, worktreeExists bool) Classification {
 	default:
 		return ClassReclaimed
 	}
+}
+
+// Cell is the observed three-way state of one repo within an isolate: its recorded
+// registry stage (intended), the base sha its wi-owned marker ref records (proven —
+// empty when no marker survives), and the evidence-positive Classification reconciling
+// those against the worktree on disk (actual). MarkerSHA is the re-materialization
+// source for a ClassMissingWorktree cell — the base tip captured when the cell was
+// created — so the actor recreates the worktree at the exact commit wi owns, never an
+// arbitrary newer base.
+type Cell struct {
+	Repo      string
+	Stage     state.Stage
+	Class     Classification
+	MarkerSHA string
+}
+
+// Inspect is the read-only drift observer for one isolate (HEAL-1, DESIGN §7.4): it
+// loads the registry record for task and, for each recorded repo in record order,
+// observes the two physical ownership signals — the wi-owned marker ref (via
+// git.OwnedRefSHA) and the worktree directory on disk — and Classifies the cell. It
+// is the data-gathering half of `isolate repair`, exactly as lock.List is for
+// `lock break`: it takes no lock, mutates nothing, and dials no network (OwnedRefSHA
+// is a local ref read; worktree presence is an os.Stat). The action half (re-
+// materialize / drop a stale tombstone / heal a lagging stage) is built on top.
+//
+// A task with no record yields state.ErrNoRecord (the CLI maps it to not_found) — the
+// isolate does not exist, which is distinct from a drift-free isolate. A genuine git
+// or layout fault (ref read blew up, an unsafe name) is returned as an error: it is an
+// environment failure, not a per-cell drift, since every drift state is already
+// expressible through the (marker, worktree) signals.
+func Inspect(ctx context.Context, l layout.Layout, g *git.Git, task string) ([]Cell, error) {
+	rec, err := state.Load(l.StateDir(), task)
+	if err != nil {
+		return nil, err // state.ErrNoRecord → not_found; else a read fault
+	}
+	cells := make([]Cell, 0, len(rec.Repos))
+	for _, rr := range rec.Repos {
+		cell, err := observeCell(ctx, l, g, task, rr.Repo, rr.Stage)
+		if err != nil {
+			return nil, err
+		}
+		cells = append(cells, cell)
+	}
+	return cells, nil
+}
+
+// observeCell reads the two physical signals for one repo cell and classifies it. It
+// never moves a ref or dirties a worktree — it only reads the marker ref and stats
+// the worktree path.
+func observeCell(ctx context.Context, l layout.Layout, g *git.Git, task, repo string, stage state.Stage) (Cell, error) {
+	ssot, err := l.Repo(repo)
+	if err != nil {
+		return Cell{}, err
+	}
+	markerSHA, markerExists, err := g.OwnedRefSHA(ctx, ssot, task, repo)
+	if err != nil {
+		return Cell{}, err
+	}
+	wtPath, err := l.Isolate(task, repo)
+	if err != nil {
+		return Cell{}, err
+	}
+	worktreeExists := pathExists(wtPath)
+
+	cell := Cell{Repo: repo, Stage: stage, Class: Classify(markerExists, worktreeExists)}
+	if markerExists {
+		cell.MarkerSHA = markerSHA
+	}
+	return cell, nil
+}
+
+// pathExists reports whether path exists on disk (of any type). A missing path — the
+// signal that a worktree was removed — is the only "false"; any other stat error
+// (e.g. a permission fault) conservatively reads as "present" so the reconciler never
+// treats an inaccessible worktree as a re-materialize target it would clobber.
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
 }
