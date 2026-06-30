@@ -401,17 +401,45 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   then reverted: (a) `RepairBlocked`→`(result,nil)` → blocked-is-conflict RED; (b) `--dry-run` falls through to
   the mutating path → dry-run-does-not-mutate RED. `gofmt`/`go vet`/`go build ./...`/`go test ./...` all GREEN
   (24 packages) + linux cross-build/vet clean.
-  NEXT M4 unit — **build order (recorded):** HEAL-1 is DONE. Next is **evidence-positive gc (HEAL-2,
-  PLAN line 83, DESIGN §7.1):** a read-only sweep for unreferenced wi objects/worktrees with `refs/wi/owned/*`
-  and `refs/wi/backup/*` PROTECTED from collection and any unexplained candidate a HARD BLOCK (never
-  auto-pruned) — the same evidence-positive posture HEAL-1 just shipped, applied workspace-wide. Likely shape:
-  an `internal/gc` domain core (pure candidate-classification first, mirroring Classify/PlanAction) then a
-  `wi gc [--dry-run]` CLI handler reusing the new `--dry-run` seam. AFTER HEAL-2: `land continue/abort/status`
+  (25) ✅ **this firing** — the **evidence-positive gc candidate-classifier** `gc.Classify(Candidate) Class`
+  + the `Candidate`/`Class` types in a NEW `internal/gc` package (guard `GC-CLASSIFY`, `internal/gc/gc.go`
+  + `_test`), the keystone of HEAL-2 (DESIGN §7.1) — exactly the role `isolate.Classify` plays for HEAL-1.
+  A PURE function (no I/O, no build tag) returning the gc verdict over the four signals §7.1 keys
+  reclamation on, carried on a `Candidate{Task,Repo,HasMarker,Live,Clean,AheadOfBase}`: `ClassLive`
+  (a live registry record still claims the cell — gc's to leave alone, short-circuits everything),
+  `ClassReclaimable` (¬live ∧ marker-proven ∧ clean ∧ ¬ahead — the LONE collectable), `ClassBlockedWork`
+  (wi-owned but dirty or ahead — HARD BLOCK, would destroy live work), `ClassOrphanUnexplained` (no marker
+  — no provenance → HARD BLOCK, the loud §7.1 surface, never auto-pruned). The two §7.1 safety guarantees
+  are STRUCTURAL in the gate ORDER: `Live` is the first gate (encoding "not journaled as live" — even a
+  clean, owned, behind live cell is preserved), then the marker is the SECOND gate (without provenance a
+  candidate can ONLY ever be orphan_unexplained, never reclaimable — the evidence-positive keystone), and
+  only once provenance is proven do the work signals decide (any uncommitted/unmerged work → blocked,
+  no-live-loss). **Decision recorded (IMPLEMENTATION_PLAN §7, mirrors REPAIR-PLAN):** `gc.Class` is an
+  isolate-of-gc DOMAIN vocabulary, NOT a closed contract wire enum — like `isolate.Classification`/
+  `RepairAction` it never crosses the envelope directly (the cli layer projects it into repos[]/blocked[]
+  sub-codes); `internal/contract` stays the sole owner of the enums agents parse. Test-first → GREEN: a
+  10-row truth table (`TestClassifyEvidencePositive`) + two keystone tests — `TestClassifyNeverReclaimsWithoutMarker`
+  (evidence-positive: a markerless candidate is never reclaimable however clean) and
+  `TestClassifyNeverReclaimsLiveWork` (no-live-loss: a wi-owned dirty/ahead worktree is never reclaimable).
+  Two mutants confirmed RED-then-reverted (registry above): drop the work-gate → no-live-loss test RED;
+  drop the marker-gate → evidence-positive test RED. `gofmt`/`go vet`/`go build ./...`/`go test ./...` all
+  GREEN (25 packages) + linux cross-build/vet clean.
+  NEXT M4 unit — **build order (recorded):** HEAL-2 keystone (the pure classifier) is DONE. Next sub-units
+  of HEAL-2, mirroring the HEAL-1 Classify→Inspect→Repair split: **(a) the read-only gc sweep**
+  `gc.Inspect(ctx, l, g) ([]Candidate, error)` — enumerate the workspace's wi worktrees (per-task, per-repo
+  from the registry + on-disk), observe each cell's four signals (marker via `git.OwnedRefSHA`, live via the
+  live registry record, clean via `git.IsClean`, ahead via `git.DivergedCounts` against base) and return a
+  classified candidate list; read-only, lock-free, ZERO network (all local ref/stat reads), the same posture
+  as `isolate.Inspect`/`lock.List`. **(b) the gc executor** `gc.Collect(...)` — under the relevant lock,
+  reclaim ONLY `ClassReclaimable` cells (`git.RemoveWorktree` + drop record + `DeleteOwnedRef`), leave
+  `ClassBlockedWork`/`ClassOrphanUnexplained` strictly intact and surface them; `refs/wi/owned/*` +
+  `refs/wi/backup/*` protected; no `--force`, no `--prune`-style reclaim of unexplained objects. **(c) the
+  `wi gc [--dry-run]` CLI handler** reusing the `--dry-run` context seam (Inspect→planned[]/blocked[] on
+  dry-run; Collect→repos[] + conflict refusal if any orphan/blocked-work, exactly the `isolate repair`
+  shape). AFTER HEAL-2: `land continue/abort/status`
   (HEAL-5, backup-ref-before-pointer-move) and the durable op journal + offline roll-forward (HEAL-4). `wi
   doctor`/`check` (HEAL-8) stays LAST in M4 (PLAN line 84) because its bounded `--fix` COMPOSES the safe heals
   (repair + gc), so it can only be built once they exist.
-  THEN evidence-positive gc (HEAL-2, §7.1 — marker refs, `refs/wi/{backup,owned}` protected, unexplained =
-  hard block); and only after those, `wi doctor` (HEAL-8) as the read-only aggregate + `--fix` dispatcher.
   AFTER that: wiring auto-break into `Acquire`'s `*HeldError` path is DEFERRED as a deliberate judgment call —
   on a trustworthy local fs an `EWOULDBLOCK` from `TryLock` means the holder's flock is LIVE (the kernel
   released it if the holder had died), so a silent auto-break there would risk stealing a live peer's lock;
@@ -1612,6 +1640,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 
 | guard | mutant |
 |-------|--------|
+| GC-CLASSIFY (M4 HEAL-2) | in `gc.Classify`, **(no-live-loss limb)** delete the `case !c.Clean \|\| c.AheadOfBase: return ClassBlockedWork` arm → a wi-owned worktree carrying uncommitted/unmerged work falls through to `ClassReclaimable` → `TestClassifyNeverReclaimsLiveWork` RED (`got "reclaimable"`) + the `owned-dirty`/`owned-ahead-but-clean`/`owned-dirty-and-ahead` truth-table rows RED, the orphan/live/clean-reclaimable rows GREEN — pinning HEAL-GC-NO-LIVE-LOSS (DESIGN §7.1: gc never destroys live work). **(Evidence-positive limb)** delete the `case !c.HasMarker: return ClassOrphanUnexplained` arm → a markerless candidate is judged by cleanliness alone, so a clean one becomes `ClassReclaimable` → `TestClassifyNeverReclaimsWithoutMarker` RED + the `no-marker-*` rows RED, the owned/live rows GREEN — pinning the §7.1 evidence-positive keystone (no marker = no provenance = never reclaimable). Pure function, no build tag. Darwin RED→GREEN, both confirmed-then-reverted (`cached` = byte-identity) |
 | REPAIR-PLAN | change the `ClassOrphanWorktree` arm of `isolate.PlanAction` to `return RepairDropRecord` (auto-clean an orphan) → exactly the two `orphan_worktree` rows of `TestPlanActionTruthTable` + `TestPlanActionNeverAutoRemovesOrphan` RED, the other 6 rows GREEN — proving the §7.1 orphan hard-block is load-bearing (a `ClassReclaimed`→`RepairRematerialize` mutant likewise reddens the resurrection guard) |
 | GIT-WORKTREE-PRUNE | make `git.PruneWorktrees` a no-op (`return nil` without running `git worktree prune`) → the stale `.git/worktrees/<id>` admin entry left by an out-of-band worktree-dir removal survives → the post-prune `AddWorktree` in `TestPruneWorktreesClearsStaleAdminEntry` fails "missing but already registered" (exit 128) → RED (the pre-prune failed re-add additionally pins that AddWorktree itself does not silently `--force`) |
 | REPAIR-EXEC | skip the `PruneWorktrees` call in `isolate.Repair`'s `rematerialize` arm (call only `AddWorktree`) → the `web` MissingWorktree cell's re-add fails "missing but already registered" → exactly the `web` rematerialize assertions of `TestRepairReconcilesAllDriftStates` (Done, worktree-present, HEAD-at-marker) RED while the other four arms (`api`/`auth`/`db`/`cache`) stay GREEN — pinning that the executor composes the unit-22 prune primitive before re-adding; alternates: drop a Reclaimed repo from the `drop` set → cache survives in the record RED; turn the `block_orphan` arm into a removal → db orphan-left-intact RED |
