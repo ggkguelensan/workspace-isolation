@@ -627,7 +627,51 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (41) ✅ **this firing** — **HEAL-4 sub-unit 3d-iv-a: `recovery.Run` — the offline startup recovery PASS under
+  (42) ✅ **this firing** — **HEAL-4 sub-unit 3d-iv-b: wire `recovery.Run` into the production startup path —
+  HEAL-4 is now COMPLETE** (guard `CMD-MAIN`, recovery limb; `cmd/wi/main.go` + `cmd/wi/main_test.go`). `run`
+  now performs ONE offline roll-forward recovery pass (`recovery.Run(ctx, root, deps.Git)`) AFTER building
+  `Deps` and BEFORE `cli.Dispatch`, gated on `workspaceInitialized(root)` (an `os.Stat` of `.wi/` that is a
+  dir). **Surfacing DECISION (recorded; no documented recommendation existed — DESIGN §7.4/PLAN §7-#4 fix only
+  the recovery POLICY, not its output):** recovery is a **quiet self-heal** — it emits NO envelope of its own,
+  adds NO `warnings[]`, and needs NO new `contract.WarningCode`. Rationale: (a) the one-envelope contract
+  (DESIGN §3.1) — exactly one envelope per command, and stderr is reserved for an infra write failure, so a
+  second envelope / a startup line is out; (b) the warning vocab is deliberately minimal (decision #1: staleness
+  lives in a structured field, NOT a warning; the closed set grows "only with a schema bump" and only for
+  MVP-wired offline-knowable per-command codes) — a startup maintenance signal is the wrong fit and would
+  over-grow the closed enum + force Dispatch/context plumbing; (c) a SUCCESSFUL roll-forward is self-evident in
+  the resulting state (the interrupted isolate-rm is gone, journal reaped); (d) a FAILED roll-forward LEAVES its
+  journal (`journal.Recover` records it in `report.Failed`, does not Discard) → HEAL-8 `wi doctor`'s "pending
+  journal/parked ops" detector (§7.5) is the DESIGNATED loud surface for it, at the right layer. A HARD recovery
+  fault (a non-`HeldError` lock failure or a fatal journal/fs scan fault returned as `error` from `recovery.Run`)
+  means the workspace is unsafe to act on → startup aborts via the EXISTING `startupFailure` path (kind=internal,
+  exit 70, one envelope) and the command does NOT run. A contended pass (Skipped) and a per-op Finisher error are
+  absorbed inside `recovery.Run`, never surfaced here. **Kept the unit small: ~12 lines of wiring + a 6-line
+  `workspaceInitialized` helper, ZERO contract change, ZERO Dispatch signature / context change.** Fitness
+  `TestRunRecoversAtStartup`: `init` a fresh workspace (the gate correctly SKIPS recovery for init — `.wi/`
+  absent at that point), append a never-committed (intent-only) `isolate_rm` journal op, then `run(["frobnicate"])`
+  → the startup pass classifies it Abandoned and reaps its journal BEFORE dispatch (asserted via the DURABLE
+  side-effect: `journal.Scan` empty afterward, not a return value — LOCK-HOLDER lesson). An unknown command is
+  used deliberately so the pass is provably independent of any valid command body. Test-first → RED (intent op
+  survives, worklist still len 1) → implement → GREEN → registered mutant confirmed RED then reverted (`if false
+  && workspaceInitialized(root)` neuters the gate → intent op never abandoned → RED; revert → `cached` =
+  byte-identity). **The COMPLEMENTARY gate property** (recovery must be SKIPPED on an uninitialized dir, else
+  `recovery.Run`'s `lock.Acquire` over a missing `.wi/locks` errors and aborts startup) is GUARDED FOR FREE by
+  the existing `TestRunInitScaffoldsWorkspace`: dropping/inverting the `workspaceInitialized` gate reddens it
+  (init runs over no `.wi/`, recovery errors, no workspace scaffolded). **Tension recorded for HEAL-8:** startup
+  recovery MUTATES before a (future) read-only `wi doctor` runs, so doctor reports POST-recovery state — a
+  genuinely-stuck (failed) op still surfaces (its journal survives), so doctor's value holds, but if HEAL-8 wants
+  doctor to observe PRE-recovery pending ops it must add a no-recovery path; revisit at HEAL-8. Full gate GREEN
+  (only `? schema` non-ok) + gofmt clean + linux cross-build/vet clean.
+  NEXT M4 unit — **HEAL-4 is COMPLETE** (3a classifier → 3b scan → 3c executor → 3d-i write-side → 3d-ii finisher
+  → 3d-iii dispatcher → 3d-iv-a pass → 3d-iv-b wiring). Next: the now-unblocked **HEAL-GC-NO-LIVE-LOSS case (iii)**
+  — the HEAL-4-reset + HEAL-6-gc COMPOSITION must not prune a discarded sha (a focused `internal/gc` negative
+  fitness; was deferred "until HEAL-4 lands the op journal" — it now has). THEN past HEAL-2/HEAL-4: **HEAL-5**
+  `land continue/abort/status` (parked-land resume/abort with backup-ref safety, §7.2); **HEAL-6** mirror-stale
+  refusal at land (exit 6, never auto-rebase); **HEAL-7** atomic `.wi/` writes (largely done via lockfs — audit);
+  **HEAL-8** `wi doctor`/`check` + bounded `--fix` (LAST — composes the safe heals, and resolves the recovery-vs-
+  read-only tension recorded above).
+
+  (41) ✅ **(prior firing)** — **HEAL-4 sub-unit 3d-iv-a: `recovery.Run` — the offline startup recovery PASS under
   the workspace lock** (guard `HEAL-CRASH-RECOVER`, startup-pass limb; `internal/recovery/run.go` +
   `internal/recovery/run_test.go`). This composes the three pieces already built into the actual pass the
   startup hook performs: `recovery.Run(ctx, l, g) (Report, error)` takes `lock.Workspace()` (unit 40)
@@ -2146,7 +2190,9 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   `cmd_isolate_rm.go` handler (`CMD-ISOLATE-RM`, decision #RD).
 - **DONE — `cmd/wi/main.go`** (guard `CMD-MAIN`, see Done): the single process entry / only `os.Exit`
   site, wiring cwd→layout→real `Deps`→`BuildRegistry`→`Dispatch` through the testable `run` seam. The `wi`
-  binary now runs the full command surface end-to-end (smoke-verified).
+  binary now runs the full command surface end-to-end (smoke-verified). **3d-iv-b (M4 HEAL-4):** `run` also
+  performs ONE offline roll-forward recovery pass (`recovery.Run`) before `Dispatch`, gated on an initialized
+  workspace (`workspaceInitialized`); a quiet self-heal (no envelope), a hard fault aborts via `startupFailure`.
 - **DONE (this firing) — release scaffolding sub-unit (a): the CI gate workflow** (`.github/workflows/
   ci.yml`, decision #CI; preceded by a `style:` commit making the tree gofmt-clean — a prerequisite, see
   Done). Runs `gofmt -l`+`go build`+`go vet`+`go test` on push (`main`+`build/wi`) and PR, matrix
@@ -2256,6 +2302,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | ISOLATE-REMOVE-TEARDOWN | in `isolate.Remove`'s `len(rec.Repos)==0` branch replace `state.Delete` with `state.Store(stateDir, rec)` (keep an empty-repos husk instead of deleting) → a fully-reclaimed isolate's record survives → `TestRemoveAllCleanDeletesRecord` RED (`state.Load` returns a record, want `state.ErrNoRecord`) — pins that full teardown removes the registry entry so a later `isolate rm` correctly reports not_found |
 | CMD-ISOLATE-RM | in `isolateRmCmd.Run`, on the mixed outcome (`removed > 0` with blocks) return `(result, nil)` instead of `(result, *CommandError{Kind:partial, Action:removed})` → a partial teardown is mis-reported as a clean success (no error, exit 0) → `TestIsolateRmDurablePartialBlocksOrphan` RED (`want *cli.CommandError, got <nil>`), while complete-teardown + all-blocked stay GREEN (isolates the mutant to the partial-mapping path); alternate: in `projectRemoveOutcome` map an orphan hard-block to `Kind:internal` (or drop the `Code:"orphan_unexplained"`) → same test RED on the repos[] `web.Error.Kind == conflict` / `Code == orphan_unexplained` assertions — pins the loud `orphan_unexplained` surface (DESIGN §7.1) riding in repos[] not Blocked[] (decision #RD) |
 | CMD-MAIN | in `run` (cmd/wi) `_ = code; return contract.ExitOK` instead of `return code` → run swallows Dispatch's computed exit and always exits 0 → `TestRunUnknownCommandExitsUsage` RED (got 0, want 64), while `TestRunInitScaffoldsWorkspace` stays GREEN (init already exits 0) — isolates the mutant to exit-code propagation; alternate: hand `cli.Dispatch` an empty `Registry{}` instead of `BuildRegistry(deps)` → every command is unknown → `TestRunInitScaffoldsWorkspace` RED (no `.wi/` scaffolded, ok:false/usage not created) — pins that the REAL registry over a cwd-resolved root is wired |
+| CMD-MAIN (recovery limb) (M4 HEAL-4 3d-iv-b) | in `run` (cmd/wi) the offline startup recovery pass is wired BEFORE `cli.Dispatch`, gated on `workspaceInitialized(root)` (`.wi/` exists), aborting startup via `startupFailure` on a hard `recovery.Run` error. **(primary — recovery-runs)** neuter the gate (`if false && workspaceInitialized(root)`) so `recovery.Run` never fires → a never-committed (intent-only) journal op is not abandoned at startup → `TestRunRecoversAtStartup` RED via the DURABLE side-effect (`journal.Scan` after `run` still returns the seeded op, want empty — NOT a bare-return assertion, the LOCK-HOLDER lesson). **(complementary — gate skips uninitialized, guarded for free)** dropping/inverting the `workspaceInitialized` gate makes recovery run over a fresh `init` dir whose `.wi/locks` does not yet exist → `recovery.Run`'s `lock.Acquire` errors (non-`HeldError`) → `startupFailure` → `TestRunInitScaffoldsWorkspace` RED (init never runs, no `.wi/` scaffolded, ok:false not created). Surfacing is intentionally SILENT (a quiet self-heal: no envelope, no `warnings[]`, no new `WarningCode` — one-envelope contract §3.1 + minimal warning vocab decision #1; a failed roll-forward leaves its journal for `wi doctor` §7.5). End-to-end through `run()` over a real tmp workspace, no build tag. Darwin RED→GREEN, confirmed-then-reverted (`cached` = byte-identity) + gofmt clean + linux cross-build/vet clean |
 | SUGGEST-DIDYOUMEAN | in `suggest.For` return `nil` regardless (the shipped test-first stub) → every typo/prefix case loses its suggestion → `TestForSuggestsClosest` RED on the `reslove`/`snc`/`re`/`RESLOVE` rows (got nil, want the match) while the `xyzzy`/empty rows stay GREEN (isolates the mutant to the match path); alternate: drop the threshold/prefix filter and `return candidates` unfiltered → the `xyzzy`/empty "nothing close → nil" rows RED (got the whole command set); alternate: remove the `input==""` guard → empty input prefix-matches everything → `empty input is never a suggestion` RED |
 | CMD-HELP | in `helpCmd.Run` drop the `!ok` not_found branch (`if false && !ok`) so an unknown topic maps the zero `help.Model` to a `Result` instead of refusing → `TestHelpUnknownTopicIsNotFound` RED (got a result, want `*cli.CommandError{not_found}`); or in `envelopeFor` drop the `env.Help = r.Help` success-branch threading → the help block never reaches the wire → `TestHelpEnvelopeCarriesBlockEndToEnd` RED (`env.Help` nil, the help-json capability has no payload). Overview/command-detail tests stay GREEN under either mutant, isolating each to its path |
 | HELP-MODEL | in `help.For` ignore the topic and always `return Model{Synopsis:overview, Commands:Commands(), Next:…}, true` → drilling into a command no longer yields its detail → `TestForCommandDetail` RED (Usage/Next mismatch, Commands non-nil) and `TestForUnknownTopic` RED (got ok=true for `frobnicate`); alternate: `return Model{}, true` for an unknown topic → `TestForUnknownTopic` RED (want ok=false); alternate: drop the `"wi "` prefix on a `table` row's `Next` (or the overview's) → `TestNextIsRunnable` RED (not a runnable `wi …` line); alternate: blank a row's `Usage`/`Synopsis` → `TestTableIsFullyPopulated` RED (help would lie about the surface). Overview/empty-topic rows stay GREEN under the first mutant, isolating it to the per-command path |

@@ -18,6 +18,7 @@ import (
 	"github.com/ggkguelensan/workspace-isolation/internal/git"
 	"github.com/ggkguelensan/workspace-isolation/internal/gitexec"
 	"github.com/ggkguelensan/workspace-isolation/internal/layout"
+	"github.com/ggkguelensan/workspace-isolation/internal/recovery"
 )
 
 func main() {
@@ -50,6 +51,26 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) contract.
 		Git:    git.New(gitexec.New()),
 		Clock:  clk,
 	}
+
+	// HEAL-4 (DESIGN §7.4, sub-unit 3d-iv): one OFFLINE roll-forward recovery pass before
+	// any command body, so an operation a previous run interrupted past its commit point is
+	// FINISHED deterministically at startup (and a never-committed one abandoned). Gated on
+	// an initialized workspace — an uninitialized directory, and `wi init` itself, has no
+	// .wi/ to recover and must not attempt it (recovery.Run needs .wi/locks). The pass is a
+	// quiet self-heal: it emits NO envelope of its own (the one-envelope contract, §3.1) —
+	// a successful roll-forward is evident in the resulting state, and a roll-forward that
+	// FAILS leaves its journal in place for `wi doctor`'s pending-journal detector (§7.5),
+	// the designated loud surface. Only a HARD fault (a non-HeldError lock failure or a
+	// fatal journal/filesystem scan fault) is returned here: the workspace is then unsafe to
+	// act on, so startup aborts with the single internal-error envelope rather than running
+	// the command over a broken state. A contended pass (another process mid-recovery) and a
+	// per-op Finisher error are NOT faults — they are absorbed inside recovery.Run.
+	if workspaceInitialized(root) {
+		if _, err := recovery.Run(ctx, root, deps.Git); err != nil {
+			return startupFailure(stdout, clk, "startup recovery: "+err.Error())
+		}
+	}
+
 	code, werr := cli.Dispatch(ctx, stdout, clk, cli.BuildRegistry(deps), args)
 	if werr != nil {
 		// The envelope could not be written; there is nothing well-formed on stdout to
@@ -59,6 +80,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) contract.
 		return contract.ExitInternal
 	}
 	return code
+}
+
+// workspaceInitialized reports whether root holds an initialized wi workspace — i.e. the
+// .wi/ runtime subtree exists as a directory. It gates the startup recovery pass so an
+// uninitialized directory (and `wi init`, which CREATES .wi/) is never recovered: there is
+// nothing to recover, and recovery.Run's lock.Acquire would fail over a missing .wi/locks.
+// os.Stat is a local syscall, never a network dial.
+func workspaceInitialized(l layout.Layout) bool {
+	info, err := os.Stat(l.WiDir())
+	return err == nil && info.IsDir()
 }
 
 // workspaceRoot resolves the current directory into a normalized layout.Layout (decision

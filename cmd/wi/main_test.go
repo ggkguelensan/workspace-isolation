@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/ggkguelensan/workspace-isolation/internal/contract"
+	"github.com/ggkguelensan/workspace-isolation/internal/journal"
+	"github.com/ggkguelensan/workspace-isolation/internal/layout"
 )
 
 // Guard CMD-MAIN: cmd/wi is the single process entry — the one main package and the one
@@ -102,5 +104,71 @@ func TestRunUnknownCommandExitsUsage(t *testing.T) {
 	}
 	if env.Error == nil || env.Error.Kind != "usage" {
 		t.Errorf("unknown command error = %+v, want kind=usage", env.Error)
+	}
+}
+
+// Startup recovery wiring (HEAL-4 sub-unit 3d-iv-b): run() performs ONE offline
+// roll-forward recovery pass before dispatching, on an INITIALIZED workspace. Seed an
+// initialized workspace through the real `init` path, append a never-committed
+// (intent-only) journal op, then invoke run() again with any command: the startup pass
+// must ABANDON that op and reap its journal BEFORE the command runs. The assertion is the
+// durable side-effect (the journal worklist is empty afterward), not a return value — the
+// recovery.Run call is the unit, and whether the dispatched command itself succeeds is
+// irrelevant, so an unknown command is used to prove the pass is independent of any valid
+// command body. Recovery emits no envelope of its own (the one-envelope contract,
+// DESIGN §3.1): it is a quiet self-heal whose success shows in the resulting state and
+// whose failures (Finisher errors leave the journal) surface later via `wi doctor` (§7.5).
+//
+// Non-vacuity mutant (registered, CMD-MAIN recovery limb): delete the recovery.Run block
+// in run() → the seeded intent-only op is never abandoned → journal.Scan still returns it
+// → this test RED. The COMPLEMENTARY gate property — recovery must be SKIPPED on an
+// uninitialized dir, else recovery.Run's lock.Acquire over a missing .wi/locks errors and
+// aborts startup — is guarded by TestRunInitScaffoldsWorkspace above: dropping the
+// workspaceInitialized gate reddens it (init never runs; no .wi/ is scaffolded).
+func TestRunRecoversAtStartup(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	// Initialize the workspace through the real path. (.wi/ does not exist when init runs,
+	// so the gate correctly skips recovery for init itself.)
+	if code := run(context.Background(), []string{"init"}, io.Discard, io.Discard); code != contract.ExitOK {
+		t.Fatalf("init exit = %d, want %d (ExitOK)", code, contract.ExitOK)
+	}
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", dir, err)
+	}
+	l, err := layout.Resolve(root)
+	if err != nil {
+		t.Fatalf("layout.Resolve(%s): %v", root, err)
+	}
+
+	// A crashed-before-commit op: only an `intent` entry, never `committed`/`done`. The
+	// startup recovery pass classifies it Abandoned and discards its journal (no Finisher,
+	// so no isolate state is needed to exercise the wiring).
+	const opID = "op_intent_only"
+	if err := journal.Append(l.JournalDir(), journal.Entry{
+		OpID:  opID,
+		Kind:  journal.KindIsolateRm,
+		Phase: journal.PhaseIntent,
+		Task:  "feat",
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+	if ops, err := journal.Scan(l.JournalDir()); err != nil || len(ops) != 1 {
+		t.Fatalf("precondition: journal.Scan = (%v, %v), want exactly 1 pending op", ops, err)
+	}
+
+	// Any startup of the now-initialized workspace runs the recovery pass first.
+	var out bytes.Buffer
+	_ = run(context.Background(), []string{"frobnicate"}, &out, io.Discard)
+
+	// Durable effect: the never-committed op was abandoned and its journal reaped.
+	ops, err := journal.Scan(l.JournalDir())
+	if err != nil {
+		t.Fatalf("journal.Scan after run: %v", err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("journal worklist after startup = %v, want empty (the intent-only op must be abandoned by the startup recovery pass)", ops)
 	}
 }
