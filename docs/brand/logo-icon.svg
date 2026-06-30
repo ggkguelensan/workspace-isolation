@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320" width="320" height="320" role="img" aria-label="wi — the dot of the i is a cyan commit node riding the base-ref line; an amber tick marks where work lands.">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#0A1222"/>
+      <stop offset="1" stop-color="#0B1A33"/>
+    </linearGradient>
+    <linearGradient id="ref" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2E6E88" stop-opacity="0"/>
+      <stop offset="0.16" stop-color="#2E6E88"/>
+      <stop offset="0.5" stop-color="#54C7E8"/>
+      <stop offset="0.84" stop-color="#2E6E88"/>
+      <stop offset="1" stop-color="#2E6E88" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="nodeGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#54C7E8" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#54C7E8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- navy ground (squircle) -->
+  <rect x="0" y="0" width="320" height="320" rx="70" fill="url(#bg)"/>
+
+  <!-- base-ref line -->
+  <rect x="40" y="117" width="240" height="7" rx="3.5" fill="url(#ref)"/>
+
+  <!-- node glow -->
+  <circle cx="178" cy="120" r="40" fill="url(#nodeGlow)"/>
+
+  <!-- wordmark: w (text) + i (stem) -->
+  <text x="80" y="236" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="120" font-weight="700" fill="#E2ECF7">w</text>
+  <!-- i stem (tight to the w) -->
+  <rect x="167" y="150" width="22" height="82" rx="7" fill="#E2ECF7"/>
+  <!-- i dot == commit node on the base-ref line -->
+  <circle cx="178" cy="120" r="16" fill="#54C7E8"/>
+
+  <!-- amber landing tick (single accent) -->
+  <rect x="220" y="104" width="10" height="28" rx="5" fill="#F2B43C"/>
+
+  <!-- grounding stroke -->
+  <rect x="80" y="248" width="110" height="5" rx="2.5" fill="#2E6E88" fill-opacity="0.7"/>
+</svg>

@@ -1,23 +1,52 @@
-# wi — brand / logomark exploration
+# wi — brand / logomark
 
-Four logomark directions drawn from the owner's sketch: a **base-ref line carrying a
-commit node** across the top of the `wi` wordmark, a **grounding stroke** beneath, and
-the **amber accent** kept. All reuse the existing brand palette (navy ground, cyan
-structure, one amber pop) and the mono + sans type pairing from [`../banner.svg`](../banner.svg).
+The `wi` mark is the project's git-graph motif folded into the wordmark: a **base-ref
+line** runs across the top, the **dot of the `i` is a cyan commit node** riding that
+line, an **amber tick** marks where work lands by fast-forward, and a quiet **grounding
+stroke** sits beneath. It says, in one glyph, what `wi` does — isolate a node off a
+base ref, then land it forward.
 
-**Overview sheet:** [`logo-concepts.svg`](logo-concepts.svg) — all options on one page.
+![the wi logomark](logo.svg)
 
-| # | Concept | File | In a word |
-|---|---|---|---|
-| 01 | **Square badge** | [`concept-01-square-badge.svg`](concept-01-square-badge.svg) | Safest / most faithful — the whole sketch, boxed, and a crisp app icon down to 32px |
-| 02 | **Branch through letters** | [`concept-02-branch-through-letters.svg`](concept-02-branch-through-letters.svg) | Boldest — a git graph forks to isolate, then fast-forwards onto the amber land node |
-| 03 | **The i-dot is the node** | [`concept-03-i-dot-node.svg`](concept-03-i-dot-node.svg) | Cleverest hook — the `i`'s tittle *is* the commit node on the base-ref line |
-| 04 | **Minimal monoline** | [`concept-04-minimal-monoline.svg`](concept-04-minimal-monoline.svg) | Most minimal — one quiet cyan stroke + a ring node, lots of negative space |
+## Files
 
-A fifth "floating-node lockup" was set aside: it dropped the base-ref line and the
-grounding underline, so the loose node read as two stray dots.
+| File | Use |
+|---|---|
+| [`logo.svg`](logo.svg) | **Primary lockup** (460×286). READMEs, docs, slides — anywhere with horizontal room. |
+| [`logo-icon.svg`](logo-icon.svg) | **Square icon** (320×320, squircle). Favicon, GitHub avatar / social, app icon — legible down to 32px. |
 
-> **Status: awaiting selection.** Nothing here is the official mark yet. Once a direction
-> is chosen, the winner becomes the canonical `wi` logo (referenced from the README), a
-> matching horizontal wordmark variant is derived if needed, and these exploration files
-> are pruned.
+Both are self-contained SVGs: no external fonts, no filters, librsvg-safe. The wordmark
+is set in a monospace stack (`ui-monospace, 'SF Mono', Menlo, Consolas, monospace`,
+weight 700); the `i` stem and dot are drawn as shapes so the tittle can land exactly on
+the base-ref line regardless of the rendering font.
+
+## How to read it
+
+- **Base-ref line** — the trunk the work rides; cyan, brightest at the node, fading at
+  both ends (a ref has no end, only a current position).
+- **`i`-dot = commit node** — the isolated worktree node, sitting *on* base.
+- **Amber tick** — the single accent, used exactly once: the land point further along
+  the line, where the node fast-forwards back onto base.
+- **Grounding stroke** — the quiet underline that seats the wordmark.
+
+## Palette
+
+| Token | Hex | Role |
+|---|---|---|
+| Ground (top→bottom) | `#0A1222` → `#0B1A33` | Navy badge fill |
+| Cyan node / ref bright | `#54C7E8` | Commit node, line peak |
+| Cyan ref dim | `#2E6E88` | Line ends, grounding stroke |
+| Amber accent | `#F2B43C` | Land tick — **once only** |
+| Text primary | `#E2ECF7` | Wordmark |
+
+## Usage
+
+- Keep the amber to a **single** accent — it means "land", not decoration.
+- Don't recolor the node off-cyan or the accent off-amber; the two-colour logic *is* the
+  brand (cyan = structure, amber = the one privileged operation).
+- Give the mark clear space ≈ the height of the `w`; don't crowd it.
+- On light backgrounds, place the badge as-is (it carries its own navy ground) rather
+  than knocking the wordmark out to dark.
+
+The mark shares its palette and mono + sans type pairing with the project
+[`banner.svg`](../banner.svg).
