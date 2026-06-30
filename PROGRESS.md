@@ -627,7 +627,53 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (46) ✅ **this firing** — **the per-task land orchestrator `land.Run`** (guard `LAND-RUN`; `internal/land/
+  (47) ✅ **this firing** — **the land op-journal lifecycle wrapper `land.RunJournaled`** (guard `LAND-JOURNAL`;
+  `internal/land/run.go` + `run_journaled_test.go`, package `land_test`). The land mirror of `isolate.Remove`
+  around `removeCore` (the `removeCore` no-journaling / `Remove` journaling split, DESIGN §7.4 / HEAL-4):
+  `RunJournaled` appends an **`intent`→`committed`** journal entry (Kind `journal.KindLand`) BEFORE delegating to
+  the unit-46 `land.Run` core, so a process that DIES mid-run is rolled forward by the offline startup recovery;
+  then it routes on the outcome — (a) **pre-run failure** (held lock / unwritable initial record → `Run` returns
+  an error with a **zero Result**, so no base ref moved): **DROP** the journal (`Discard`), nothing to roll
+  forward; (b) **fault PAST the commit point** (`Run` errors after it began persisting, e.g. a mid-loop
+  record-`Store` failure → err≠nil with a non-empty Status): **LEAVE** the journal at `committed` for roll-forward
+  (the ONLY case the normal path leaves a land journal); (c) **a CLEAN run — `StatusLanded` OR a deliberately
+  parked `StatusBlocked`:** append **`done`** and **`Discard`**. **RULING RECORDED (open-decision-style, land
+  DIFFERS from `isolate.Remove`):** a parked block is **NOT a crash** — its full state lives in the durable
+  `.wi/land/<task>.json` record, HEAL-5 `land continue`/`land abort` resume from THAT (not the journal), and
+  offline roll-forward **cannot unblock a non-ff** anyway (that needs a rebase, HEAL-5/HEAL-6), so leaving the
+  journal would pin a futile retry forever. `isolate.Remove` leaves a blocked teardown at `committed` because an
+  orphan **can** later resolve and a re-run reclaims it; a land block cannot self-resolve on a blind re-run — hence
+  land self-cleans on a clean block, isolate-rm does not. **Two fitnesses over the real-git harness:**
+  `TestRunJournaledClearsJournalOnCleanLand` (happy land → Status=Landed AND `journal.Scan(JournalDir)` empty — the
+  lifecycle self-cleaned) and `TestRunJournaledClearsJournalOnParkedBlock` (competing-divergent-base non-ff → err=nil,
+  Status=Blocked, journal **empty** (the ruling: NOT left for roll-forward), AND a sanity check that the durable
+  landstate cell still parks api `PhaseBlocked` — clearing the journal did not lose the parked state HEAL-5 reads).
+  **Two registered mutants, both RED→revert→`(cached)` GREEN (byte-identity):** primary = skip the final
+  `journal.Discard` → **BOTH** tests RED (a `Disposition:complete` op survives a clean run — proves the wrapper
+  genuinely writes the full lifecycle and `Discard` is what clears it); ruling-mutant = leave the parked block at
+  `committed` (an early `return res, nil`, the `isolate.Remove` posture) → **ONLY** the parked-block test RED
+  (`Disposition:roll_forward` survives), the clean-land test stays GREEN — pinning that a parked land does NOT leave
+  a roll-forward journal. Full gate GREEN (only `? schema` non-ok) + gofmt clean + linux cross-build/vet clean.
+  **Scope kept tight:** `land.Run` stays the public non-journaling core (the recovery Finisher will re-run IT, the
+  `FinishRemove`→`removeCore` shape); `RunJournaled` is the producer-side wrapper the CLI will call. The KindLand
+  recovery Finisher (consumer side) is HEAL-5 follow-up — until it is wired, `recovery.Finisher`'s default case
+  surfaces a crash-left land journal for retry, never silently drops it.
+  NEXT M4 unit — **the land recovery Finisher** for `journal.KindLand`, wiring it into `recovery.Finisher`'s switch
+  (the `case journal.KindIsolateRm` precedent). PER THE RULING it re-runs the idempotent `land.Run` core
+  (FinishRemove→removeCore shape) — but with a **known subtlety to resolve in that unit:** a blind re-run
+  re-anchors `refs/wi/backup` for already-landed repos at the NEW (work-tip) base, clobbering the original backup
+  and breaking `land abort`'s ability to undo a landed repo — so the Finisher (or `LandRepo`) must only re-attempt
+  repos NOT already `PhaseLanded` (read the durable record, skip landed cells), which is naturally HEAL-5 resume
+  logic. THEN (b) the **`land` CLI command** (`internal/cli/cmd_land.go` + capability `land`/`land-atomic`, PLAN
+  line 137) projecting `Result` onto the envelope (StatusBlocked → exit 2 partial, like isolate-new), calling
+  `RunJournaled`; (c) the **`state cas`** command (DESIGN §8; `--expected __ABSENT__` sentinel frozen). THEN
+  **HEAL-5** `land continue/abort/status` (resume/abort restoring `BackupSHA`, §7.2 — consumes the durable record +
+  the Finisher above); **HEAL-6** mirror-stale refusal at land (exit 6); **HEAL-7** atomic `.wi/` writes audit;
+  **HEAL-8** `wi doctor`/`check` + bounded `--fix` (LAST). **DEFERRED (not next):** HEAL-GC-NO-LIVE-LOSS **case
+  (iii)** — needs a journaled discard/reset verb that does not exist (journal kinds = `isolate_new`/`isolate_rm`/
+  `land`); do NOT fake with a vacuous test (#GC-AHEAD-V0).
+
+  (46) ✅ **(prior firing)** — **the per-task land orchestrator `land.Run`** (guard `LAND-RUN`; `internal/land/
   run.go` + `run_test.go`, package `land_test`). This composes the unit-45 `LandRepo` cell into the actual
   `wi land` op (DESIGN §1, §7.2), mirroring `isolate.New`'s durable-partial-success orchestration (§6.3): under
   the **isolate-state:<task> lock** (DESIGN §6.1, `lock.Acquire`+`held.Stamp(opID)`) it first writes an
@@ -656,22 +702,8 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   Full gate GREEN (only `? schema` non-ok) + gofmt clean + linux cross-build/vet clean. **Scope kept tight:** Run
   owns the lock + durable landstate record + the per-repo loop; the **op-journal lifecycle** (`journal.KindLand`
   crash-recovery wrapper) is the NEXT unit — the same `removeCore` (no journaling) vs `Remove` (journaling) split
-  isolate uses, so the recovery Finisher can re-run the core without re-journaling (DESIGN §7.4).
-  NEXT M4 unit — **the land op-journal lifecycle wrapper** (call it `land.RunJournaled` or fold into a `land.Op`
-  entry point), mirroring `isolate.Remove` around `removeCore`: journal `intent`→`committed` around `land.Run`
-  (Kind `journal.KindLand` already exists), then on a clean `StatusLanded` journal `done`+`Discard`; on
-  `StatusBlocked` (a parked land) LEAVE the journal at `committed` for the offline startup roll-forward (HEAL-4)
-  / `land continue` (HEAL-5) to resume; on a pre-run failure (held lock → zero Result) DROP the journal. **Decide
-  + record** whether land's recovery Finisher re-runs `land.Run` (idempotent: re-landing an already-landed repo is
-  a no-op ff or a now-clean ff) or is a no-op that simply leaves the parked record for `land continue` — the
-  faithful read of DESIGN §7.4 (land roll-forward is offline + idempotent) favors re-running `land.Run`, exactly
-  like `FinishRemove` re-runs `removeCore`. THEN (b) the **`land` CLI command** (`internal/cli/cmd_land.go` +
-  capability `land`/`land-atomic`, PLAN line 137) projecting `Result` onto the envelope (StatusBlocked → exit 2
-  partial, like isolate-new); (c) the **`state cas`** command (DESIGN §8). THEN **HEAL-5** `land continue/abort/
-  status` (resume/abort restoring `BackupSHA`, §7.2 — consumes this record); **HEAL-6** mirror-stale refusal at
-  land (exit 6); **HEAL-7** atomic `.wi/` writes audit; **HEAL-8** `wi doctor`/`check` + bounded `--fix` (LAST).
-  **DEFERRED (not next):** HEAL-GC-NO-LIVE-LOSS **case (iii)** — needs a journaled discard/reset verb that does
-  not exist (journal kinds = `isolate_new`/`isolate_rm`/`land`); do NOT fake with a vacuous test (#GC-AHEAD-V0).
+  isolate uses, so the recovery Finisher can re-run the core without re-journaling (DESIGN §7.4). [op-journal
+  wrapper now built — unit 47 above.]
 
   (45) ✅ **(prior firing)** — **the `internal/land` executor's first repo-cell: `land.LandRepo`** (guard
   `LAND-REPO-FF`; `internal/land/land.go` + `land_test.go`, package `land_test`). This is the irreducible
@@ -2421,6 +2453,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | GIT-BACKUP-REF (M4 land) | the land pre-move safety anchor `CreateBackupRef`/`BackupRefSHA` over `refs/wi/backup/<task>/<repo>` (DESIGN §7.2). Registered mutant = point `backupRefPrefix` at the owned namespace (`refs/wi/backup/`→`refs/wi/owned/`) → `TestBackupRefAnchorsUnderRefsWiBackup` RED on BOTH the raw-git "lives under refs/wi/backup at the sha" assertion (nothing there) AND the `ListOwnedRefs`-returns-empty assertion (the anchor is now wrongly enumerated as an owned/gc candidate) — pinning that the backup-vs-owned namespace separation IS the §7.1 gc-protection that keeps the abort restore point from being collected. Alternate: no-op `CreateBackupRef` → the absent→present round-trip (`BackupRefSHA`) RED. Hermetic real-git harness, no build tag. Confirmed RED→revert→`(cached)` GREEN + linux cross-build/vet clean |
 | LAND-REPO-FF (M4 land) | the `internal/land` executor's single repo-cell `land.LandRepo`: anchor the base's current tip via `CreateBackupRef`, then `FastForwardBaseRef` the base to the worktree's HEAD (the work tip), mapping a `*git.NonFastForwardError` to a clean `PhaseBlocked` refusal (err=nil, base untouched) vs `PhaseLanded` on a true ff (DESIGN §5, §7.2). Primary mutant = skip the `FastForwardBaseRef` call (claim `PhaseLanded`+`LandedSHA` without moving the base) → BOTH `TestLandRepoAdvancesBaseToWorkTip` (base ref not advanced to the work tip) AND `TestLandRepoRefusesNonFastForward` (no error → falls through to landed, never blocked) RED. Alternate = on `NonFastForwardError` set `PhaseLanded`+`LandedSHA` instead of `PhaseBlocked` → ONLY `TestLandRepoRefusesNonFastForward` RED (isolates the refusal-mapping safety property; happy stays GREEN — a true ff never reaches that branch). Alternate = no-op `CreateBackupRef` → the happy-path backup-anchor assertion RED. Hermetic real-git harness, no build tag. Confirmed RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | LAND-RUN (M4 land) | the per-task land orchestrator `land.Run`: under the isolate-state:<task> lock, write an all-pending `landstate.TaskLand`, then land each repo via `LandRepo`, folding+`Store`-ing after every repo, STOP-AT-FIRST-BLOCK (a non-ff/fault parks the repo blocked and leaves later repos pending+untouched). Primary mutant = neuter the stop (`if rr.Phase != PhaseLanded` → `if false`) → ONLY `TestRunParksAtFirstBlockedRepo` RED (the later repo `web` is wrongly landed — its base moves, it is no longer pending, Status not blocked, durable web landed; `TestRunLandsAllReposComplete` stays GREEN since it never blocks). Alternate = skip the per-repo `landstate.Store` (record stays all-pending) → BOTH tests RED on the DURABLE-record assertions specifically while the in-memory `Result` stays correct (pins that the per-repo Store is what makes the parked record durable+resumable). Hermetic real-git harness (isolate.New stands up the worktrees), no build tag. Confirmed RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
+| LAND-JOURNAL (M4 land) | the land op-journal lifecycle wrapper `land.RunJournaled` around the `land.Run` core (the `removeCore`/`Remove` split, DESIGN §7.4/HEAL-4): append `intent`→`committed` (Kind `journal.KindLand`) BEFORE the run, then DROP the journal on a pre-run failure (zero Result), LEAVE it at `committed` on a fault past the commit point, and append `done`+`Discard` on a CLEAN run — `StatusLanded` OR a deliberately parked `StatusBlocked`. RULING: a parked block self-cleans the journal (unlike `isolate.Remove`, which leaves a blocked teardown at `committed` for roll-forward) because roll-forward cannot unblock a non-ff and the parked state lives in the durable landstate record HEAL-5 resumes from. Primary mutant = skip the final `journal.Discard` → BOTH `TestRunJournaledClearsJournalOnCleanLand` AND `TestRunJournaledClearsJournalOnParkedBlock` RED (a `Disposition:complete` op survives — proves the wrapper writes the full lifecycle and Discard clears it). Ruling-mutant = leave the parked block at `committed` (early `return res, nil`, the isolate.Remove posture) → ONLY the parked-block test RED (`Disposition:roll_forward` survives); the clean-land test stays GREEN (it never blocks). Hermetic real-git harness (isolate.New stands up the worktrees), no build tag. Confirmed RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |
@@ -2515,6 +2548,32 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
     practice (that disposition matters for non-idempotent kinds, e.g. a future `isolate_new`). A failure BEFORE
     the teardown begins (held lock / no record / unsafe name → `removeCore` returns the zero `RemoveResult`)
     DROPS the journal: the op never began, so there is nothing to recover and no perpetual-retry entry is left.
+
+- **#4-land: land op-journal lifecycle — a clean parked block SELF-CLEANS its journal (land DIFFERS from
+  isolate-rm) — DECIDED 2026-06-30** (an implementation ruling under #4, recorded so the HEAL-5 land-Finisher
+  unit doesn't re-litigate it; guard `LAND-JOURNAL`). `land.RunJournaled` wraps the `land.Run` core the same way
+  `isolate.Remove` wraps `removeCore` (intent→committed BEFORE the run; the recovery Finisher will re-run the
+  journal-free core, no circular re-journaling). The one place land's lifecycle DIVERGES from isolate-rm's is the
+  outcome routing on a clean run:
+  • **`StatusLanded`** → append `done` + `Discard` (clean success; nothing to recover).
+  • **`StatusBlocked` (a deliberately parked non-ff refusal)** → ALSO append `done` + `Discard`. This is the
+    ruling. A parked block is NOT a crash: its full state lives in the durable `.wi/land/<task>.json` record,
+    HEAL-5 `land continue`/`land abort` resume from THAT (never the journal), and offline roll-forward CANNOT
+    unblock a non-fast-forward anyway (resolving one needs a rebase, HEAL-5/HEAL-6) — so leaving the journal at
+    `committed` would pin a futile auto-retry on every startup forever. Contrast isolate-rm, which DOES leave a
+    blocked teardown at `committed` for roll-forward, precisely because an orphan CAN later resolve and a re-run
+    reclaims it; a land block cannot self-resolve on a blind re-run. The journal's sole job for land is genuine
+    crash recovery (a process that died mid-run, leaving `committed` with no `done`).
+  • **pre-run failure** (held lock / unwritable initial record → `Run` returns the zero Result) → DROP the
+    journal (no base ref moved); **fault PAST the commit point** (a mid-loop record-`Store` failure) → LEAVE at
+    `committed` for roll-forward — the only case the normal path leaves a land journal behind.
+  **Consequent open item for the HEAL-5 land-Finisher unit (recorded, NOT yet built):** the Finisher re-runs the
+  idempotent `land.Run` core (FinishRemove→removeCore shape), BUT a blind re-run re-anchors `refs/wi/backup` for
+  already-landed repos at the new (work-tip) base, clobbering the original backup and breaking `land abort`'s
+  ability to undo a landed repo — so the Finisher (or `LandRepo`) must skip repos already `PhaseLanded` in the
+  durable record. That selective-resume logic is naturally HEAL-5 work, which is why the KindLand finisher is
+  deferred to HEAL-5 rather than wired now; until then `recovery.Finisher`'s default case surfaces a crash-left
+  land journal for retry (never silently drops it).
 
 - **#3 boot_id derivation — RESOLVED 2026-06-30** (the §7 #3 open decision, "Blocks: M4 lock liveness").
   Ruling: `internal/host.BootID()` returns an opaque, boot-stable, platform-tagged id. **darwin:** derive

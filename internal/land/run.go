@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/ggkguelensan/workspace-isolation/internal/git"
+	"github.com/ggkguelensan/workspace-isolation/internal/journal"
 	"github.com/ggkguelensan/workspace-isolation/internal/landstate"
 	"github.com/ggkguelensan/workspace-isolation/internal/layout"
 	"github.com/ggkguelensan/workspace-isolation/internal/lock"
@@ -144,6 +145,78 @@ func Run(ctx context.Context, l layout.Layout, g *git.Git, task, opID string, sp
 			}
 			return res, nil
 		}
+	}
+	return res, nil
+}
+
+// RunJournaled is the op-journal lifecycle wrapper around Run (DESIGN §7.4, HEAL-4) — the
+// land mirror of isolate.Remove around removeCore. It records an intent→committed
+// journal entry (Kind journal.KindLand) BEFORE the run so a process that DIES mid-run is
+// rolled forward by the offline startup recovery, then folds the lock+record+per-repo
+// work in via Run, and finally:
+//
+//   - pre-run failure (a held lock, an unwritable initial record — Run returns an error
+//     with a zero Result, so no base ref ever moved): DROP the journal. The op never
+//     crossed its commit point; there is nothing to roll forward.
+//
+//   - fault PAST the commit point (Run returns an error after it began persisting, e.g. a
+//     mid-loop record-persist failure): LEAVE the journal at `committed` so the offline
+//     startup rolls it forward (re-running the idempotent land). This is the ONLY case a
+//     land journal is left behind by the normal path.
+//
+//   - a CLEAN run — StatusLanded OR a deliberately-parked StatusBlocked: append `done`
+//     and Discard the journal. THE RULING (land DIFFERS from isolate.Remove here): a
+//     parked block is NOT a crash. Its full state lives in the durable
+//     .wi/land/<task>.json record, HEAL-5 `land continue`/`land abort` resume from THAT
+//     (not the journal), and offline roll-forward cannot unblock a non-fast-forward
+//     anyway (that needs a rebase, HEAL-5/HEAL-6) — so leaving the journal would pin a
+//     futile retry forever. isolate.Remove, by contrast, leaves a blocked teardown at
+//     `committed` because an orphan can later resolve and a re-run reclaims it; a land
+//     block cannot self-resolve on a blind re-run.
+//
+// Guard LAND-JOURNAL. The recovery Finisher for journal.KindLand (re-running the
+// non-journaling Run core, the FinishRemove→removeCore shape) is HEAL-5 follow-up work;
+// until it is wired, a land journal left at `committed` by a real crash is surfaced by
+// recovery's default case (left for retry), never silently dropped.
+func RunJournaled(ctx context.Context, l layout.Layout, g *git.Git, task, opID string, specs []RepoSpec) (Result, error) {
+	jdir := l.JournalDir()
+	names := make([]string, len(specs))
+	for i, s := range specs {
+		names[i] = s.Name
+	}
+	base := journal.Entry{OpID: opID, Kind: journal.KindLand, Task: task, Repos: names}
+
+	intent := base
+	intent.Phase = journal.PhaseIntent
+	if err := journal.Append(jdir, intent); err != nil {
+		return Result{}, fmt.Errorf("land: journal intent for %q: %w", task, err)
+	}
+	committed := base
+	committed.Phase = journal.PhaseCommitted
+	if err := journal.Append(jdir, committed); err != nil {
+		return Result{}, fmt.Errorf("land: journal committed for %q: %w", task, err)
+	}
+
+	res, err := Run(ctx, l, g, task, opID, specs)
+	switch {
+	case err != nil && res.Status == "":
+		// Pre-run failure: no base ref moved. Drop the journal — nothing to roll forward.
+		_ = journal.Discard(jdir, opID)
+		return res, err
+	case err != nil:
+		// Fault past the commit point: leave the journal at `committed` for roll-forward.
+		return res, err
+	}
+
+	// Clean run (StatusLanded or a parked StatusBlocked): close the lifecycle and
+	// self-clean — see THE RULING above.
+	done := base
+	done.Phase = journal.PhaseDone
+	if aerr := journal.Append(jdir, done); aerr != nil {
+		return res, fmt.Errorf("land: journal done for %q: %w", task, aerr)
+	}
+	if derr := journal.Discard(jdir, opID); derr != nil {
+		return res, fmt.Errorf("land: discard journal for %q: %w", task, derr)
 	}
 	return res, nil
 }
