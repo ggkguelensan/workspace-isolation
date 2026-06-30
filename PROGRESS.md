@@ -2276,6 +2276,20 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **Owner request (Request D) · portable `install.sh` for users without Go / with an old Go.** Owner:
+  the README install steps assumed Go was already present at the right version; write a portable
+  installer that accounts for Go being missing or the wrong version. Produced `install.sh` (plain POSIX
+  `sh`, no bashisms): detects OS/arch (darwin/linux × amd64/arm64), abstracts curl-or-wget with HTTPS
+  pinned on every redirect hop, **probes for a published GitHub release** and verifies it against
+  `checksums.txt` (sha256, refuses an unverified binary), **falls back to `go install` when no release
+  matches** and Go ≥ 1.26 is on PATH, else prints exactly how to install/upgrade Go. `--dry-run` /
+  `WI_DRY_RUN` change nothing; `WI_INSTALL_DIR` overrides the dir (default `~/.local/bin`) with
+  shell-tailored PATH advice. **Honesty constraint honored:** no prebuilt release/Homebrew tap exists
+  yet, so the script reports that and builds from source — it never claims a release that isn't
+  published; README says the same plainly. Validated: `sh -n` clean; `--dry-run`/`--help`/bad-arg
+  exercised on darwin/arm64 + Go 1.26.2 (correctly falls through to `go install`). Process artifact (a
+  shell script + README), no Go guard — fitness is `sh -n` + the dry-run behavior. Committed `c21598a`.
+
 - **Owner request (Request E) · `base` becomes an ordered candidate list — first-existing-branch
   resolution.** Owner: `"defaults": { "base": "main" }` → `"defaults": { "base": ["dev", "main"] }`
   ("first check whether `dev` exists, only then `main`"). `config.Defaults.Base`/`Repo.Base` change
