@@ -162,15 +162,43 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   empty-dir cases stayed green, isolating the skip. Alternate = drop the `os.ErrNotExist` special-case →
   missing-dir case reddens. `gofmt`/`go build ./...`/`go test ./...` all GREEN (24 packages) + linux build/vet
   clean.
-  NEXT M4 unit: the CLI **`lock ls`** command — the first M4 step that touches `internal/contract`. It needs
-  (i) a new Envelope payload carrying the lock list (a `[]LockInfo` with key/holder/safe/reason per row) +
-  a **SchemaVersion bump** (1.0 → 1.1, additive) + the `contract.lock.json` fingerprint regen; (ii) a `Result`
-  field + `assemble.go` wiring; (iii) a `cmd_lock_ls.go` handler that calls `lock.List(layout.LocksDir())` and
-  projects it (read-only, `ActionRead`); (iv) a `"lock ls"` row in `BuildRegistry` + the help table
-  (`help_registry_sync_test` enforces they match). **FLAG for the owner:** this is the first wire-contract
-  change since M0 froze it — additive (new optional payload + minor version bump), but it moves the schema.
-  AFTER that: `lock break` (the ACTION: gate on `Safe`, then displace the stale lock; exit 6 lock_held when
-  not Safe), then wiring `AssessBreak`→auto-break into `Acquire`'s `*HeldError` path.
+  (15) ✅ **this firing** — `lock.Break(locksDir, key) (BreakDecision, error)` (guard `LOCK-BREAK`,
+  `internal/lock/break_unix.go`), the ACTION counterpart to `List`: it displaces a stale lock by unlinking its
+  file, but ONLY when the read-only `AssessBreak` gate returns `Safe` (holder PROVEN DEAD on a
+  flock-trustworthy fs). When not Safe — live holder, unknown/body-less holder, or untrustworthy fs — it
+  removes NOTHING and returns the verdict unchanged (caller → exit 6 lock_held). Unlinking is the right
+  displacement because a proven-dead holder no longer holds the flock (the kernel releases it on process exit,
+  and a reboot that changes the boot_id wipes all flock state — see `lockfs/flock_unix.go`), so the only
+  artifact left is the stale-body file; the next `Acquire` O_CREATEs a fresh file. The **Safe gate is
+  load-bearing**: unlinking a file a LIVE peer still holds would break mutual exclusion (a later Acquire makes
+  a NEW inode and flocks that, not the live holder's) — the exact data-loss path DESIGN §7 forbids. Tagged
+  `//go:build unix`. Test-first RED→GREEN over `t.TempDir()` (trustworthy apfs): proven-dead holder
+  (boot-mismatched) → broken, file gone; live holder (`CurrentHolder`) → refused, file intact; body-less lock
+  → unknown holder, refused, file intact; missing file → not an error (nothing to break). A vanished-between-
+  assess-and-unlink race is tolerated (`errors.Is(err, os.ErrNotExist)`). Mutant = drop the `if !d.Safe`
+  early return (always unlink) → the live-holder AND unknown-holder subtests reddened (their refused lock was
+  destroyed) while proven-dead + nothing-to-break stayed green, isolating the gate. `gofmt`/`go build
+  ./...`/`go test ./...` all GREEN (24 packages). This completes the read-only + action lock-self-heal
+  PRIMITIVES (AssessBreak → List → Break) entirely inside `internal/lock` — the MVP wire contract is still
+  100% frozen (no `internal/contract` touch yet).
+  NEXT M4 unit — the CLI surface for the lock-self-heal primitives (`lock ls` + `lock break`), the FIRST M4
+  step that crosses `internal/contract`. `lock ls` needs (i) a new additive Envelope payload carrying the lock
+  list (a `[]LockInfo{key, holder pid/host/op_id, safe, reason}` block, omitempty, following the
+  Resolve/Planned/Blocked/Help precedent) + a **SchemaVersion bump 1.0 → 1.1 (additive minor)** + the schema
+  kept in lockstep (`schema/envelope.schema.json` / `schema.EnvelopeSchema`) + a `contract.lock.json`
+  fingerprint regen (`WI_UPDATE_CONTRACT_LOCK=1`); (ii) a `Result` field + `assemble.go` wiring; (iii) a
+  `cmd_lock_ls.go` handler calling `lock.List(layout.LocksDir())` and projecting it (read-only, `ActionRead`);
+  (iv) a `"lock ls"` row in `BuildRegistry` + the help table (`help_registry_sync_test` enforces they match).
+  `lock break` (ACTION) then calls `lock.Break`, exits 0 on a safe break, exit 6 lock_held otherwise.
+  **FLAG for the owner:** this is the first wire-contract change since M0 froze it — fully additive (new
+  optional block + minor version bump, anticipated by the envelope/schema comments), but it MOVES THE SCHEMA.
+  The owner may prefer to hold here, since the MVP and all lock-heal primitives are green and the CLI surface
+  for them is the first thing that touches the frozen contract.
+  AFTER that: wiring auto-break into `Acquire`'s `*HeldError` path is DEFERRED as a deliberate judgment call —
+  on a trustworthy local fs an `EWOULDBLOCK` from `TryLock` means the holder's flock is LIVE (the kernel
+  released it if the holder had died), so a silent auto-break there would risk stealing a live peer's lock;
+  the safe HEAL-3 surface is the explicit `lock break` command + `wi doctor`, not a silent break inside
+  Acquire. Revisit only with a concrete stale-flock scenario that survives the proven-dead gate.
 
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
@@ -1442,6 +1470,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | LOCK-SAFE-TO-BREAK (M4) | in `AssessBreak` drop the `ProvenDead` conjunct from the verdict — replace `case !d.ProvenDead:`/`default:` with a single `default:` that sets `Safe=true` (i.e. `Safe = FSTrustworthy && HolderKnown`, break any known holder on a trustworthy fs, alive or not) → the live-holder case (body = `CurrentHolder` = THIS running process) reads `Safe=true` → `TestAssessBreak/live_holder_is_never_breakable` RED (`Safe = true while the holder (this process) is alive`). Confirmed RED before green — ONLY the live case reddened; the unknown-holder case (`HolderKnown=false`→Safe=false) and the proven-dead case (boot-mismatched holder→Safe=true correctly) stayed green, proving the test isolates exactly the dropped conjunct. Alternate mutant = treat an unknown holder as breakable → the unknown-holder case reddens. Pins the HEAL-3 composition (DESIGN §7.3 / §7.4): the read-only break verdict is the conjunction of all three gates (fs-trustworthy AND holder-known AND proven-dead), fail-safe on every other state, so wi never steals a lock from a live or unknown peer. Darwin host RED→GREEN; `//go:build unix` file linux-verified via `GOOS=linux go build`+`go vet` |
 | LOCK-PARSE-KEY (M4) | in `ParseKey` replace the `default` error branch with `return Repo(s)` (treat any unrecognized string as a repo key) → a junk filename with no recognized namespace prefix but an otherwise-valid segment (`"garbage"`, `"unknown:thing"`) parses successfully as a repo key → `TestParseKey` RED on exactly those rejection cases (`ParseKey("garbage") = nil error, want error`). Confirmed RED before green — the round-trip cases (ProjectRegistry/Repo/IsolateState) and the prefix-handled rejections (`"repo:"`,`"repo:bad/name"`,`"isolate-state:"` — caught by the repo/isolate branches' `ValidateSegment`) stayed green, isolating the namespace-gate. Alternate = drop the `"isolate-state:"` branch (fall to the default error) → the isolate-state round-trip reddens (`ParseKey("isolate-state:feature-x"): unexpected error`). Pins the inverse of the key namespace `lock ls` relies on: a stray, non-key file in the locks dir is rejected, never fabricated into a Key and assessed. Shared namespace consts make `String()` and ParseKey provably non-drifting (DESIGN §6.1 / §7.3) |
 | LOCK-LIST (M4) | in `List` drop the stray-skip — change `key, err := ParseKey(...)`/`if err != nil { continue }` to `key, _ := ParseKey(...)` and assess unconditionally → a `.lock` file whose stem is not a valid key (`notakey.lock`) yields the zero Key and is fabricated into a phantom LockStatus with an empty key → `TestList` RED on the exact sorted-key-set assertion (`List keys = [<empty> isolate-state:task1 project-registry repo:api], want [isolate-state:task1 …]`). Confirmed RED before green — the missing-dir and empty-dir subtests stayed green, isolating the stray-skip. Alternate = drop the `errors.Is(err, os.ErrNotExist)` special-case → a missing locksDir returns an error → the "missing dir is empty, not an error" subtest reddens. Pins that lock enumeration (the data half of `lock ls`) skips strays (a non-key file is NEVER fabricated into a lock), treats "no locks" as a valid empty result, and carries each lock's AssessBreak verdict (DESIGN §7.3 / §7.4) |
+| LOCK-BREAK (M4) | in `Break` drop the `if !d.Safe { return d, nil }` early return so it ALWAYS `os.Remove`s the lock file regardless of verdict → a refused break still destroys the file → `TestBreak` RED on BOTH the `live_holder_is_refused_and_left_intact` and `unknown_holder_(body-less)_is_refused_and_left_intact` subtests (`lock file removed …, want intact`), while `proven-dead … is broken` and `nothing to break is not an error` stay green — isolating the mutant to exactly the safe gate. Alternate = replace `os.Remove(...)` with a no-op → the proven-dead subtest reddens (`lock file still present after a safe break, want removed`). Pins the DESIGN §7.3 / HEAL-3 displacement action: a lock is unlinked ONLY when AssessBreak proves the holder dead on a trustworthy fs; unlinking a file a LIVE peer holds would break mutual exclusion (next Acquire O_CREATEs a new inode and flocks that), the exact data-loss path §7 forbids. Darwin host RED→GREEN; `//go:build unix` |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
