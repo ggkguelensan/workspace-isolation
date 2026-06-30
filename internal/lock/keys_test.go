@@ -46,6 +46,17 @@ func TestCanonicalKeyStrings(t *testing.T) {
 	if got := Workspace().String(); got != "workspace" {
 		t.Errorf("Workspace = %q, want workspace", got)
 	}
+	// state-kv:<namespace> guards a single KV namespace's compare-and-swap
+	// (the `wi state cas` primitive, DESIGN §8). Its canonical string is a
+	// durable wire contract like the others: a CAS in one process must contend
+	// on the byte-identical key another process derives for the same namespace.
+	kv, err := StateKV("ports")
+	if err != nil {
+		t.Fatalf("StateKV(ports): %v", err)
+	}
+	if got := kv.String(); got != "state-kv:ports" {
+		t.Errorf("StateKV(ports) = %q, want state-kv:ports", got)
+	}
 }
 
 func TestKeyConstructorsRejectUnsafeNames(t *testing.T) {
@@ -55,6 +66,9 @@ func TestKeyConstructorsRejectUnsafeNames(t *testing.T) {
 		}
 		if _, err := IsolateState(bad); err == nil {
 			t.Errorf("IsolateState(%q) = nil error, want rejection", bad)
+		}
+		if _, err := StateKV(bad); err == nil {
+			t.Errorf("StateKV(%q) = nil error, want rejection", bad)
 		}
 	}
 	// Accept floor: a plain safe segment must be allowed.

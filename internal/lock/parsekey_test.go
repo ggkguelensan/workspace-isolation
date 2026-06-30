@@ -24,7 +24,11 @@ func TestParseKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []Key{ProjectRegistry(), Workspace(), api, iso} {
+	kv, err := StateKV("ports")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []Key{ProjectRegistry(), Workspace(), api, iso, kv} {
 		got, err := ParseKey(want.String())
 		if err != nil {
 			t.Errorf("ParseKey(%q): unexpected error %v", want.String(), err)
@@ -44,6 +48,8 @@ func TestParseKey(t *testing.T) {
 		"repo:",          // empty repo segment
 		"repo:bad/name",  // segment with a path separator
 		"isolate-state:", // empty task segment
+		"state-kv:",      // empty namespace segment
+		"state-kv:a/b",   // namespace with a path separator
 		"unknown:thing",  // unrecognized namespace
 	} {
 		if _, err := ParseKey(bad); err == nil {

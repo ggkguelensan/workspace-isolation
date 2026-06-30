@@ -627,7 +627,44 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (48) ✅ **this firing** — **the `wi land <task> <repo>…` CLI command** (guard `CMD-LAND`; `internal/cli/
+  (49) ✅ **this firing** — **the `state-kv:<namespace>` lock key** (guard `LOCK-KEY-STATE-KV`; `internal/lock/
+  keys.go` + `keys_test.go` + `parsekey_test.go`), the FIRST sub-unit of `state cas` (DESIGN §8). **Build-over-doc
+  correction:** the unit-(48) NEXT pointer offered "the `state cas` command — a clean, self-contained CLI unit
+  composing the green `state` core", but `internal/state` today owns ONLY the isolate **registry**; the namespaced
+  **KV + CAS** half that DESIGN §map line 168 assigns it does NOT exist. So `state cas` is really three disciplined
+  units, built bottom-up: (1) THIS — the lock key the CAS serializes on; (2) the `internal/state` KV+CAS core
+  (`Get`/`CompareAndSwap`, `__ABSENT__` sentinel) composing `lock.Acquire(lock.StateKV(ns))`; (3) the `state cas`
+  CLI command. **DECISION #SKV recorded** (decomposition + the cross-process-atomicity mechanism): a CAS must read
+  the current value, compare, and conditionally write as ONE atomic step against concurrent agents — wi already
+  has exactly one cross-process serializer, the flock-backed `lock.Acquire`, which is non-blocking (a contended
+  namespace surfaces `*HeldError` → exit 6 lock_held, the same fail-fast-and-retry posture every wi lock takes),
+  so the CAS core will take `lock.StateKV(ns)` around its load-compare-store rather than invent a second locking
+  path. The key is `state-kv:<namespace>` (namespace validated by `layout.ValidateSegment` — it also becomes the
+  store filename, owned by `internal/state`), added to the closed `lock.Key` namespace (lock, NOT contract, is the
+  sole owner of the lock-key namespace — contract owns only the wire enums). `ParseKey` reverses it so `lock ls`
+  recognizes a `state-kv:<ns>.lock` file as a real key rather than rejecting it as a stray. **Fitnesses:**
+  `TestCanonicalKeyStrings` pins the literal `state-kv:ports` (a durable wire string, not just a round-trip — the
+  LOCK-HOLDER lesson); `TestKeyConstructorsRejectUnsafeNames` adds `StateKV` to the traversal/separator/empty
+  battery; `TestParseKey` adds the `state-kv` round-trip + rejects `"state-kv:"` (empty) and `"state-kv:a/b"`
+  (separator). **Registered mutant** (RED→revert→`(cached)` GREEN, byte-identity): drop the `state-kv:` arm of
+  `ParseKey` → `TestParseKey` RED (`ParseKey("state-kv:ports"): unexpected error … is not a valid key`). Full gate
+  GREEN (28 pkgs ok + `? schema`) + gofmt clean + linux cross-build/vet clean. NB `CapStateKV` already lives in the
+  vocabulary but stays DARK in `Capabilities()` (capability ⇒ backing command — lit only when `state cas` is wired).
+  NEXT M4 unit — **sub-unit (2): the `internal/state` KV + CAS core.** `state.KVGet(stateDir, ns, key) (val string,
+  ok bool, err error)` (pure local read) + `state.KVCompareAndSwap(stateDir, ns, key, expected, new string)
+  (swapped bool, err error)` taking `lock.Acquire(locksDir, lock.StateKV(ns))` around a load-compare-store, with
+  `expected == state.AbsentSentinel` ("__ABSENT__", frozen) meaning "swap only if key currently absent". Storage:
+  `.wi/state/kv/<ns>.json` = a `{"<key>":"<value>"}` map written via `lockfs.WriteFileAtomic` (the `kv/` subdir is
+  skipped by `state.List`, which ignores dirs — no collision with the `<task>.json` registry). Fitness: CAS from
+  absent succeeds + persists; CAS with matching expected swaps; CAS with mismatched expected returns swapped=false
+  and does NOT write; a second CAS with the now-absent sentinel fails. Decide whether the CAS core takes a
+  `*lock.Held` it owns end-to-end or accepts an already-held lock (lean: owns it — symmetric with `isolate.New`).
+  THEN sub-unit (3) the `state cas`/`state get`/`state set` CLI command(s) + advertise `CapStateKV`. AFTER state
+  cas: **HEAL-5** `land continue/abort/status`; **HEAL-6** mirror-stale at land (exit 6); **HEAL-7** atomic `.wi/`
+  audit; **HEAL-8** `wi doctor` (LAST). **DEFERRED:** the land recovery Finisher (HEAL-5, unit 47); HEAL-GC-NO-LIVE-
+  LOSS case (iii) — needs a journaled discard verb that doesn't exist; do NOT fake with a vacuous test (#GC-AHEAD-V0).
+
+  (48) ✅ **(prior firing)** — **the `wi land <task> <repo>…` CLI command** (guard `CMD-LAND`; `internal/cli/
   cmd_land.go` + `cmd_land_test.go`, package `cli_test`), the seam where the unit-47 `land.RunJournaled` core
   (journaled, durable, stop-at-first-block) meets the envelope contract — making `wi land` runnable end-to-end.
   `newLandCommand` validates a safe `<task>` segment + ≥1 `<repo>` (a traversing task name → clean usage refusal
@@ -662,18 +699,9 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `goldenSuccess` (TestEnvelopeGoldenSuccess): adding `CapLand` reddened it (drift showing `,"land"`); the golden
   was updated to the honest new wire form — confirmed RED→GREEN. Full gate GREEN (only `? schema` non-ok) + gofmt
   clean + linux cross-build/vet clean.
-  NEXT M4 unit — **(a) the `state cas` command** (DESIGN §8; the `--expected __ABSENT__` sentinel is frozen) — a
-  clean, self-contained CLI unit composing the green `state` core. OR **(b) the land recovery Finisher** for
-  `journal.KindLand` (wiring into `recovery.Finisher`'s switch, the `case journal.KindIsolateRm` precedent) — but
-  this is genuinely coupled to **HEAL-5** resume logic: per the unit-47 ruling a blind re-run of `land.Run`
-  re-anchors `refs/wi/backup` for already-landed repos at the NEW base (clobbering the original backup, breaking
-  `land abort`) AND `land.Run` rewrites a fresh all-pending record (overwriting what already landed), so the
-  Finisher MUST read the durable record and skip `PhaseLanded` cells (re-resolving bases from the manifest, since
-  `landstate.RepoLand` has no base field) — defer it to the HEAL-5 block. THEN **HEAL-5** `land continue/abort/
-  status` (resume/abort restoring `BackupSHA`, §7.2); **HEAL-6** mirror-stale refusal at land (exit 6); **HEAL-7**
-  atomic `.wi/` writes audit; **HEAL-8** `wi doctor`/`check` + bounded `--fix` (LAST). **DEFERRED (not next):**
-  HEAL-GC-NO-LIVE-LOSS **case (iii)** — needs a journaled discard/reset verb that does not exist; do NOT fake with
-  a vacuous test (#GC-AHEAD-V0).
+  [NEXT superseded — the `state cas` command is now decomposed into sub-units (its KV/CAS core did NOT exist; the
+  prior "compose the green state core" premise was wrong, build over doc). The FIRST sub-unit — the `state-kv:<ns>`
+  lock key — is built; see unit (49) above. The land recovery Finisher remains deferred to HEAL-5 per unit (47).]
 
   (47) ✅ **(prior firing)** — **the land op-journal lifecycle wrapper `land.RunJournaled`** (guard `LAND-JOURNAL`;
   `internal/land/run.go` + `run_journaled_test.go`, package `land_test`). The land mirror of `isolate.Remove`
@@ -2491,6 +2519,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | LAND-RUN (M4 land) | the per-task land orchestrator `land.Run`: under the isolate-state:<task> lock, write an all-pending `landstate.TaskLand`, then land each repo via `LandRepo`, folding+`Store`-ing after every repo, STOP-AT-FIRST-BLOCK (a non-ff/fault parks the repo blocked and leaves later repos pending+untouched). Primary mutant = neuter the stop (`if rr.Phase != PhaseLanded` → `if false`) → ONLY `TestRunParksAtFirstBlockedRepo` RED (the later repo `web` is wrongly landed — its base moves, it is no longer pending, Status not blocked, durable web landed; `TestRunLandsAllReposComplete` stays GREEN since it never blocks). Alternate = skip the per-repo `landstate.Store` (record stays all-pending) → BOTH tests RED on the DURABLE-record assertions specifically while the in-memory `Result` stays correct (pins that the per-repo Store is what makes the parked record durable+resumable). Hermetic real-git harness (isolate.New stands up the worktrees), no build tag. Confirmed RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | LAND-JOURNAL (M4 land) | the land op-journal lifecycle wrapper `land.RunJournaled` around the `land.Run` core (the `removeCore`/`Remove` split, DESIGN §7.4/HEAL-4): append `intent`→`committed` (Kind `journal.KindLand`) BEFORE the run, then DROP the journal on a pre-run failure (zero Result), LEAVE it at `committed` on a fault past the commit point, and append `done`+`Discard` on a CLEAN run — `StatusLanded` OR a deliberately parked `StatusBlocked`. RULING: a parked block self-cleans the journal (unlike `isolate.Remove`, which leaves a blocked teardown at `committed` for roll-forward) because roll-forward cannot unblock a non-ff and the parked state lives in the durable landstate record HEAL-5 resumes from. Primary mutant = skip the final `journal.Discard` → BOTH `TestRunJournaledClearsJournalOnCleanLand` AND `TestRunJournaledClearsJournalOnParkedBlock` RED (a `Disposition:complete` op survives — proves the wrapper writes the full lifecycle and Discard clears it). Ruling-mutant = leave the parked block at `committed` (early `return res, nil`, the isolate.Remove posture) → ONLY the parked-block test RED (`Disposition:roll_forward` survives); the clean-land test stays GREEN (it never blocks). Hermetic real-git harness (isolate.New stands up the worktrees), no build tag. Confirmed RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | CMD-LAND (M4 land) | the `wi land <task> <repo>…` handler (`landCmd.Run`): resolve specs from the manifest, call `land.RunJournaled`, map Status onto the return convention MIRRORING `isolate rm` (decision #LD) — all landed → landed Result (exit 0); ≥1 landed then blocked → DURABLE PARTIAL `(result, *CommandError{partial, Action: landed})` (exit 2); nothing landed → full refusal `*CommandError{conflict}` (exit 4); a parked non-ff block rides in `repos[]` as a per-repo conflict coded `non_fast_forward`. Primary mutant = on the mixed outcome return `(result, nil)` instead of the partial CommandError → `TestLandCommandPartialBlocksOneRepo` RED (a partial land mis-reported as a clean success — want `*cli.CommandError{partial}`, got nil). Alternate = map the all-blocked outcome to `KindPartial` instead of `KindConflict` → `TestLandCommandAllBlockedIsConflict` RED (a nothing-changed refusal must be exit 4, not 2). A SECOND coupled change — advertising `CapLand` in `contract.Capabilities()` — is guarded by the byte-exact `goldenSuccess` (`TestEnvelopeGoldenSuccess`): adding `CapLand` reddened it (drift showing `,"land"` appended), the golden was updated to the honest wire form → RED→GREEN confirmed. End-to-end over the real-git harness through the registry factory + `cmd.Run(WithOpID(...))`, no build tag. Full gate GREEN (only `? schema` non-ok) + gofmt clean + linux cross-build/vet clean |
+| LOCK-KEY-STATE-KV (M4 state cas) | the `state-kv:<namespace>` key in the closed `lock.Key` namespace (`internal/lock/keys.go`) — the key `wi state cas` takes around its load-compare-store so a CAS is atomic across processes. `StateKV(namespace)` validates the namespace via `layout.ValidateSegment` and yields the canonical string `state-kv:<namespace>`; `ParseKey` reverses it (so a `state-kv:<ns>.lock` file is recognized as a real key, not rejected as a stray). Registered mutant = drop the `case strings.HasPrefix(s, stateKVPrefix)` arm of `ParseKey` → `TestParseKey` RED (`ParseKey("state-kv:ports"): unexpected error … is not a valid key`) — pinning the round-trip the lock lister relies on. Also pinned: `TestCanonicalKeyStrings` (literal `state-kv:ports`) + `TestKeyConstructorsRejectUnsafeNames` (traversal/separator/empty namespace rejected). Pure key namespace, no I/O, no build tag. Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |

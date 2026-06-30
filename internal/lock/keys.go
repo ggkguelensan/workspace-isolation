@@ -12,6 +12,9 @@
 //	                       IDENTICAL key, which is what linearizes the freshness
 //	                       race between fetching and landing (DESIGN §6.1)
 //	isolate-state:<name>   a single task's isolate state
+//	state-kv:<namespace>   a single KV namespace's compare-and-swap — the
+//	                       `wi state cas` primitive serializes its load-compare-store
+//	                       on this key so a CAS is atomic across processes (DESIGN §8)
 //
 // Acquisition is non-blocking (TryLock): a contended key surfaces as *HeldError,
 // which the CLI maps to exit 6 lock_held. Multi-key acquires fold the request
@@ -40,6 +43,7 @@ const (
 	projectRegistryKey = "project-registry"
 	repoPrefix         = "repo:"
 	isolateStatePrefix = "isolate-state:"
+	stateKVPrefix      = "state-kv:"
 )
 
 // Key is one key in the closed lock namespace. Its String() is a stable wire
@@ -91,6 +95,7 @@ func Repo(name string) (Key, error) {
 //	"project-registry"      -> ProjectRegistry()
 //	"repo:<name>"           -> Repo(name)
 //	"isolate-state:<name>"  -> IsolateState(name)
+//	"state-kv:<namespace>"  -> StateKV(namespace)
 //
 // An unrecognized prefix, or a name segment that fails validation (empty, traversal,
 // separator), is an error — ParseKey never fabricates a Key for an input String()
@@ -105,6 +110,8 @@ func ParseKey(s string) (Key, error) {
 		return Repo(strings.TrimPrefix(s, repoPrefix))
 	case strings.HasPrefix(s, isolateStatePrefix):
 		return IsolateState(strings.TrimPrefix(s, isolateStatePrefix))
+	case strings.HasPrefix(s, stateKVPrefix):
+		return StateKV(strings.TrimPrefix(s, stateKVPrefix))
 	default:
 		return Key{}, fmt.Errorf("lock: %q is not a valid key", s)
 	}
@@ -117,6 +124,19 @@ func IsolateState(task string) (Key, error) {
 		return Key{}, err
 	}
 	return Key{s: isolateStatePrefix + task}, nil
+}
+
+// StateKV returns the key guarding one KV namespace's compare-and-swap. The
+// `wi state cas` primitive (DESIGN §8) takes this key around its load-compare-store
+// so the read and the conditional write are one atomic step across processes; two
+// CASes on the same namespace serialize, two on different namespaces do not.
+// namespace must be a safe path segment (it also becomes the namespace's on-disk
+// store filename, owned by internal/state).
+func StateKV(namespace string) (Key, error) {
+	if err := layout.ValidateSegment("namespace", namespace); err != nil {
+		return Key{}, err
+	}
+	return Key{s: stateKVPrefix + namespace}, nil
 }
 
 // orderedUnique returns keys sorted ascending by canonical string with duplicates
