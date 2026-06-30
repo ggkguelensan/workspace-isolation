@@ -8,6 +8,7 @@ import (
 
 	"github.com/ggkguelensan/workspace-isolation/internal/config"
 	"github.com/ggkguelensan/workspace-isolation/internal/contract"
+	"github.com/ggkguelensan/workspace-isolation/internal/help"
 	"github.com/ggkguelensan/workspace-isolation/internal/layout"
 	"github.com/ggkguelensan/workspace-isolation/internal/lock"
 )
@@ -25,7 +26,15 @@ func newRepoAddCommand(l layout.Layout, args []string) (Command, error) {
 		return nil, &CommandError{Kind: contract.KindUsage, Message: err.Error()}
 	}
 	if len(rest) != 2 {
-		return nil, &CommandError{Kind: contract.KindUsage, Message: "usage: wi repo add <name> <url> [--base <branch>]"}
+		// Source the usage line from internal/help — the SOLE owner of the command surface
+		// (HELP-REGISTRY-SYNC) — so this refusal can never advertise a different signature
+		// than `wi help "repo add"` prints. ok is always true ("repo add" is a table row, a
+		// fact the sync fitness proves); the bare-name fallback only guards a future deletion.
+		usage := "usage: wi repo add"
+		if m, ok := help.For("repo add"); ok {
+			usage = "usage: " + m.Usage
+		}
+		return nil, &CommandError{Kind: contract.KindUsage, Message: usage}
 	}
 	name, url := rest[0], rest[1]
 	if err := layout.ValidateSegment("repo", name); err != nil {

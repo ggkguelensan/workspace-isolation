@@ -53,12 +53,12 @@ var table = []Command{
 		Name:     "init",
 		Synopsis: "create the wi workspace skeleton in the current directory",
 		Usage:    "wi init",
-		Next:     []string{"wi repo add <url>"},
+		Next:     []string{"wi repo add <name> <url>"},
 	},
 	{
 		Name:     "repo add",
 		Synopsis: "register a source repository in the workspace",
-		Usage:    "wi repo add <url>",
+		Usage:    "wi repo add <name> <url> [--base <branch>]",
 		Next:     []string{"wi sync"},
 	},
 	{

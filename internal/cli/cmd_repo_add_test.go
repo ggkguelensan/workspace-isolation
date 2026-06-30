@@ -9,6 +9,7 @@ import (
 	"github.com/ggkguelensan/workspace-isolation/internal/cli"
 	"github.com/ggkguelensan/workspace-isolation/internal/config"
 	"github.com/ggkguelensan/workspace-isolation/internal/contract"
+	"github.com/ggkguelensan/workspace-isolation/internal/help"
 	"github.com/ggkguelensan/workspace-isolation/internal/layout"
 	"github.com/ggkguelensan/workspace-isolation/internal/lock"
 )
@@ -240,6 +241,39 @@ func TestRepoAddMissingManifestIsNotFound(t *testing.T) {
 	}
 	if !contains(ce.Help, "wi init") {
 		t.Errorf("missing-manifest help should point at `wi init`, got %q", ce.Help)
+	}
+}
+
+// TestRepoAddUsageMatchesHelp pins that the wrong-arg-count usage refusal advertises the
+// SAME signature `wi help "repo add"` prints — naming BOTH required positionals <name> and
+// <url> — by SOURCING the refusal line from internal/help, the SOLE owner of the command
+// surface (HELP-REGISTRY-SYNC). This closes the drift that let the help table say
+// `wi repo add <url>` while the handler demanded `<name> <url>`: the help usage now IS the
+// handler's usage error, so the two surfaces cannot disagree again.
+//
+// Non-vacuity mutant (registered, documents-required-args limb): revert help.go's "repo add"
+// Usage to a form that omits <name> (e.g. back to `wi repo add <url>`) → the handler, now
+// sourcing from help, drops <name> from its refusal → the contains("<name>") assertion goes
+// RED, while help_test.go (self-referential) and HELP-REGISTRY-SYNC (name sets only) stay
+// green — proving this is the one guard that catches the surface lie. Alternate (coupling
+// limb): re-hardcode the handler's Message to a literal that diverges from help → the
+// equals-help assertion goes RED.
+func TestRepoAddUsageMatchesHelp(t *testing.T) {
+	l := bootstrappedLayout(t)
+	_, err := repoAddFactory(t, l)([]string{"only-name"}) // one positional ⟹ wrong arg count
+	var ce *cli.CommandError
+	if !errors.As(err, &ce) {
+		t.Fatalf("wrong arg count must be a *cli.CommandError, got %T: %v", err, err)
+	}
+	m, ok := help.For("repo add")
+	if !ok {
+		t.Fatal(`help.For("repo add") = ok false; the command surface must list it (HELP-REGISTRY-SYNC)`)
+	}
+	if want := "usage: " + m.Usage; ce.Message != want {
+		t.Errorf("usage refusal = %q, want %q (sourced from internal/help, the command-surface SSOT)", ce.Message, want)
+	}
+	if !contains(ce.Message, "<name>") || !contains(ce.Message, "<url>") {
+		t.Errorf("usage refusal %q must name BOTH required positionals <name> and <url>", ce.Message)
 	}
 }
 
