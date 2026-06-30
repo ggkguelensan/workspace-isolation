@@ -99,10 +99,26 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   load-bearing; registered mutant = drop the boot-mismatch limb → the different-boot/live-pid (reboot+pid-
   reuse) case reads as not-dead → RED (confirmed before green); alternate = drop the host guard → the
   foreign-host case reads as dead → RED. `gofmt`/`go build ./...`/`go test ./...` all GREEN (24 packages).
-  NEXT M4 unit: **fs-trust detection** — detect the `.wi/` filesystem type and refuse all auto-break where
-  flock is not known trustworthy (network fs); DESIGN §7.3 line 281–282. Then the break ORCHESTRATION that
-  composes fs-trust + `ReadHolder` + `ProvenDead` (unknown holder → never break), and the `lock ls`/`lock
-  break` commands (HEAL-3).
+  (11) ✅ **this firing** — the **fs-trust gate** `FSTrustworthy(path) (bool, error)` (guard
+  `LOCK-FS-TRUST`), DESIGN §7.3's requirement that auto-break is refused unless flock(2) is known reliable
+  on the backing filesystem. Implemented as a per-OS `statfs(2)` classifier behind one untagged wrapper
+  (`internal/lock/fstrust.go`): `fstrust_darwin.go` reads `f_fstypename` and allowlists `{apfs,hfs,ufs,
+  msdos,exfat}`; `fstrust_linux.go` reads the `f_type` superblock magic and allowlists `{ext,btrfs,xfs,
+  tmpfs,ramfs,f2fs,zfs,overlayfs,exfat,vfat}`; `fstrust_other.go` (`//go:build unix && !linux && !darwin`)
+  fails closed (returns false). **Allowlist, fail-closed**: any unrecognized type — a network fs
+  (NFS/SMB/9p/AFP/FUSE), a novel local fs, an unsupported platform — is NOT trustworthy, so the failure mode
+  is "refuse to break" (lock stands; lock_held/exit 6), never "wrongly break" a flock another HOST may hold
+  over a shared fs. Test-first on the darwin host (real RED→GREEN): mutant = classifier `return true` →
+  every network/unknown case (nfs/smbfs/afpfs/webdav/ftp/fusefs/""/"wat") reads as trustworthy → RED
+  (confirmed); the end-to-end `FSTrustworthy(t.TempDir())==true` smoke (apfs) stayed green throughout,
+  proving the syscall+string-extraction wiring. The symmetric linux table test + smoke mirror it; linux
+  verified via `GOOS=linux go build ./...` + `GOOS=linux go vet ./internal/lock/` (typechecks the linux
+  classifier AND its test — can't RUN on the darwin host, so its RED is reasoned, not observed). `gofmt`/`go
+  build ./...`/`go test ./...` all GREEN (24 packages) + linux cross-compile/vet clean.
+  NEXT M4 unit: the break ORCHESTRATION (HEAL-3) that composes the two gates — `FSTrustworthy(LocksDir)`
+  AND `ReadHolder`→`ProvenDead` (an unknown holder, i.e. a `ReadHolder` error, is NEVER broken) — into a
+  single "is this contended lock safe to break?" decision, then the `lock ls`/`lock break` commands and
+  wiring the decision into `Acquire`'s `HeldError` path.
 
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
@@ -1370,6 +1386,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | REPOADD-STAMP (M4) | drop the `held.Stamp(OpIDFrom(ctx))` call in `repoAddCmd.Run` (the pre-wiring state) → the `project-registry` lock is acquired but never stamped → its body stays empty → `lock.ReadHolder(LocksDir, ProjectRegistry())` returns `lock: empty holder body` → `TestRepoAddStampsHolderOnRegistryLock` RED. Confirmed RED before green. Pins that the registry-mutation acquire site records its holder identity end-to-end, reading the op_id from the context (`cli.OpIDFrom`, the same id `Execute` injects) — no signature change needed (DESIGN §6 / §7.3) |
 | ISOLATE-RM-STAMP (M4) | drop the `held.Stamp(opID)` call in `isolate.Remove` (the pre-wiring state) → the isolate-state lock is re-acquired but never re-stamped → its body still carries the op id `isolate.New` stamped during setup → `lock.ReadHolder(LocksDir, IsolateState(task))` returns `OpID == "op_new_for_rm_stamp"`, not the Remove op id → `TestRemoveStampsHolderOnIsolateLock` RED. Confirmed RED before green (`OpID = "op_new_for_rm_stamp", want "op_remove_stamp"`). The 4th/final acquire site; the RE-stamp angle (a fresh op overwrites the prior holder, not just an empty→full transition) proves the stamp fires in `Remove` specifically, not merely as leftover from `New`. Needed the only external signature change among the four — `opID` threaded through `Remove` + its `cmd_isolate_rm` caller + 4 test callers (DESIGN §6 / §7.3) |
 | LOCK-PROVEN-DEAD (M4) | in `ProvenDead` drop the boot-mismatch limb (`if h.BootID != bootID { return true }`), falling through to the same-boot pid check for every same-host holder → a different-boot holder whose pid happens to be a LIVE process this boot (reboot + pid reuse) reads as NOT dead → `TestProvenDead` RED on the reboot case (`different-boot, live pid = false, want true`). Confirmed RED before green (only that one assertion reddened; the live-self/reaped-pid/foreign-host/empty-origin cases stayed green, proving the test isolates exactly that limb). Alternate mutant = drop the `h.Host != hostname` guard → a foreign-host holder with a reaped pid reads as dead → RED on the foreign-host case. Pins the DESIGN §7.3 proven-dead predicate (boot mismatch OR same-boot ESRCH, same host only) that — with the fs-trust gate — is the SOLE authority to break a contended lock; conservative on every unprovable case so wi never steals a live peer's lock |
+| LOCK-FS-TRUST (M4) | make the per-OS classifier (`darwinFSTypeTrustworthy`/`linuxFSTypeTrustworthy`) `return true` unconditionally → every network/unknown fs reads as flock-trustworthy → `TestDarwinFSTypeTrustworthy` (host) RED on all network/unknown cases (nfs/smbfs/afpfs/webdav/ftp/fusefs/""/"wat"); symmetric `TestLinuxFSTypeTrustworthy` RED on NFS/CIFS/9p/FUSE/0. Confirmed RED on darwin before green; the `FSTrustworthy(t.TempDir())==true` end-to-end smoke stayed green under the mutant (it only exercises the syscall+string-extraction wiring, not the classification), so the classifier table is the load-bearing half. Alternate = `return false` → the local apfs/ext/btrfs cases redden. Pins DESIGN §7.3's allowlist/fail-closed fs-trust gate: a break is refused unless the backing fs is POSITIVELY a known-local type, so wi never breaks a flock another host may hold over a shared (network) fs. Linux limb typecheck-verified via `GOOS=linux go vet` (not run on the darwin host) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
