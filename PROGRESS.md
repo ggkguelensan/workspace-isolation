@@ -134,13 +134,28 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   → ONLY the live-holder case reddened (Safe=true while this process is alive — the dangerous "steal a live
   peer's lock" direction), unknown + dead cases stayed green, proving the test isolates exactly that
   conjunct. `gofmt`/`go build ./...`/`go test ./...` all GREEN (24 packages) + linux cross-compile/vet clean.
-  NEXT M4 unit: the **`lock` command surface** that surfaces unit (12)'s decision — `lock ls` (read-only:
-  enumerate the locks dir, `AssessBreak` each key, emit one envelope listing each holder + its Safe verdict
-  + Reason; takes no flock) is the smaller, purely-additive next step. Then `lock break` (the ACTION: gate on
-  `Safe`, and only then displace the stale lock — under flock-on-a-persistent-file the break is unlink+
-  recreate; exit 6 lock_held when not Safe). Finally, wiring `AssessBreak`→auto-break into `Acquire`'s
-  `*HeldError` path so a contended-but-stale lock self-heals transparently. Keep each as its own unit; the
-  CLI envelope/exit mapping is internal/contract's to extend (new sub-codes for the `lock` subcommands).
+  (13) ✅ **this firing** — `lock.ParseKey(s) (Key, error)` (guard `LOCK-PARSE-KEY`, `internal/lock/keys.go`),
+  the inverse of the key namespace — it reconstructs a typed `Key` from its canonical `String()`, validating
+  the embedded segment exactly as the constructors do. This is the prerequisite for `lock ls`: enumerating
+  the locks dir yields `"<key>.lock"` filenames, and ParseKey turns each back into a `Key` so a **stray,
+  non-key file is rejected** (error) rather than fabricated into a lock and assessed. Refactored the three
+  namespace literals into shared consts (`projectRegistryKey`/`repoPrefix`/`isolateStatePrefix`) used by BOTH
+  the constructors and ParseKey, so `String()` and its inverse provably cannot drift. Test-first RED→GREEN:
+  the load-bearing properties are round-trip identity across all three namespaces (`ParseKey(k.String())==k`
+  for ProjectRegistry/Repo/IsolateState) and rejection of junk (`""`, `"garbage"`, `"repo:"`, `"repo:bad/
+  name"`, `"isolate-state:"`, `"unknown:thing"`). Mutant = `default` returns `Repo(s)` instead of erroring →
+  the no-prefix junk cases (`"garbage"`, `"unknown:thing"`, which `ValidateSegment` alone would accept)
+  wrongly parse as repo keys → RED on exactly those two; round-trip + prefix-handled rejections stayed green.
+  `gofmt`/`go build ./...`/`go test ./...` all GREEN (24 packages) + linux cross-build clean.
+  NEXT M4 unit: `lock.List(locksDir) ([]LockStatus, error)` — enumerate every `*.lock` file in locksDir,
+  `ParseKey` each filename (skipping/ignoring strays that don't parse), `AssessBreak` each valid key, and
+  return one `LockStatus{Key, BreakDecision}` per lock sorted by key. Read-only (no flock; a missing locksDir
+  → empty slice, not an error). That is the data-gathering half of `lock ls`. AFTER that: the CLI `lock ls`
+  command — which DOES touch internal/contract (a new Envelope payload for the lock list + a schema-version
+  bump) plus `assemble.go` + `BuildRegistry` + the help table — then `lock break` (the ACTION: gate on
+  `Safe`, then displace the stale lock; exit 6 lock_held when not Safe), and finally wiring `AssessBreak`→
+  auto-break into `Acquire`'s `*HeldError` path. Keep each its own unit; the CLI envelope/exit mapping is
+  internal/contract's to extend.
 
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
@@ -1410,6 +1425,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | LOCK-PROVEN-DEAD (M4) | in `ProvenDead` drop the boot-mismatch limb (`if h.BootID != bootID { return true }`), falling through to the same-boot pid check for every same-host holder → a different-boot holder whose pid happens to be a LIVE process this boot (reboot + pid reuse) reads as NOT dead → `TestProvenDead` RED on the reboot case (`different-boot, live pid = false, want true`). Confirmed RED before green (only that one assertion reddened; the live-self/reaped-pid/foreign-host/empty-origin cases stayed green, proving the test isolates exactly that limb). Alternate mutant = drop the `h.Host != hostname` guard → a foreign-host holder with a reaped pid reads as dead → RED on the foreign-host case. Pins the DESIGN §7.3 proven-dead predicate (boot mismatch OR same-boot ESRCH, same host only) that — with the fs-trust gate — is the SOLE authority to break a contended lock; conservative on every unprovable case so wi never steals a live peer's lock |
 | LOCK-FS-TRUST (M4) | make the per-OS classifier (`darwinFSTypeTrustworthy`/`linuxFSTypeTrustworthy`) `return true` unconditionally → every network/unknown fs reads as flock-trustworthy → `TestDarwinFSTypeTrustworthy` (host) RED on all network/unknown cases (nfs/smbfs/afpfs/webdav/ftp/fusefs/""/"wat"); symmetric `TestLinuxFSTypeTrustworthy` RED on NFS/CIFS/9p/FUSE/0. Confirmed RED on darwin before green; the `FSTrustworthy(t.TempDir())==true` end-to-end smoke stayed green under the mutant (it only exercises the syscall+string-extraction wiring, not the classification), so the classifier table is the load-bearing half. Alternate = `return false` → the local apfs/ext/btrfs cases redden. Pins DESIGN §7.3's allowlist/fail-closed fs-trust gate: a break is refused unless the backing fs is POSITIVELY a known-local type, so wi never breaks a flock another host may hold over a shared (network) fs. Linux limb typecheck-verified via `GOOS=linux go vet` (not run on the darwin host) |
 | LOCK-SAFE-TO-BREAK (M4) | in `AssessBreak` drop the `ProvenDead` conjunct from the verdict — replace `case !d.ProvenDead:`/`default:` with a single `default:` that sets `Safe=true` (i.e. `Safe = FSTrustworthy && HolderKnown`, break any known holder on a trustworthy fs, alive or not) → the live-holder case (body = `CurrentHolder` = THIS running process) reads `Safe=true` → `TestAssessBreak/live_holder_is_never_breakable` RED (`Safe = true while the holder (this process) is alive`). Confirmed RED before green — ONLY the live case reddened; the unknown-holder case (`HolderKnown=false`→Safe=false) and the proven-dead case (boot-mismatched holder→Safe=true correctly) stayed green, proving the test isolates exactly the dropped conjunct. Alternate mutant = treat an unknown holder as breakable → the unknown-holder case reddens. Pins the HEAL-3 composition (DESIGN §7.3 / §7.4): the read-only break verdict is the conjunction of all three gates (fs-trustworthy AND holder-known AND proven-dead), fail-safe on every other state, so wi never steals a lock from a live or unknown peer. Darwin host RED→GREEN; `//go:build unix` file linux-verified via `GOOS=linux go build`+`go vet` |
+| LOCK-PARSE-KEY (M4) | in `ParseKey` replace the `default` error branch with `return Repo(s)` (treat any unrecognized string as a repo key) → a junk filename with no recognized namespace prefix but an otherwise-valid segment (`"garbage"`, `"unknown:thing"`) parses successfully as a repo key → `TestParseKey` RED on exactly those rejection cases (`ParseKey("garbage") = nil error, want error`). Confirmed RED before green — the round-trip cases (ProjectRegistry/Repo/IsolateState) and the prefix-handled rejections (`"repo:"`,`"repo:bad/name"`,`"isolate-state:"` — caught by the repo/isolate branches' `ValidateSegment`) stayed green, isolating the namespace-gate. Alternate = drop the `"isolate-state:"` branch (fall to the default error) → the isolate-state round-trip reddens (`ParseKey("isolate-state:feature-x"): unexpected error`). Pins the inverse of the key namespace `lock ls` relies on: a stray, non-key file in the locks dir is rejected, never fabricated into a Key and assessed. Shared namespace consts make `String()` and ParseKey provably non-drifting (DESIGN §6.1 / §7.3) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 

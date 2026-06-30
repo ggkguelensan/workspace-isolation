@@ -17,14 +17,25 @@
 package lock
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/ggkguelensan/workspace-isolation/internal/layout"
 )
 
 // lockSuffix is appended to a key's canonical string to form its lock filename.
 const lockSuffix = ".lock"
+
+// The closed key namespace, named once so the constructors (which build a key string)
+// and ParseKey (which reverses one) can never drift apart. project-registry is a bare
+// constant key; the other two are "<prefix><safe-segment>".
+const (
+	projectRegistryKey = "project-registry"
+	repoPrefix         = "repo:"
+	isolateStatePrefix = "isolate-state:"
+)
 
 // Key is one key in the closed lock namespace. Its String() is a stable wire
 // contract (sync and land must produce byte-identical repo:<name> keys), and the
@@ -46,7 +57,7 @@ func (k Key) Path(locksDir string) string {
 }
 
 // ProjectRegistry returns the key guarding writes to the project registry.
-func ProjectRegistry() Key { return Key{s: "project-registry"} }
+func ProjectRegistry() Key { return Key{s: projectRegistryKey} }
 
 // Repo returns the key guarding repo's base-ref mutation. sync and land MUST use
 // this same key for a given repo. name must be a safe path segment.
@@ -54,7 +65,33 @@ func Repo(name string) (Key, error) {
 	if err := layout.ValidateSegment("repo", name); err != nil {
 		return Key{}, err
 	}
-	return Key{s: "repo:" + name}, nil
+	return Key{s: repoPrefix + name}, nil
+}
+
+// ParseKey reverses String(): it reconstructs a typed Key from its canonical string,
+// the inverse of the constructors, validating the embedded name segment exactly as the
+// constructor would. It is how the lock lister turns a "<key>.lock" filename back into
+// a Key, so a stray non-key file in the locks dir is rejected (error) rather than
+// assessed. The three namespaces are the only valid inputs:
+//
+//	"project-registry"      -> ProjectRegistry()
+//	"repo:<name>"           -> Repo(name)
+//	"isolate-state:<name>"  -> IsolateState(name)
+//
+// An unrecognized prefix, or a name segment that fails validation (empty, traversal,
+// separator), is an error — ParseKey never fabricates a Key for an input String()
+// could not have produced.
+func ParseKey(s string) (Key, error) {
+	switch {
+	case s == projectRegistryKey:
+		return ProjectRegistry(), nil
+	case strings.HasPrefix(s, repoPrefix):
+		return Repo(strings.TrimPrefix(s, repoPrefix))
+	case strings.HasPrefix(s, isolateStatePrefix):
+		return IsolateState(strings.TrimPrefix(s, isolateStatePrefix))
+	default:
+		return Key{}, fmt.Errorf("lock: %q is not a valid key", s)
+	}
 }
 
 // IsolateState returns the key guarding a single task's isolate state. task must
@@ -63,7 +100,7 @@ func IsolateState(task string) (Key, error) {
 	if err := layout.ValidateSegment("task", task); err != nil {
 		return Key{}, err
 	}
-	return Key{s: "isolate-state:" + task}, nil
+	return Key{s: isolateStatePrefix + task}, nil
 }
 
 // orderedUnique returns keys sorted ascending by canonical string with duplicates
