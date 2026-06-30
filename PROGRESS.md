@@ -340,14 +340,31 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   two orphan rows + the safety test redden, the other 6 truth-table rows stay green (confirmed RED then
   reverted). `gofmt`/`go vet`/`go build ./...`/`go test ./...` all GREEN (24 packages) + linux
   cross-build/vet clean.
+  (22) ✅ **this firing** — the git primitive `git.PruneWorktrees(ctx, ssotDir)` (`git worktree prune`)
+  (guard `GIT-WORKTREE-PRUNE`, `internal/git/git.go` + `_test`), the stale-worktree-admin hygiene the HEAL-1
+  rematerialize arm composes BEFORE `AddWorktree`. Empirically confirmed the failure mode first: when a
+  linked worktree's dir is removed out-of-band (external `rm -rf`/crash) instead of via `git worktree remove`,
+  the SSOT keeps a stale admin entry under `.git/worktrees/<id>`, so the path is "missing but already
+  registered" and `git worktree add` REFUSES a plain re-add (exit 128) — which is exactly why a MissingWorktree
+  cell cannot just be re-added at its marker sha. `PruneWorktrees` deregisters ONLY entries whose working dir
+  is genuinely missing (git never prunes a LIVE worktree), clearing the path for a clean detached re-add; it
+  honors every §7.2 invariant (no `--force`, no `reset --hard` — the prune-then-add route was chosen precisely
+  to avoid `worktree add --force`), is offline, and is idempotent. Test-first RED (`undefined: PruneWorktrees`)
+  → GREEN over the hermetic real-git harness: add a worktree → `os.RemoveAll` its dir → assert a plain re-add
+  ERRORS (pins the precondition + that AddWorktree does NOT silently `--force`) → `PruneWorktrees` → assert the
+  re-add now succeeds detached. Mutant = no-op prune (`return nil` without running git) → the stale entry
+  survives → the post-prune AddWorktree fails "missing but already registered" → RED (confirmed then reverted).
+  `gofmt`/`go vet`/`go build ./...`/`go test ./...` all GREEN (24 packages) + linux cross-build/vet clean.
   NEXT M4 unit — **build order (recorded):** `wi doctor` (HEAL-8) stays LAST in M4 (PLAN line 84; its
   `--fix` COMPOSES the safe heals). Continue HEAL-1: the **executor** `isolate.Repair` (the pure `PlanAction`
-  decision core now exists — unit 21) — under the isolate-state:<task> lock, `Inspect` then dispatch each
-  `Cell` on `PlanAction(cell)`: re-materialize a MissingWorktree from `Cell.MarkerSHA` (reuse the worktree-add
-  path; the marker already exists so DON'T re-create it; flip the stage), drop a Reclaimed cell's stale record
-  entry (no resurrection), heal a Consistent-but-pending stage forward to created, and HARD-BLOCK an
-  OrphanWorktree (orphan_unexplained, never auto-removed — §7.1). Then the `isolate repair` CLI handler (read
-  `Inspect`/`Repair` onto repos[]; a hermetic dry-run path).
+  decision core — unit 21 — and the `PruneWorktrees` rematerialize primitive — unit 22 — now both exist) —
+  under the isolate-state:<task> lock, `Inspect` then dispatch each `Cell` on `PlanAction(cell)`:
+  `rematerialize` a MissingWorktree = `PruneWorktrees` + `AddWorktree(ssot, wtPath, Cell.MarkerSHA)` (re-add
+  at the EXACT owned sha, NOT a newer base; the marker already exists so DON'T re-create it) + flip the stage
+  to created; `drop_record` a Reclaimed cell's stale registry entry (no resurrection); `heal_stage` a
+  Consistent-but-pending cell forward to created; `block_orphan` an OrphanWorktree (orphan_unexplained, never
+  auto-removed — §7.1). Return a `RepairResult` (per-cell action + overall status) for the CLI to project.
+  Then the `isolate repair` CLI handler (read `Inspect`/`Repair` onto repos[]; a hermetic dry-run path).
   THEN evidence-positive gc (HEAL-2, §7.1 — marker refs, `refs/wi/{backup,owned}` protected, unexplained =
   hard block); and only after those, `wi doctor` (HEAL-8) as the read-only aggregate + `--fix` dispatcher.
   AFTER that: wiring auto-break into `Acquire`'s `*HeldError` path is DEFERRED as a deliberate judgment call —
@@ -1551,6 +1568,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | guard | mutant |
 |-------|--------|
 | REPAIR-PLAN | change the `ClassOrphanWorktree` arm of `isolate.PlanAction` to `return RepairDropRecord` (auto-clean an orphan) → exactly the two `orphan_worktree` rows of `TestPlanActionTruthTable` + `TestPlanActionNeverAutoRemovesOrphan` RED, the other 6 rows GREEN — proving the §7.1 orphan hard-block is load-bearing (a `ClassReclaimed`→`RepairRematerialize` mutant likewise reddens the resurrection guard) |
+| GIT-WORKTREE-PRUNE | make `git.PruneWorktrees` a no-op (`return nil` without running `git worktree prune`) → the stale `.git/worktrees/<id>` admin entry left by an out-of-band worktree-dir removal survives → the post-prune `AddWorktree` in `TestPruneWorktreesClearsStaleAdminEntry` fails "missing but already registered" (exit 128) → RED (the pre-prune failed re-add additionally pins that AddWorktree itself does not silently `--force`) |
 | SHAPE-ENUM-DOUBLE-ENTRY | add/reorder a value in any `All*()` without editing the `want*()` literal copy |
 | SHAPE-ENVELOPE-INVARIANTS | add `,omitempty` to `Envelope.Error`, or drop the nil→`[]` coercion for repos/capabilities/warnings/next in `MarshalJSON`; **help block (decision #HB):** drop `,omitempty` from `Envelope.Help` → `"help":null` appears on every envelope → `TestEnvelopeHelpOmittedWhenNil` + the success/error goldens RED; reorder/rename a `HelpBlock` json tag or move the `Help` field → the frozen bytes drift → `TestEnvelopeHelpBlockGolden` RED |
 | SHAPE-SCHEMA | set top-level `additionalProperties:true` (or drop `error` from `required`, or widen a closed enum) in `schema/envelope.schema.json` → `TestSchemaRejectsInvalid` RED |

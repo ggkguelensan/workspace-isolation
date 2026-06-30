@@ -646,3 +646,63 @@ func TestDeleteOwnedRefClearsMarker(t *testing.T) {
 		t.Errorf("DeleteOwnedRef on an absent marker should be a no-op success, got %v", err)
 	}
 }
+
+// Guard GIT-WORKTREE-PRUNE — stale worktree-admin hygiene for re-materialization
+// (DESIGN §7.4 HEAL-1). When a linked worktree's directory is removed out-of-band (an
+// external `rm -rf`, a crash mid-materialize) rather than via `git worktree remove`,
+// the SSOT keeps a stale admin entry under .git/worktrees/<id>. That stale entry makes
+// the path "missing but already registered", so the drift reconciler cannot simply
+// re-add the worktree at the marker sha — `git worktree add` refuses it (exit 128).
+// PruneWorktrees runs `git worktree prune`, which deregisters ONLY entries whose
+// working directory is missing (it can never disturb a live worktree), clearing the
+// path for a clean re-add. It is the primitive the HEAL-1 rematerialize arm composes
+// before AddWorktree.
+//
+// Registered non-vacuity mutant: make PruneWorktrees a no-op (return nil without
+// running `git worktree prune`) → the stale entry survives → the post-prune AddWorktree
+// fails with "missing but already registered" → this test RED. The pre-prune failed
+// re-add pins the precondition (the stale entry genuinely blocks re-materialization,
+// and AddWorktree does NOT silently --force past it).
+func TestPruneWorktreesClearsStaleAdminEntry(t *testing.T) {
+	env := testenv.New(t)
+	origin := env.SeedOrigin(t, "acme")
+	ssot := filepath.Join(env.Root, "ssot")
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	if err := g.EnsureClone(ctx, ssot, "file://"+origin, testenv.DefaultBranch); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+	baseRef := "refs/heads/" + testenv.DefaultBranch
+
+	wt := filepath.Join(env.Root, "isolas", "taskx", "acme")
+	if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
+		t.Fatalf("mkdir isolate dir: %v", err)
+	}
+	if err := g.AddWorktree(ctx, ssot, wt, baseRef); err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+
+	// Out-of-band removal: delete the worktree dir WITHOUT `git worktree remove`, so the
+	// SSOT keeps a stale admin entry (precisely the MissingWorktree drift HEAL-1 repairs).
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatalf("RemoveAll worktree dir: %v", err)
+	}
+
+	// Precondition: the stale entry blocks a plain re-add (AddWorktree must NOT --force).
+	if err := g.AddWorktree(ctx, ssot, wt, baseRef); err == nil {
+		t.Fatal("re-add over a stale admin entry unexpectedly succeeded; the entry should block it until pruned")
+	}
+
+	// Prune clears the stale entry; the re-add then succeeds at the same path.
+	if err := g.PruneWorktrees(ctx, ssot); err != nil {
+		t.Fatalf("PruneWorktrees: %v", err)
+	}
+	if err := g.AddWorktree(ctx, ssot, wt, baseRef); err != nil {
+		t.Fatalf("AddWorktree after prune: %v", err)
+	}
+	if got := env.Git(t, wt, "rev-parse", "--abbrev-ref", "HEAD"); got != "HEAD" {
+		t.Errorf("re-materialized worktree HEAD abbrev-ref = %q, want %q (detached)", got, "HEAD")
+	}
+}

@@ -126,6 +126,23 @@ func (g *Git) AddWorktree(ctx context.Context, ssotDir, worktreePath, rev string
 	return nil
 }
 
+// PruneWorktrees deregisters stale linked-worktree admin entries from the SSOT at
+// ssotDir with `git worktree prune` — the entries left behind when a worktree's
+// directory was removed out-of-band (an external `rm -rf`, a crash mid-materialize)
+// instead of via `git worktree remove`. Such a stale entry makes its path "missing but
+// already registered", which would make `git worktree add` refuse a re-add; pruning it
+// clears the path for re-materialization. It deregisters ONLY entries whose working
+// directory is genuinely missing — git never prunes a live worktree — so it can be run
+// safely before the HEAL-1 reconciler re-adds a MissingWorktree cell at its marker sha.
+// It is a local operation (offline Run) and is idempotent (a no-op when nothing is
+// stale).
+func (g *Git) PruneWorktrees(ctx context.Context, ssotDir string) error {
+	if _, err := g.r.Run(ctx, ssotDir, "worktree", "prune"); err != nil {
+		return fmt.Errorf("git: prune worktrees in %s: %w", ssotDir, err)
+	}
+	return nil
+}
+
 // ownedRef is the wi-owned marker ref for (task, repo). Like FastForwardBaseRef's
 // "refs/heads/"+base, the namespace is wi convention encoded in exactly one place:
 // markers live under refs/wi/owned/ — a ref (so its commit stays gc-reachable) that
