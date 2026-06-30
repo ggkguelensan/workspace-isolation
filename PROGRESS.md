@@ -84,11 +84,25 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `OpID = "op_new_for_rm_stamp", want "op_remove_stamp"`). Same best-effort posture. `gofmt`/`go build
   ./...`/`go test ./...` all GREEN (24 packages). **✅ ALL 4 of 4 acquire sites wired** (`isolate.New`,
   `sync.syncOne`, `repoAddCmd.Run`, `isolate.Remove`) — every lock wi takes now stamps its holder identity.
-  NEXT M4 unit: the auto-break POLICY — a `lock` reader/judge that consults the stamped body +
-  `processAlive(pid)` + current-boot `BootID` and decides whether a contended lock is breakable. Break ONLY
-  on a flock-trustworthy local fs AND a current-boot, proven-dead holder ({boot_id,pid} is the reuse key);
-  a body-less lock (unknown holder), a different-boot holder, or a live pid is NEVER auto-broken
-  (DESIGN §6 / §7.3). Then fs-trust detection, `lock ls/break` commands.
+  (10) ✅ **this firing** — the holder-liveness judgment `ProvenDead(Holder) (bool, error)` in
+  `internal/lock/policy_unix.go` (guard `LOCK-PROVEN-DEAD`), the predicate that — with the fs-trust gate,
+  applied separately by the break path — authorizes breaking a contended lock. Encodes DESIGN §7.3
+  verbatim: on the SAME host a holder is proven dead iff its `boot_id` mismatches this boot (the machine
+  rebooted → the recorded process is certainly gone, even if its pid was since reused by a live process) OR
+  its `boot_id` matches and `processAlive(pid)` is false (`Kill(pid,0)==ESRCH`). Conservative everywhere
+  else: a different host, an empty host/boot, or a non-positive pid is NEVER proven dead. **Ruling
+  (corrects last firing's note):** DESIGN §7.3 lines 282–283 make a `boot_id` mismatch one of the two
+  proven-dead limbs — a reboot DOES authorize a break (the holder is gone); my prior note that "a
+  different-boot holder is NEVER auto-broken" was wrong and is superseded. The conservative cases that are
+  never broken are: unknown holder (body-less/unparseable lock — never reaches `ProvenDead`), foreign host,
+  unknown host/boot, and a LIVE same-boot pid. The fitness pins all limbs with the dangerous live-self case
+  load-bearing; registered mutant = drop the boot-mismatch limb → the different-boot/live-pid (reboot+pid-
+  reuse) case reads as not-dead → RED (confirmed before green); alternate = drop the host guard → the
+  foreign-host case reads as dead → RED. `gofmt`/`go build ./...`/`go test ./...` all GREEN (24 packages).
+  NEXT M4 unit: **fs-trust detection** — detect the `.wi/` filesystem type and refuse all auto-break where
+  flock is not known trustworthy (network fs); DESIGN §7.3 line 281–282. Then the break ORCHESTRATION that
+  composes fs-trust + `ReadHolder` + `ProvenDead` (unknown holder → never break), and the `lock ls`/`lock
+  break` commands (HEAL-3).
 
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
@@ -1355,6 +1369,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | SYNC-STAMP (M4) | drop the `held.Stamp(opID)` call in `sync.syncOne` (or thread `opID` but never call `Stamp`) → the `repo:<name>` lock is acquired but never stamped → its body stays empty → `lock.ReadHolder(LocksDir, Repo("api"))` returns `lock: empty holder body` → `TestSyncStampsHolderOnRepoLock` RED. Confirmed RED before green. Pins that the hottest-contention acquire site (parallel agents racing `wi sync` on the same `repo:<name>` key) records its holder identity end-to-end (DESIGN §6 / §7.3) |
 | REPOADD-STAMP (M4) | drop the `held.Stamp(OpIDFrom(ctx))` call in `repoAddCmd.Run` (the pre-wiring state) → the `project-registry` lock is acquired but never stamped → its body stays empty → `lock.ReadHolder(LocksDir, ProjectRegistry())` returns `lock: empty holder body` → `TestRepoAddStampsHolderOnRegistryLock` RED. Confirmed RED before green. Pins that the registry-mutation acquire site records its holder identity end-to-end, reading the op_id from the context (`cli.OpIDFrom`, the same id `Execute` injects) — no signature change needed (DESIGN §6 / §7.3) |
 | ISOLATE-RM-STAMP (M4) | drop the `held.Stamp(opID)` call in `isolate.Remove` (the pre-wiring state) → the isolate-state lock is re-acquired but never re-stamped → its body still carries the op id `isolate.New` stamped during setup → `lock.ReadHolder(LocksDir, IsolateState(task))` returns `OpID == "op_new_for_rm_stamp"`, not the Remove op id → `TestRemoveStampsHolderOnIsolateLock` RED. Confirmed RED before green (`OpID = "op_new_for_rm_stamp", want "op_remove_stamp"`). The 4th/final acquire site; the RE-stamp angle (a fresh op overwrites the prior holder, not just an empty→full transition) proves the stamp fires in `Remove` specifically, not merely as leftover from `New`. Needed the only external signature change among the four — `opID` threaded through `Remove` + its `cmd_isolate_rm` caller + 4 test callers (DESIGN §6 / §7.3) |
+| LOCK-PROVEN-DEAD (M4) | in `ProvenDead` drop the boot-mismatch limb (`if h.BootID != bootID { return true }`), falling through to the same-boot pid check for every same-host holder → a different-boot holder whose pid happens to be a LIVE process this boot (reboot + pid reuse) reads as NOT dead → `TestProvenDead` RED on the reboot case (`different-boot, live pid = false, want true`). Confirmed RED before green (only that one assertion reddened; the live-self/reaped-pid/foreign-host/empty-origin cases stayed green, proving the test isolates exactly that limb). Alternate mutant = drop the `h.Host != hostname` guard → a foreign-host holder with a reaped pid reads as dead → RED on the foreign-host case. Pins the DESIGN §7.3 proven-dead predicate (boot mismatch OR same-boot ESRCH, same host only) that — with the fs-trust gate — is the SOLE authority to break a contended lock; conservative on every unprovable case so wi never steals a live peer's lock |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
