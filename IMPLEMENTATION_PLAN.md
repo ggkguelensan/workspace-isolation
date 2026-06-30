@@ -208,6 +208,11 @@ starts. Only `wi version` is wired (a stub proving the pipeline shape compiles).
    `git.OwnedRefSHA` (guard `GIT-OWNED-REF`). *Blocked: M2 (marker at add) — now unblocked.*
 3. **`boot_id` on darwin** — derive from `sysctl kern.boottime` (no `/proc`); confirm stability
    across sleep/wake and PID-reuse-guard soundness. *Blocks: M4 (lock liveness).*
+   **RESOLVED 2026-06-30:** `internal/host.BootID()` — darwin via the `sysctl(2)` SYSCALL
+   (`syscall.Sysctl("kern.boottime")`, decode little-endian `tv_sec`), NOT a subprocess (importing
+   `os/exec` would trip INV-NO-NETWORK); linux via `/proc/sys/kernel/random/boot_id`. Boot-stable,
+   unchanged by sleep/wake, differs across reboots → the {boot_id, pid} pair is reuse-safe. Guard
+   `HOST-BOOTID`. Supported platforms = linux + darwin (other unix deferred to M5's portability matrix).
 4. **isolate-remove recovery policy** — roll-forward (finish deletion) vs roll-back (restore);
    leaning roll-forward, but then an interrupted remove can't be undone by re-running. *Blocks: M2.*
 5. **SIGINT / exit-130 coverage** — add an explicit per-long-running-command SIGINT row (clean

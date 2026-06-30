@@ -18,13 +18,18 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   to hold instead, say so and I will stop. **M4 = `land`/`landstate`/`gc` domain + `land`/`state cas`/`gc`/
   `lock` commands; capabilities gain `land`/`land-atomic` (PLAN line 137).** Build order = Wave C self-heal
   (write-first fitness), starting with the documented M4 blocker `HEAL-LOCK-LIVENESS` (PLAN line 210
-  "Blocks: M4"). ✅ **First M4 unit DONE this firing:** the conservative PID-liveness predicate
-  `lock.processAlive` (guard `LOCK-LIVENESS-PID`) — the proven-dead gate self-heal consults before
-  breaking a stale lock (DESIGN §2 / §7.3). `gofmt`/`go build ./...`/`go vet`/`go test ./...` all GREEN
-  (23 packages). NEXT M4 unit: resolve open decision #3 (boot_id derivation — `sysctl kern.boottime` on
-  darwin, `/proc/sys/kernel/random/boot_id` on linux) so the holder identity can be reuse-safe across
-  reboots, then the lock-body `{pid,host,boot_id,op_id}` struct + serialization that composes with this
-  predicate into the auto-break policy (break ONLY on flock-trustworthy local fs AND proven-dead PID).
+  "Blocks: M4"). M4 units done so far: (1) the conservative PID-liveness predicate
+  `lock.processAlive` (guard `LOCK-LIVENESS-PID`, `55d78a1`) — the proven-dead gate self-heal consults
+  before breaking a stale lock (DESIGN §2 / §7.3); (2) ✅ **this firing** — `internal/host.BootID()` (guard
+  `HOST-BOOTID`), the reuse-safe per-boot identifier, resolving open decision #3 (darwin via the
+  `sysctl(2)` SYSCALL — NOT a subprocess; linux via `/proc/sys/kernel/random/boot_id`). The subprocess
+  approach was caught and rejected by INV-NO-NETWORK (only `internal/gitexec` may import `os/exec`), so the
+  derivation uses the raw `syscall.Sysctl("kern.boottime")` + little-endian `tv_sec` decode instead — no
+  child process, no new dep, more faithful to "derive from sysctl" than shelling out. `gofmt`/`go build
+  ./...`/`go vet ./...`/`go test ./...` all GREEN (24 packages). NEXT M4 unit: the lock-body holder record
+  `{pid,host,boot_id,op_id}` struct + serialization (written into the lock file on acquire, read back for
+  diagnostics), which composes `processAlive` + `BootID` into the eventual auto-break policy (break ONLY on
+  flock-trustworthy local fs AND a current-boot, proven-dead holder).
 
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
@@ -1283,8 +1288,25 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | HELP-MODEL | in `help.For` ignore the topic and always `return Model{Synopsis:overview, Commands:Commands(), Next:…}, true` → drilling into a command no longer yields its detail → `TestForCommandDetail` RED (Usage/Next mismatch, Commands non-nil) and `TestForUnknownTopic` RED (got ok=true for `frobnicate`); alternate: `return Model{}, true` for an unknown topic → `TestForUnknownTopic` RED (want ok=false); alternate: drop the `"wi "` prefix on a `table` row's `Next` (or the overview's) → `TestNextIsRunnable` RED (not a runnable `wi …` line); alternate: blank a row's `Usage`/`Synopsis` → `TestTableIsFullyPopulated` RED (help would lie about the surface). Overview/empty-topic rows stay GREEN under the first mutant, isolating it to the per-command path |
 | HELP-REGISTRY-SYNC | add a bogus key (e.g. `"ghost"`) to `BuildRegistry` → a registry command with no help row → `TestHelpTableMatchesRegistry` RED (equal-sets assertion: `registry (minus help) = [ghost init …]` ≠ `help table = [init …]`); alternate: drop a row (e.g. `isolate rm`) from `help.table` → a help row's command outlives… inverted: a registry command with no help row → same RED on the missing name; alternate: remove the `"help"` registry entry → `registry must contain the "help" command` RED. Pins that the help metadata table and the live dispatch surface can never drift (DESIGN §3.1 "help can never lie") |
 | LOCK-LIVENESS-PID (M4) | replace `lock.processAlive`'s body with `return true` (the registered mutant) → a reaped, provably-dead child pid reads as alive → `TestProcessAlive` RED (`processAlive(reaped child pid …) = true, want false`) along with the `pid 0`/`-1` guard rows; symmetrically `return false` reddens the live-self row (`processAlive(self …) = false, want true`). Confirmed RED with `return true` before going green. Pins the proven-dead gate self-heal consults before breaking a stale lock — a live process must NEVER read as dead (DESIGN §2 / §7.3) |
+| HOST-BOOTID (M4) | in the platform `host.bootID` success path replace `return "boottime:"+sec…`/`return "boot_id:"+id…` with `_ = sec; return "", nil` (the registered mutant) → `BootID()` yields an empty id → `TestBootID` RED (`BootID() = "", want a non-empty per-boot identifier`); alternate: return a value that varies per call → the stability assertion RED (`BootID() not stable across calls`). Confirmed RED (empty form) before green. Pins the reuse guard the lock-liveness layer pairs with the holder pid: a non-empty, boot-stable id is what lets a stale-across-reboot lock be told from a live one (DESIGN §6 / §7.3, open decision #3) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
+
+- **#3 boot_id derivation — RESOLVED 2026-06-30** (the §7 #3 open decision, "Blocks: M4 lock liveness").
+  Ruling: `internal/host.BootID()` returns an opaque, boot-stable, platform-tagged id. **darwin:** derive
+  from `kern.boottime` via the `sysctl(2)` SYSCALL (`syscall.Sysctl("kern.boottime")`), decoding the
+  leading 8 bytes as little-endian `tv_sec` → `"boottime:<sec>"`. **linux:** read
+  `/proc/sys/kernel/random/boot_id` (the kernel's per-boot UUID) → `"boot_id:<uuid>"`. Both are constant
+  for a boot's lifetime, unchanged by sleep/wake, and differ after a reboot — so a lock body recording a
+  boot_id != the current one was written before a reboot and its pid is provably dead. **Crucial
+  refinement forced by INV-NO-NETWORK:** decision #3's wording ("derive from `sysctl kern.boottime`")
+  initially read as "shell out to sysctl(8)," but that import of `os/exec` tripped the no-network invariant
+  (only `internal/gitexec` may spawn child processes, so the egress belt is unbypassable — DESIGN §2 #3).
+  Using the raw syscall instead satisfies the invariant, adds no dependency (decision #6), and is strictly
+  more faithful to "derive from sysctl." Sleep/wake stability and PID-reuse soundness: boottime/boot_id are
+  set once at boot, so the {boot_id, pid} pair is unique within a boot and a reused pid from a *prior* boot
+  is rejected by the boot_id mismatch. Guard `HOST-BOOTID`. Supported platforms = linux + darwin (the CI
+  matrix); other unix is out of scope until M5's portability matrix.
 
 - **#S did-you-mean engine = hand-rolled cobra-`SuggestionsFor` clone — RESOLVED 2026-06-30** (settles
   the §7 "help/did_you_mean/next ownership" decision's typo-suggestion half). DESIGN §7 said "defer
