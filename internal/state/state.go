@@ -29,6 +29,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ggkguelensan/workspace-isolation/internal/layout"
 	"github.com/ggkguelensan/workspace-isolation/internal/lockfs"
@@ -105,6 +106,42 @@ func Load(stateDir, task string) (IsolateRecord, error) {
 		return IsolateRecord{}, fmt.Errorf("state: parse record %s: %w", p, err)
 	}
 	return rec, nil
+}
+
+// List enumerates every isolate registry record under stateDir, in task order
+// (os.ReadDir sorts by filename, and the flat "<task>.json" naming makes that task
+// order). It is gc's and doctor's window onto "which isolates does wi currently
+// consider live?" — the Live signal the workspace gc sweep keys evidence-positive
+// reclamation on (DESIGN §7.1: a cell journaled as live is never gc's to collect).
+//
+// A missing stateDir yields the empty list, not an error: a workspace where no
+// isolate has ever been created simply has no live records, the same idempotent
+// posture as Delete. A non-record file (anything but "<task>.json") is skipped, but
+// a .json file that fails to parse is a HARD error — a torn registry entry is real
+// drift wi must surface, never silently drop (the same posture git.ListOwnedRefs
+// takes on a malformed ref line). Pure local read (no network); a read-only sweep
+// needs no lock.
+func List(stateDir string) ([]IsolateRecord, error) {
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("state: list records in %s: %w", stateDir, err)
+	}
+	var out []IsolateRecord
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		task := strings.TrimSuffix(e.Name(), ".json")
+		rec, err := Load(stateDir, task)
+		if err != nil {
+			return nil, fmt.Errorf("state: list records in %s: %w", stateDir, err)
+		}
+		out = append(out, rec)
+	}
+	return out, nil
 }
 
 // Store atomically persists rec under stateDir via the single .wi/ atomic writer

@@ -472,6 +472,28 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `Clean` (`git.IsClean`), `AheadOfBase` (`git.DivergedCounts` vs base) — then run each through `gc.Classify`.
   THEN (b) `gc.Collect` executor and (c) `wi gc [--dry-run]` CLI handler, per the unit-25 NEXT pointer above.
 
+  (27) ✅ **this firing** — `state.List(stateDir) ([]IsolateRecord, error)`, the registry-enumeration
+  primitive HEAL-2 sub-unit (a) `gc.Inspect` needs for its **`Live`** signal (guard `STATE-LIST`,
+  `internal/state/state.go` + `_test`). `state` had `Load`/`Store`/`Delete`/`UpdateRepoStage` but no way to
+  ask "which isolates does wi currently consider live?" — exactly the §7.1 signal that makes gc never collect
+  a journaled-live cell. Implementation: `os.ReadDir(stateDir)` → for each `<task>.json` entry `Load` it →
+  return in task order (ReadDir sorts by filename, and the flat `<task>.json` naming makes that task order).
+  Three structural properties, all guarded: returns EVERY record deterministically; a **missing/empty
+  stateDir is the empty list, not an error** (a workspace with no isolates has no live records — the same
+  idempotent posture as `Delete`); and a non-record file is **skipped** while a **corrupt `.json` is a HARD
+  error** (a torn registry entry is real drift to surface, never silently drop — mirroring `ListOwnedRefs`'s
+  malformed-line posture). Read-only, no network, lock-free (a read-only sweep). Test-first → RED (undefined)
+  → GREEN: `TestListEnumeratesAllRecords` (3 stored out of order → all three in task order),
+  `TestListMissingOrEmptyDirIsEmpty`, `TestListSkipsNonRecordFiles`, `TestListSurfacesCorruptRecord`. Two
+  mutants confirmed RED-then-reverted (registry below): `break` after first append → 1-of-3 → `EnumeratesAll`
+  RED; drop the `.json`/dir filter → stray file fed to `Load` → `SkipsNonRecordFiles` RED. `gofmt`/`go vet`/
+  `go build ./...`/`go test ./...` GREEN (25 packages) + linux cross-build/vet clean.
+  NEXT M4 unit — HEAL-2 sub-unit **(a) `gc.Inspect(ctx, l, g) ([]gc.Candidate, error)`** is now fully
+  unblocked: both enumeration primitives exist (`git.ListOwnedRefs` for the candidate population +
+  `HasMarker`; `state.List` for `Live`), and `git.IsClean`/`git.DivergedCounts` supply `Clean`/`AheadOfBase`.
+  Inspect = build candidate set (markers ∪ on-disk worktrees), observe the four signals per cell, run each
+  through `gc.Classify`; read-only, lock-free, ZERO network. THEN (b) `gc.Collect` + (c) `wi gc [--dry-run]`.
+
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
   the MVP has been re-verified END TO END this firing. `gofmt -l .` clean · `go build ./...` · `go vet
@@ -1667,6 +1689,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | guard | mutant |
 |-------|--------|
 | GC-CLASSIFY (M4 HEAL-2) | in `gc.Classify`, **(no-live-loss limb)** delete the `case !c.Clean \|\| c.AheadOfBase: return ClassBlockedWork` arm → a wi-owned worktree carrying uncommitted/unmerged work falls through to `ClassReclaimable` → `TestClassifyNeverReclaimsLiveWork` RED (`got "reclaimable"`) + the `owned-dirty`/`owned-ahead-but-clean`/`owned-dirty-and-ahead` truth-table rows RED, the orphan/live/clean-reclaimable rows GREEN — pinning HEAL-GC-NO-LIVE-LOSS (DESIGN §7.1: gc never destroys live work). **(Evidence-positive limb)** delete the `case !c.HasMarker: return ClassOrphanUnexplained` arm → a markerless candidate is judged by cleanliness alone, so a clean one becomes `ClassReclaimable` → `TestClassifyNeverReclaimsWithoutMarker` RED + the `no-marker-*` rows RED, the owned/live rows GREEN — pinning the §7.1 evidence-positive keystone (no marker = no provenance = never reclaimable). Pure function, no build tag. Darwin RED→GREEN, both confirmed-then-reverted (`cached` = byte-identity) |
+| STATE-LIST (M4 HEAL-2) | in `state.List`, **(primary — completeness limb)** `break`/early-return after the first `out = append(out, rec)` → only 1 of 3 stored records returned → `TestListEnumeratesAllRecords` RED (DeepEqual mismatch). **(alternate — filter limb)** drop the `if e.IsDir() || filepath.Ext(e.Name()) != ".json" { continue }` guard → a stray non-record file (`notes.txt`) is fed to `Load`, which reads the absent `notes.txt.json` → `ErrNoRecord` → `List` errors → `TestListSkipsNonRecordFiles` RED. Read-only, no build tag. Darwin RED→GREEN, both confirmed-then-reverted. (The `missing-dir→empty` and `corrupt-record→hard-error` posture additionally guarded by `TestListMissingOrEmptyDirIsEmpty`/`TestListSurfacesCorruptRecord`.) |
 | GIT-LIST-OWNED-REFS (M4 HEAL-2) | in `git.ListOwnedRefs`, **(primary — scoping limb)** widen the `for-each-ref` pattern from `ownedRefPrefix` (`refs/wi/owned/`) to `"refs/wi/"` → a `refs/wi/backup/*` ref (PROTECTED from gc by §7.1) surfaces, fails the `CutPrefix(refname, ownedRefPrefix)` owned-prefix guard, and `ListOwnedRefs` errors → `TestListOwnedRefsScopedToOwnedNamespace` RED (`for-each-ref returned non-owned ref "refs/wi/backup/feat/api"`) — pinning that backup refs/branches are never enumerated as gc candidates. **(alternate — completeness limb)** `break` after the first `out = append(...)` → only 1 of 3 markers returned → `TestListOwnedRefsEnumeratesAllMarkers` RED (`got [bugfix/api], want all three sorted`). Read-only, no build tag. Darwin RED→GREEN, both confirmed-then-reverted |
 | REPAIR-PLAN | change the `ClassOrphanWorktree` arm of `isolate.PlanAction` to `return RepairDropRecord` (auto-clean an orphan) → exactly the two `orphan_worktree` rows of `TestPlanActionTruthTable` + `TestPlanActionNeverAutoRemovesOrphan` RED, the other 6 rows GREEN — proving the §7.1 orphan hard-block is load-bearing (a `ClassReclaimed`→`RepairRematerialize` mutant likewise reddens the resurrection guard) |
 | GIT-WORKTREE-PRUNE | make `git.PruneWorktrees` a no-op (`return nil` without running `git worktree prune`) → the stale `.git/worktrees/<id>` admin entry left by an out-of-band worktree-dir removal survives → the post-prune `AddWorktree` in `TestPruneWorktreesClearsStaleAdminEntry` fails "missing but already registered" (exit 128) → RED (the pre-prune failed re-add additionally pins that AddWorktree itself does not silently `--force`) |
