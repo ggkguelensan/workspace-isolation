@@ -94,7 +94,7 @@ type Result struct {
 func Run(ctx context.Context, l layout.Layout, g *git.Git, clk clock.Clock, opID string, specs []RepoSpec) (Result, error) {
 	res := Result{OpID: opID, Status: StatusComplete, Repos: make([]RepoOutcome, 0, len(specs))}
 	for i := range specs {
-		oc := syncOne(ctx, l, g, clk, specs[i])
+		oc := syncOne(ctx, l, g, clk, opID, specs[i])
 		if oc.Err != nil {
 			res.Status = StatusPartial
 		}
@@ -107,7 +107,7 @@ func Run(ctx context.Context, l layout.Layout, g *git.Git, clk clock.Clock, opID
 // failure into the returned outcome's Err (never panics, never returns early past
 // the lock release). The base ref is advanced ONLY via FastForwardBaseRef, so a
 // rewound origin is refused, not force-moved (DESIGN §5).
-func syncOne(ctx context.Context, l layout.Layout, g *git.Git, clk clock.Clock, spec RepoSpec) RepoOutcome {
+func syncOne(ctx context.Context, l layout.Layout, g *git.Git, clk clock.Clock, opID string, spec RepoSpec) RepoOutcome {
 	oc := RepoOutcome{Repo: spec.Name, Base: spec.Base}
 
 	key, err := lock.Repo(spec.Name)
@@ -121,6 +121,11 @@ func syncOne(ctx context.Context, l layout.Layout, g *git.Git, clk clock.Clock, 
 		return oc
 	}
 	defer func() { _ = held.Release() }()
+	// Record who holds the repo:<name> lock so the self-heal layer can later read
+	// the holder and judge staleness (DESIGN §6 / §7.3). Best-effort: the flock is
+	// the exclusion guarantee, so a failed metadata write must not fail the sync — a
+	// body-less lock reads as "unknown holder" and is conservatively never broken.
+	_ = held.Stamp(opID)
 
 	ssotDir, err := l.Repo(spec.Name)
 	if err != nil {

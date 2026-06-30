@@ -10,6 +10,7 @@ import (
 	"github.com/ggkguelensan/workspace-isolation/internal/git"
 	"github.com/ggkguelensan/workspace-isolation/internal/gitexec"
 	"github.com/ggkguelensan/workspace-isolation/internal/layout"
+	"github.com/ggkguelensan/workspace-isolation/internal/lock"
 	"github.com/ggkguelensan/workspace-isolation/internal/mirror"
 	syncpkg "github.com/ggkguelensan/workspace-isolation/internal/sync"
 	"github.com/ggkguelensan/workspace-isolation/internal/testenv"
@@ -192,5 +193,42 @@ func TestSyncContinuesOnFailureAndReportsPartial(t *testing.T) {
 	}
 	if got := h.baseRef(t, "api"); got != originTip {
 		t.Errorf("api on-disk base = %s, want %s", got, originTip)
+	}
+}
+
+// Guard SYNC-STAMP (M4): syncing a repo holds its repo:<name> lock for the whole
+// fetch/ff, and must record the operation's holder identity into that lock so the
+// self-heal layer can later read WHO is syncing and judge a stale lock's liveness
+// (DESIGN §6 / §7.3). The lock file persists after release (Unlock does not
+// unlink), so the stamped holder is readable by key once Run returns. This wires
+// the hottest-contention acquire site — parallel agents racing `wi sync` on the
+// same repo:<name> key.
+//
+// Non-vacuity mutant (registered): drop the held.Stamp(opID) call in syncOne (or
+// thread opID but never call Stamp) → the repo lock is acquired but never stamped
+// → its body stays empty → lock.ReadHolder returns "empty holder body" → RED.
+func TestSyncStampsHolderOnRepoLock(t *testing.T) {
+	h := newHarness(t)
+	origin := h.env.SeedOrigin(t, "api")
+
+	const opID = "op_sync_stamp"
+	res := h.run(t, opID, syncpkg.RepoSpec{Name: "api", URL: "file://" + origin, Base: "main"})
+	if res.Status != syncpkg.StatusComplete {
+		t.Fatalf("Status = %q, want %q", res.Status, syncpkg.StatusComplete)
+	}
+
+	key, err := lock.Repo("api")
+	if err != nil {
+		t.Fatalf("lock.Repo: %v", err)
+	}
+	holder, err := lock.ReadHolder(h.l.LocksDir(), key)
+	if err != nil {
+		t.Fatalf("ReadHolder(repo:api lock): %v — sync did not stamp the holder", err)
+	}
+	if holder.OpID != opID {
+		t.Errorf("stamped holder OpID = %q, want %q", holder.OpID, opID)
+	}
+	if holder.PID != os.Getpid() {
+		t.Errorf("stamped holder PID = %d, want this process %d", holder.PID, os.Getpid())
 	}
 }
