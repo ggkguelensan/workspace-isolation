@@ -33,11 +33,16 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   "rename `boot_id`" mutant stayed green until the test was strengthened to also assert the concrete
   durable wire keys (`"pid"`/`"host"`/`"boot_id"`/`"op_id"`), which a lock file written by one wi build
   needs stable to read in another. `gofmt`/`go build ./...`/`go vet ./...`/`go test ./...` all GREEN (24
-  packages). NEXT M4 unit: WRITE the holder body into the lock file on acquire and READ it back — extend
-  the flock acquire path (`lockfs`/`lock.Acquire`) to stamp `CurrentHolder(opID).Marshal()` into the file
-  once the flock is held, plus a read path for diagnostics — then the auto-break POLICY consulting the body
-  + `processAlive` + `BootID` (break ONLY on a flock-trustworthy local fs AND a current-boot, proven-dead
-  holder).
+  packages); (4) ✅ **this firing** — the flock body primitive `lockfs.FileLock.WriteBody` +
+  `lockfs.ReadBodyAt` (guard `FLOCK-BODY`): a held flock can now carry a holder body written in place on
+  the locked inode (NOT via rename, which would detach the flock from the path), and a separate inspector
+  reads it back BY PATH while the lock is held (advisory flock does not block reads) — the mechanism
+  self-heal uses to learn who holds a contended lock. NEXT M4 unit: wire it into the acquire path — thread
+  an `opID` through `lock.Acquire` (4 callers: isolate ×2, sync, repo add) and stamp
+  `CurrentHolder(opID).Marshal()` into each lock via `WriteBody` once the flock is held, plus a
+  `lock`-layer reader that `ReadBodyAt`+`ParseHolder`s a contended lock — then the auto-break POLICY
+  consulting the body + `processAlive` + `BootID` (break ONLY on a flock-trustworthy local fs AND a
+  current-boot, proven-dead holder).
 
 - **Milestone (MVP baseline — verified complete):** **✅ MVP M0–M3 COMPLETE AND GREEN (verified 2026-06-30, this time for real).**
   The gap ORIENT caught (below) is fully closed: `help` and `suggest` are built, wired, and guarded, and
@@ -1298,6 +1303,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | LOCK-LIVENESS-PID (M4) | replace `lock.processAlive`'s body with `return true` (the registered mutant) → a reaped, provably-dead child pid reads as alive → `TestProcessAlive` RED (`processAlive(reaped child pid …) = true, want false`) along with the `pid 0`/`-1` guard rows; symmetrically `return false` reddens the live-self row (`processAlive(self …) = false, want true`). Confirmed RED with `return true` before going green. Pins the proven-dead gate self-heal consults before breaking a stale lock — a live process must NEVER read as dead (DESIGN §2 / §7.3) |
 | HOST-BOOTID (M4) | in the platform `host.bootID` success path replace `return "boottime:"+sec…`/`return "boot_id:"+id…` with `_ = sec; return "", nil` (the registered mutant) → `BootID()` yields an empty id → `TestBootID` RED (`BootID() = "", want a non-empty per-boot identifier`); alternate: return a value that varies per call → the stability assertion RED (`BootID() not stable across calls`). Confirmed RED (empty form) before green. Pins the reuse guard the lock-liveness layer pairs with the holder pid: a non-empty, boot-stable id is what lets a stale-across-reboot lock be told from a live one (DESIGN §6 / §7.3, open decision #3) |
 | LOCK-HOLDER (M4) | in `lock.CurrentHolder` set `OpID:""` ignoring the arg → `TestCurrentHolderCapturesProcess` RED (`OpID = "", want "op-xyz"`); alternate: rename a json tag on `Holder` (e.g. `boot_id`→`bootid`) → `TestHolderRoundTrip` RED on the **durable wire-key** assertion (`marshaled holder … missing durable wire key "boot_id"`) — NOTE the round-trip equality alone does NOT catch a tag rename (Marshal+Unmarshal share the tag and stay symmetric), which is exactly why the test pins the concrete keys `"pid"`/`"host"`/`"boot_id"`/`"op_id"`. Both confirmed RED before green. Pins lossless serialization + correct identity capture of the lock-holder record the liveness layer reads back (DESIGN §6 / §7.3) |
+| FLOCK-BODY (M4) | make `lockfs.FileLock.WriteBody` `return nil` without writing → `ReadBodyAt` sees an empty body → `TestFlockBodyRoundTrip` RED (round-trip mismatch); alternate: drop the `Truncate(0)` in `WriteBody` → a shorter rewrite leaves the longer body's tail → `TestFlockBodyRoundTrip` RED on the shorter-overwrite assertion (`got "{…long…}" want "{}\n"`). Both confirmed RED before green. Pins that a held flock carries a holder body readable by a by-path inspector while held — the channel self-heal uses to identify a contended lock's holder (DESIGN §6 / §7.3) |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
