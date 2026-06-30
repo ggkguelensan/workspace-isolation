@@ -20,10 +20,10 @@ const starterManifest = `// wi.config.jsonc — workspace-isolation manifest.
 // Declare the repositories wi manages as detached-HEAD SSOT clones under repos/.
 {
   "defaults": {
-    // "base": "main"      // base branch a repo inherits when it omits its own
+    // "base": ["dev", "main"]   // base a repo inherits: first existing branch wins ("main" is also fine)
   },
   "repos": [
-    // { "name": "api", "url": "git@github.com:you/api.git", "base": "main" }
+    // { "name": "api", "url": "git@github.com:you/api.git", "base": ["dev", "main"] }
   ]
 }
 `

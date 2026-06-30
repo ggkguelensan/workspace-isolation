@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 
+	"github.com/ggkguelensan/workspace-isolation/internal/baseref"
 	"github.com/ggkguelensan/workspace-isolation/internal/config"
 	"github.com/ggkguelensan/workspace-isolation/internal/contract"
 	"github.com/ggkguelensan/workspace-isolation/internal/git"
@@ -101,7 +102,7 @@ func (c *landAbortCmd) Run(ctx context.Context) (*Result, error) {
 				Help:    "re-declare it in wi.config.jsonc so its base is known, then retry the abort",
 			}
 		}
-		specs = append(specs, land.RepoSpec{Name: r.Name, Base: r.Base})
+		specs = append(specs, land.RepoSpec{Name: r.Name, Base: baseref.Resolve(ctx, c.git, c.layout, r.Name, r.Base)})
 	}
 
 	res, err := land.Abort(ctx, c.layout, c.git, c.task, OpIDFrom(ctx), specs)

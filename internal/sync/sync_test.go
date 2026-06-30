@@ -88,7 +88,7 @@ func TestSyncMaterializesAndAdvancesBase(t *testing.T) {
 	origin := h.env.SeedOrigin(t, "api")
 	originTip := h.env.Git(t, origin, "rev-parse", "refs/heads/main")
 
-	res := h.run(t, "op_fresh", syncpkg.RepoSpec{Name: "api", URL: "file://" + origin, Base: "main"})
+	res := h.run(t, "op_fresh", syncpkg.RepoSpec{Name: "api", URL: "file://" + origin, Base: []string{"main"}})
 
 	if res.Status != syncpkg.StatusComplete {
 		t.Fatalf("status = %q, want complete", res.Status)
@@ -139,7 +139,7 @@ func TestSyncMaterializesAndAdvancesBase(t *testing.T) {
 func TestSyncFastForwardsToNewOriginTip(t *testing.T) {
 	h := newHarness(t)
 	origin := h.env.SeedOrigin(t, "api")
-	spec := syncpkg.RepoSpec{Name: "api", URL: "file://" + origin, Base: "main"}
+	spec := syncpkg.RepoSpec{Name: "api", URL: "file://" + origin, Base: []string{"main"}}
 
 	// First sync materializes the SSOT at the seed tip.
 	if oc := h.run(t, "op1", spec).Repos[0]; oc.Err != nil {
@@ -170,8 +170,8 @@ func TestSyncContinuesOnFailureAndReportsPartial(t *testing.T) {
 	originTip := h.env.Git(t, origin, "rev-parse", "refs/heads/main")
 
 	res := h.run(t, "op",
-		syncpkg.RepoSpec{Name: "ghost", URL: "file://" + filepath.Join(h.env.Root, "does-not-exist.git"), Base: "main"},
-		syncpkg.RepoSpec{Name: "api", URL: "file://" + origin, Base: "main"},
+		syncpkg.RepoSpec{Name: "ghost", URL: "file://" + filepath.Join(h.env.Root, "does-not-exist.git"), Base: []string{"main"}},
+		syncpkg.RepoSpec{Name: "api", URL: "file://" + origin, Base: []string{"main"}},
 	)
 
 	if res.Status != syncpkg.StatusPartial {
@@ -196,6 +196,70 @@ func TestSyncContinuesOnFailureAndReportsPartial(t *testing.T) {
 	}
 }
 
+// seedOriginBranch pushes a new branch onto the bare origin off its main tip, so a
+// sync probing an ordered base candidate list can find it on the remote. Local
+// file:// work through unrestricted testenv git.
+func seedOriginBranch(t *testing.T, env *testenv.Env, origin, branch string) {
+	t.Helper()
+	work := filepath.Join(env.Root, "_branch_"+branch+"_"+filepath.Base(origin))
+	env.Git(t, env.Root, "clone", origin, work)
+	env.Git(t, work, "switch", "-c", branch)
+	env.Git(t, work, "push", "origin", branch)
+}
+
+// Guard SYNC-BASE-CANDIDATES (DESIGN §1): sync is the ONE seam that resolves an
+// ordered base candidate list against ORIGIN, because at first sync the single-branch
+// mirror does not exist yet. ["dev","main"] must clone whichever earlier candidate
+// exists on origin: dev when origin has it, main when it does not. This is what makes
+// `defaults.base: ["dev","main"]` mean "prefer dev, else main" end-to-end.
+//
+// Non-vacuity mutant (registered): in resolveSyncBase, on the no-mirror path return
+// firstBase(candidates) instead of consulting FirstExistingRemoteHead → the main-only
+// origin would try to clone --branch dev and fail → the only-main repo's outcome goes
+// from synced to errored → TestSyncResolvesBaseAgainstOrigin RED.
+func TestSyncResolvesBaseAgainstOrigin(t *testing.T) {
+	h := newHarness(t)
+
+	// Origin A has both dev and main: ["dev","main"] must clone dev.
+	originA := h.env.SeedOrigin(t, "withdev")
+	seedOriginBranch(t, h.env, originA, "dev")
+	devTip := h.env.Git(t, originA, "rev-parse", "refs/heads/dev")
+
+	// Origin B has only main: ["dev","main"] must fall back to main.
+	originB := h.env.SeedOrigin(t, "nodev")
+	mainTip := h.env.Git(t, originB, "rev-parse", "refs/heads/main")
+
+	res := h.run(t, "op_cand",
+		syncpkg.RepoSpec{Name: "withdev", URL: "file://" + originA, Base: []string{"dev", "main"}},
+		syncpkg.RepoSpec{Name: "nodev", URL: "file://" + originB, Base: []string{"dev", "main"}},
+	)
+	if res.Status != syncpkg.StatusComplete {
+		t.Fatalf("status = %q, want complete: %+v", res.Status, res.Repos)
+	}
+
+	withdev := res.Repos[0]
+	if withdev.Err != nil {
+		t.Fatalf("withdev sync failed: %v", withdev.Err)
+	}
+	if withdev.Base != "dev" {
+		t.Errorf("withdev resolved base = %q, want dev (earlier candidate exists on origin)", withdev.Base)
+	}
+	if withdev.Snapshot.LocalBaseSHA != devTip {
+		t.Errorf("withdev base sha = %s, want dev tip %s", withdev.Snapshot.LocalBaseSHA, devTip)
+	}
+
+	nodev := res.Repos[1]
+	if nodev.Err != nil {
+		t.Fatalf("nodev sync failed: %v", nodev.Err)
+	}
+	if nodev.Base != "main" {
+		t.Errorf("nodev resolved base = %q, want main (dev absent on origin)", nodev.Base)
+	}
+	if nodev.Snapshot.LocalBaseSHA != mainTip {
+		t.Errorf("nodev base sha = %s, want main tip %s", nodev.Snapshot.LocalBaseSHA, mainTip)
+	}
+}
+
 // Guard SYNC-STAMP (M4): syncing a repo holds its repo:<name> lock for the whole
 // fetch/ff, and must record the operation's holder identity into that lock so the
 // self-heal layer can later read WHO is syncing and judge a stale lock's liveness
@@ -212,7 +276,7 @@ func TestSyncStampsHolderOnRepoLock(t *testing.T) {
 	origin := h.env.SeedOrigin(t, "api")
 
 	const opID = "op_sync_stamp"
-	res := h.run(t, opID, syncpkg.RepoSpec{Name: "api", URL: "file://" + origin, Base: "main"})
+	res := h.run(t, opID, syncpkg.RepoSpec{Name: "api", URL: "file://" + origin, Base: []string{"main"}})
 	if res.Status != syncpkg.StatusComplete {
 		t.Fatalf("Status = %q, want %q", res.Status, syncpkg.StatusComplete)
 	}

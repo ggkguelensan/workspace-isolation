@@ -2276,6 +2276,28 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
 
 ## Done
 
+- **Owner request (Request E) · `base` becomes an ordered candidate list — first-existing-branch
+  resolution.** Owner: `"defaults": { "base": "main" }` → `"defaults": { "base": ["dev", "main"] }`
+  ("first check whether `dev` exists, only then `main`"). `config.Defaults.Base`/`Repo.Base` change
+  `string`→`[]string`; a bare string still decodes (custom `baseList.UnmarshalJSON` accepts string OR
+  array → `[]string`), so existing manifests keep parsing — the golden's string-form `defaults.base`
+  is the non-vacuity anchor (drop the string case → golden RED). `normalizeBase` trims each candidate
+  and rejects an empty/blank element or an empty list. **Resolution design (minimal blast radius):**
+  the isolate/land DOMAIN cores keep `Base string` — the candidate list collapses to one effective
+  branch at the CLI/recovery seam via the new `internal/baseref.Resolve(ctx,g,l,repo,candidates)`,
+  which consults the *single-branch* SSOT mirror (`git.FirstExistingBase`, a `rev-parse --verify`
+  per candidate) and falls back to `candidates[0]` when the mirror is unreadable. `sync` is the lone
+  **in-core exception**: pre-mirror it must probe `origin` (`git.FirstExistingRemoteHead` via
+  `ls-remote`, the THIRD RunNetwork verb) under the `repo:<name>` lock, so `RepoSpec.Base` there is
+  `[]string` and `resolveSyncBase` picks mirror-vs-origin. Wired call sites: 4 CLI seams
+  (`isolate new`/`land`/`land abort`/`land continue`) + `recovery.finishLand` call `baseref.Resolve`;
+  `cmd_sync` passes the list straight through. Guards added: `GIT-BASE-CANDIDATES`,
+  `GIT-REMOTE-HEAD`, `BASEREF-RESOLVE`, `SYNC-BASE-CANDIDATES`, plus `CONFIG-PARSE` extended
+  (`TestParseBaseListForms` + reject cases). Docs synced: DESIGN §1 "Base resolution" note,
+  `wi init` starter manifest shows `["dev","main"]`. `gofmt`/`go build ./...`/`go vet ./...`/`go test
+  ./...` all GREEN (24 packages). Committed as ONE green commit (the type change ripples; cannot be
+  split and stay green).
+
 - **M3 · Homebrew cask + tag-push release workflow — sub-unit (c); COMPLETES MVP M0–M3** (`brews:`→
   `homebrew_casks:` in `.goreleaser.yaml` + `.github/workflows/release.yml`; decision **#HC**).
   goreleaser **hard-deprecated `brews` INSIDE the `~> v2` range we pin** (v2.16), so PLAN §6's
@@ -3304,6 +3326,11 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 
 | guard | mutant |
 |-------|--------|
+| CONFIG-PARSE (base candidate list) (Request E) | in `baseList.UnmarshalJSON` drop the string case (only accept `[]string`) → the golden manifest's string-form `defaults.base: "main"` fails to decode → `TestParseAcceptsGolden` RED — pinning that a bare string and a one-element list are equivalent (existing manifests keep parsing). Also covered: `normalizeBase` rejects an empty list / blank candidate (`TestParseRejectsInvalid` rows "empty base list"/"empty base candidate"/"empty defaults base"), and candidate order + trim + array-inheritance are pinned by `TestParseBaseListForms`. Pure parse, no I/O, no build tag. Darwin RED→GREEN, confirmed-then-reverted |
+| GIT-BASE-CANDIDATES (Request E) | in `git.FirstExistingBase` return `candidates[0]` unconditionally (skip the per-candidate `rev-parse --verify`) → a mirror with only `main` but candidates `["dev","main"]` reports `dev` (which does not exist) → `TestFirstExistingBase` RED (`only-main` case: `got "dev", want "main"`) — pinning that resolution consults the actual single-branch SSOT mirror, not the top preference. Local SSOT via the hermetic git harness, no build tag. Darwin RED→GREEN, confirmed-then-reverted |
+| GIT-REMOTE-HEAD (Request E) | in `git.FirstExistingRemoteHead` return `(candidates[0], true, nil)` without parsing `ls-remote` → an origin lacking `dev` but with candidates `["dev","main"]` reports `dev` → `TestFirstExistingRemoteHead` RED (`only-main` origin: `got "dev", want "main"`) — pinning that `sync`'s pre-mirror probe reads origin's real refs (the THIRD RunNetwork verb, `file://` origin). Network-belt path, no build tag. Darwin RED→GREEN, confirmed-then-reverted |
+| BASEREF-RESOLVE (Request E) | in `baseref.Resolve` return `candidates[0]` unconditionally (never call `FirstExistingBase`) → a mirror with `dev`+`main` and candidates `["dev","main"]` still works, BUT a mirror cloned at `main` only with candidates `["dev","main"]` returns `dev` instead of `main` → `TestResolve` RED (`dev+main`→dev case stays green, the consult-mirror assertion fails) — pinning that the CLI/recovery seam collapses the candidate list against the cloned mirror, fallback to `candidates[0]` ONLY when the mirror is unreadable. Darwin RED→GREEN, confirmed-then-reverted |
+| SYNC-BASE-CANDIDATES (Request E) | in `sync.resolveSyncBase` the no-mirror path return `firstBase(candidates)` instead of probing origin via `FirstExistingRemoteHead` → an origin with `main` only but candidates `["dev","main"]` tries `clone --branch dev` → git fails (no such branch on origin) → `TestSyncResolvesBaseAgainstOrigin` RED (the `nodev` repo errors instead of resolving `main`) — pinning that first-clone resolves against origin's real refs under the `repo:<name>` lock. End-to-end over the real-git harness with `file://` origins, no build tag. Darwin RED→GREEN, confirmed-then-reverted |
 | GC-CLASSIFY (M4 HEAL-2) | in `gc.Classify`, **(no-live-loss limb)** delete the `case !c.Clean \|\| c.AheadOfBase: return ClassBlockedWork` arm → a wi-owned worktree carrying uncommitted/unmerged work falls through to `ClassReclaimable` → `TestClassifyNeverReclaimsLiveWork` RED (`got "reclaimable"`) + the `owned-dirty`/`owned-ahead-but-clean`/`owned-dirty-and-ahead` truth-table rows RED, the orphan/live/clean-reclaimable rows GREEN — pinning HEAL-GC-NO-LIVE-LOSS (DESIGN §7.1: gc never destroys live work). **(Evidence-positive limb)** delete the `case !c.HasMarker: return ClassOrphanUnexplained` arm → a markerless candidate is judged by cleanliness alone, so a clean one becomes `ClassReclaimable` → `TestClassifyNeverReclaimsWithoutMarker` RED + the `no-marker-*` rows RED, the owned/live rows GREEN — pinning the §7.1 evidence-positive keystone (no marker = no provenance = never reclaimable). Pure function, no build tag. Darwin RED→GREEN, both confirmed-then-reverted (`cached` = byte-identity) |
 | STATE-LIST (M4 HEAL-2) | in `state.List`, **(primary — completeness limb)** `break`/early-return after the first `out = append(out, rec)` → only 1 of 3 stored records returned → `TestListEnumeratesAllRecords` RED (DeepEqual mismatch). **(alternate — filter limb)** drop the `if e.IsDir() || filepath.Ext(e.Name()) != ".json" { continue }` guard → a stray non-record file (`notes.txt`) is fed to `Load`, which reads the absent `notes.txt.json` → `ErrNoRecord` → `List` errors → `TestListSkipsNonRecordFiles` RED. Read-only, no build tag. Darwin RED→GREEN, both confirmed-then-reverted. (The `missing-dir→empty` and `corrupt-record→hard-error` posture additionally guarded by `TestListMissingOrEmptyDirIsEmpty`/`TestListSurfacesCorruptRecord`.) |
 | GIT-LIST-OWNED-REFS (M4 HEAL-2) | in `git.ListOwnedRefs`, **(primary — scoping limb)** widen the `for-each-ref` pattern from `ownedRefPrefix` (`refs/wi/owned/`) to `"refs/wi/"` → a `refs/wi/backup/*` ref (PROTECTED from gc by §7.1) surfaces, fails the `CutPrefix(refname, ownedRefPrefix)` owned-prefix guard, and `ListOwnedRefs` errors → `TestListOwnedRefsScopedToOwnedNamespace` RED (`for-each-ref returned non-owned ref "refs/wi/backup/feat/api"`) — pinning that backup refs/branches are never enumerated as gc candidates. **(alternate — completeness limb)** `break` after the first `out = append(...)` → only 1 of 3 markers returned → `TestListOwnedRefsEnumeratesAllMarkers` RED (`got [bugfix/api], want all three sorted`). Read-only, no build tag. Darwin RED→GREEN, both confirmed-then-reverted |

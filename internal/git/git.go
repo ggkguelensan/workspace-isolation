@@ -380,6 +380,13 @@ func (g *Git) DeleteOwnedRef(ctx context.Context, ssotDir, task, repo string) er
 	return nil
 }
 
+// MirrorExists reports whether dir holds an already-materialized SSOT mirror (an
+// existing git repo). sync uses it to choose the base resolver: an existing mirror
+// is read locally with FirstExistingBase, while before the first clone there is no
+// mirror and origin must be probed with FirstExistingRemoteHead. It is the exported
+// face of isRepo (which EnsureClone uses for its re-clone guard).
+func (g *Git) MirrorExists(ctx context.Context, dir string) bool { return g.isRepo(ctx, dir) }
+
 // isRepo reports whether dir is an existing git repository. It guards the dir's
 // existence first so git is never spawned in a missing directory (which would
 // be an opaque start failure rather than a clean "not a repo").

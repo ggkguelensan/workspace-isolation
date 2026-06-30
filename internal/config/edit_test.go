@@ -83,17 +83,26 @@ func TestAddAppendsPreservingComments(t *testing.T) {
 		t.Fatalf("want 3 repos after add, got %d (%+v)", len(cfg.Repos), cfg.Repos)
 	}
 	api, ok := cfg.Lookup("api")
-	if !ok || api.URL != "https://example.com/api.git" || api.Base != "main" {
+	if !ok || api.URL != "https://example.com/api.git" || soleBase(api.Base) != "main" {
 		t.Errorf("api changed by the edit: %+v (ok=%v)", api, ok)
 	}
 	web, ok := cfg.Lookup("web")
-	if !ok || web.Base != "develop" {
+	if !ok || soleBase(web.Base) != "develop" {
 		t.Errorf("web changed by the edit: %+v (ok=%v)", web, ok)
 	}
 	svc, ok := cfg.Lookup("svc")
-	if !ok || svc.URL != "https://example.com/svc.git" || svc.Base != "release" {
+	if !ok || svc.URL != "https://example.com/svc.git" || soleBase(svc.Base) != "release" {
 		t.Errorf("svc not added correctly: %+v (ok=%v)", svc, ok)
 	}
+}
+
+// soleBase returns the single base candidate of a resolved repo (the common
+// single-base case `repo add` writes), or "" if the list is not exactly one element.
+func soleBase(b []string) string {
+	if len(b) == 1 {
+		return b[0]
+	}
+	return ""
 }
 
 // With no base supplied the inserted repo omits the base field, so it inherits defaults.base
@@ -113,8 +122,8 @@ func TestAddOmitsInheritedBase(t *testing.T) {
 		t.Fatalf("re-parse: %v", err)
 	}
 	svc, ok := cfg.Lookup("svc")
-	if !ok || svc.Base != "main" { // inherited from defaults.base, not written explicitly
-		t.Errorf("svc base = %q (ok=%v), want inherited \"main\"", svc.Base, ok)
+	if !ok || soleBase(svc.Base) != "main" { // inherited from defaults.base, not written explicitly
+		t.Errorf("svc base = %v (ok=%v), want inherited [main]", svc.Base, ok)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/ggkguelensan/workspace-isolation/internal/baseref"
 	"github.com/ggkguelensan/workspace-isolation/internal/config"
 	"github.com/ggkguelensan/workspace-isolation/internal/git"
 	"github.com/ggkguelensan/workspace-isolation/internal/isolate"
@@ -76,7 +77,7 @@ func finishLand(ctx context.Context, l layout.Layout, g *git.Git, op journal.OpR
 		if !ok {
 			return fmt.Errorf("recovery: repo %q in journaled land %q (op %s) is no longer declared in the manifest — journal left for retry", name, op.Task, op.OpID)
 		}
-		specs = append(specs, land.RepoSpec{Name: r.Name, Base: r.Base})
+		specs = append(specs, land.RepoSpec{Name: r.Name, Base: baseref.Resolve(ctx, g, l, r.Name, r.Base)})
 	}
 	return land.FinishLand(ctx, l, g, op.Task, op.OpID, specs)
 }

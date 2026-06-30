@@ -30,6 +30,15 @@ new X --repo a --repo b` creates an isolate bundling worktrees of those repos �
 Isolation is **git worktrees from a normal (non-bare) SSOT clone** — native object-store sharing,
 no copies. (`isolation: "alternates"` is a reserved future mechanism, not built.)
 
+**Base resolution.** A repo's `base` (or `defaults.base`) is either a single branch name (`"main"`)
+or an **ordered candidate list** (`["dev", "main"]` = "prefer `dev`, fall back to `main`"); a bare
+string is just a one-element list. The **effective base** is the first candidate that exists:
+`sync` resolves it against `origin` (`ls-remote`) at first-clone time, since the SSOT mirror tracks a
+single branch; every offline path (`isolate`, `land`, recovery) resolves it against that already-cloned
+mirror. When no mirror exists yet and none can be probed, the **top candidate** is assumed. The domain
+cores stay decoupled from the manifest — resolution lives at the CLI/recovery seam (`internal/baseref`),
+with `sync` the deliberate in-core exception that probes `origin` under the repo lock.
+
 ---
 
 ## 2. The six hard invariants
