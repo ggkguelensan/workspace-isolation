@@ -627,7 +627,54 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (58) ✅ **this firing** — **`landstate.Delete` — the parked-record disposition verb** (guard
+  (59) ✅ **this firing** — **`land.Abort` — the HEAL-5 abort leaf 2 domain core** (guard `LAND-ABORT`;
+  `internal/land/abort.go` + `abort_test.go`), the inverse disposition of `land.Run` (DESIGN §7.2). Now
+  fully unblocked by units (57) [the durable `LandedSHA` anchor] + (58) [the `Delete` disposition verb].
+  **API:** `Abort(ctx, l, g, task, opID string, specs []RepoSpec) (AbortResult, error)` — mirrors
+  `land.Run`'s signature so the CLI resolves each repo's `base` from the manifest (the record carries
+  shas, not base branch names; `Abort` builds `baseOf := map[name]base` from specs). Under the
+  `isolate-state:<task>` lock (taken BEFORE the record load, with `held.Stamp(opID)` — abort mutates
+  base refs + the record, so load-rewind-dispose must be serialized; `land status`, a pure read, stays
+  lock-free), it `landstate.Load`s the parked record (`ErrNoRecord` → returned verbatim, the CLI maps to
+  not_found mirroring `land status`), then for each `PhaseLanded` repo calls
+  `git.RestoreBaseRef(ctx, ssot, base, expectCurrent=cell.LandedSHA, restoreTo=cell.BackupSHA)` — the ONE
+  sanctioned base-rewind path (no `git reset --hard`). The exact-match guard makes abort SAFE: a
+  `*git.StaleBaseRefError` (work fast-forwarded onto the base PAST the landed tip since the land) is a
+  **per-repo BLOCK** carried in `AbortRepoResult.Err` (NOT a Go error) — abort refuses THAT repo (base
+  untouched, never clobbering the work landed on top), rewinds the rest, and reports `AbortStatusBlocked`;
+  any OTHER `RestoreBaseRef` error is a hard infra fault (returned). **Disposition (decision
+  #ABORT-DISPOSE):** every landed repo rewound cleanly → `landstate.Delete` the record + `AbortStatusAborted`
+  (an aborted land is gone, `land status`→not_found); any stale-refused repo → rewrite the record reflecting
+  the un-landed repos (`landstate.Store`, keeping the refused ones `PhaseLanded`) + `AbortStatusBlocked` so a
+  retry can finish once the base settles — resolving the OPEN partial-abort sub-question from unit (58)'s
+  NEXT (keep, don't Delete, on partial). **Types:** `AbortStatus` (`aborted`/`blocked`), `AbortRepoResult`
+  {Repo, Base, Phase (POST-abort: pending=rewound / landed=refused), RestoredTo, Err}, `AbortResult`
+  {Task, OpID, Status, Repos}. **Fitnesses** (hermetic real-git harness, `isolate.New` stands up the
+  worktrees; reuses `landSetup`/`landCloneSSOT`/`isoSpecs`/`landSpecs`/`commitWork`/`findCell`):
+  `TestAbortRewindsLandedReposAndDeletesRecord` (api+web landed → abort → both bases rewound to their pre-land
+  tip, `RestoredTo`==pre-land tip, Phase pending, record Load→`ErrNoRecord`), `TestAbortNoRecordIsErrNoRecord`
+  (abort of a never-landed task → `errors.Is(ErrNoRecord)`), `TestAbortRefusesStaleRepoAndKeepsRecord` (land
+  api, then fast-forward the base PAST the landed tip via a second worktree → abort → no Go error,
+  `AbortStatusBlocked`, `ar.Err` is `*git.StaleBaseRefError`, base UNTOUCHED at the advanced tip, record KEPT
+  with api still `PhaseLanded`). Initial RED was BEHAVIORAL via a no-op stub returning a typed-but-wrong
+  `AbortResult` — NOT the undefined-symbol build-failure anti-pattern; the real impl then went GREEN.
+  **Registered mutants** (both two-sided, RED→revert→`(cached)` GREEN byte-identity): PRIMARY = treat a
+  `StaleBaseRefError` as a hard failure (drop the `errors.As` per-repo-block arm, `return res, fmt.Errorf`)
+  → ONLY `TestAbortRefusesStaleRepoAndKeepsRecord` RED (a recoverable refusal mis-reported as a broken abort)
+  while the clean-abort test stays GREEN; ALTERNATE = skip the `landstate.Delete` on a full abort → ONLY
+  `TestAbortRewindsLandedReposAndDeletesRecord` RED on the record-deleted assertion alone (the rewind
+  assertions stay GREEN — pinning that the record is actually discarded, not merely that the bases moved).
+  Full gate GREEN (28 pkgs ok + `? schema`) + gofmt clean + linux cross-build/vet clean.
+  NEXT M4 unit — HEAL-5 abort **leaf 3** = the `wi land abort <task>` CLI command (`internal/cli/cmd_land.go`
+  pattern): `landstate.Load` the record for its repo names, resolve each base from the manifest
+  (`config.Load`→`cfg.Lookup`→`land.RepoSpec{Name, Base}`) into specs, call `land.Abort`, project
+  `AbortResult` onto the envelope (`AbortStatusAborted`→ok; `AbortStatusBlocked`→a durable-partial
+  `(result, *CommandError)` likely `conflict`, since a stale-refused repo is the same shape as a land's
+  partial block; `ErrNoRecord`→not_found). Add the `"land abort"` registry key + the matching help-table row
+  (HELP-REGISTRY-SYNC / `TestHelpTableMatchesRegistry` forces it). Then `land continue`. The
+  `journal.KindLand` crash-roll-forward Finisher stays a SEPARATE later leaf.
+
+  (58) ✅ **(prior firing)** — **`landstate.Delete` — the parked-record disposition verb** (guard
   `LANDSTATE-DELETE`; `internal/landstate/landstate.go` + `landstate_test.go`), HEAL-5 **abort leaf 2
   prerequisite** — the small landstate addition unit (57)'s NEXT flagged as "likely yes". `land.Abort`,
   once it has rewound every landed repo's base, must dispose of the parked record; this is the verb it
@@ -2851,6 +2898,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | STATE-DURABLE | replace `lockfs.WriteFileAtomic` with `os.WriteFile` in `Store` (keep `lockfs` referenced so the assertion, not the compiler, reddens) → the injected `WI_FAULT=lockfs.before_rename` no longer aborts so the interrupted flip lands → `TestDurablePartialSuccess` RED |
 | LANDSTATE-PERSIST + LANDSTATE-WIRE (M4 land keystone) | the durable `.wi/land/<task>.json` parked-land record + codec (`internal/landstate`, mirror of `state`). Registered mutant = rename the `backup_sha` (or, unit 57, the `landed_sha`) json tag on `RepoLand` (→ `backupSha`/`landedSha`): `TestTaskLandRoundTrips` STAYS GREEN (Marshal+Unmarshal share the tag, staying symmetric — a round-trip is VACUOUS against a tag rename, the LOCK-HOLDER lesson), while `TestStoredWireIsStable` RED on the absent literal `"backup_sha"`/`"landed_sha"` in the stored bytes — it pins the CONCRETE durable wire (the literal keys `"task"`/`"op_id"`/`"repo"`/`"phase"`/`"backup_sha"`/`"landed_sha"`, the values `"blocked"`/`"landed"`, the backup sha + the landed tip) one wi build must read back from another. The `landed_sha` token (unit 57) is the abort exact-match anchor: the value `land abort` asserts the base is STILL at before rewinding it to `backup_sha`. Alternate: change `PhaseBlocked`'s value (`"blocked"`→`"blocked-MUT"`) → `TestStoredWireIsStable` RED on the absent `"blocked"` literal. Confirmed RED→revert→`(cached)` GREEN (byte-identity). Pure local persistence, no build tag. Darwin RED→GREEN + gofmt clean + linux cross-build/vet clean |
 | LANDSTATE-DELETE (M4 HEAL-5 abort leaf 2 prereq) | `landstate.Delete(landDir, task) error` — the record disposition `land abort` uses once every landed repo is rewound: remove `.wi/land/<task>.json` so the honest post-abort signal is no record (`land status`→not_found), not a terminal `aborted` phase to gc later (decision #ABORT-DISPOSE). IDEMPOTENT (a missing record is already the desired state — `os.Remove` swallowing `fs.ErrNotExist` — so a re-run of `land abort`, or an abort of a never-parked task, succeeds), through the same `recordPath`/`layout.ValidateSegment` traversal chokepoint as Load/Store. Primary mutant = skip the `os.Remove` (keep validation) → ONLY `TestDeleteRemovesRecord` RED (Load after Delete still succeeds, not ErrNoRecord) while `TestDeleteMissingIsIdempotent` + `TestDeleteRejectsUnsafeTaskName` stay GREEN — isolating the removal property. Alternate mutant = drop the `!errors.Is(err, fs.ErrNotExist)` guard (propagate the raw os.Remove error) → ONLY `TestDeleteMissingIsIdempotent` RED while `TestDeleteRemovesRecord` stays GREEN (two-sided isolation of idempotency). Initial RED was behavioral via a no-op stub (not undefined-symbol). Pure local I/O, no build tag. Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
+| LAND-ABORT (M4 HEAL-5 abort leaf 2) | the per-task abort domain core `land.Abort` — the inverse disposition of `land.Run` (DESIGN §7.2). Under the isolate-state:<task> lock (taken BEFORE the record load — abort mutates base refs + record), `landstate.Load` the parked record (`ErrNoRecord`→returned verbatim, CLI→not_found), then for each `PhaseLanded` repo `git.RestoreBaseRef(ctx, ssot, base, expectCurrent=cell.LandedSHA, restoreTo=cell.BackupSHA)` (the ONE sanctioned rewind, no `git reset --hard`); a `*git.StaleBaseRefError` is a per-repo BLOCK in `AbortRepoResult.Err` (NOT a Go error) — refuse that repo (base untouched), rewind the rest, `AbortStatusBlocked`. Disposition (#ABORT-DISPOSE): all-rewound→`landstate.Delete`+`aborted`; any refused→`landstate.Store` the rewritten record (refused repos stay landed)+`blocked`. Primary mutant = treat a `StaleBaseRefError` as a hard failure (drop the `errors.As` per-repo-block arm, `return res, fmt.Errorf`) → ONLY `TestAbortRefusesStaleRepoAndKeepsRecord` RED while the clean-abort test stays GREEN (two-sided). Alternate = skip the `landstate.Delete` on a full abort → ONLY `TestAbortRewindsLandedReposAndDeletesRecord` RED on the record-deleted (`Load→ErrNoRecord`) assertion ALONE, the rewind assertions staying GREEN (pins that the record is discarded, not merely that bases moved). Initial RED behavioral via a no-op stub (typed-but-wrong `AbortResult`), not undefined-symbol. Hermetic real-git harness (isolate.New + land.Run stand up real landed state), no build tag. Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | ISOLATE-NEW | drop the stop-on-first-fail `return` in `isolate.New` (turn it into `continue`) → the loop materializes the repo AFTER the failed one → `TestNewStopsOnFirstFailWithDurablePartialSuccess` RED on the 3 "db not attempted" assertions (result stage, durable stage, on-disk worktree); or skip the upfront all-pending `state.Store` → the first repo's `UpdateRepoStage` finds no record (`state: no isolate record`) and no durable registry exists to resume from → both `TestNewMaterializesAllReposComplete` + `TestNewStopsOnFirstFail…` RED |
 | RESOLVE-BUNDLE | wire per-repo `mirror` to the worktree path (`mirror := worktree`) instead of `layout.Repo` in `resolve.Bundle` → the SSOT mirror equals the worktree, reddening both repos' `Mirror` assertions in `TestBundleProjectsRecordPaths` (proves Bundle distinguishes the `isolas/<task>/<repo>` worktree from the `repos/<repo>` SSOT clone); or `continue` on one repo (drop it from the loop) → the projected `Repos` count/second-repo assertions RED (proves every recorded repo is projected, in order) |
 | SHAPE-ONE-ENVELOPE | make `cli.Emit` write the envelope TWICE (a second `w.Write(b)`) → the stream carries two top-level JSON values → `TestEmitWritesExactlyOneEnvelope` RED (second `Decode` returns a document, not `io.EOF`); or drop the trailing `'\n'` (`w.Write` without `append(b,'\n')`) → `TestEmitTerminatesWithSingleNewline` RED |
