@@ -16,13 +16,18 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   MVP" and skipped these two — the build disagreed with PROGRESS.md, so the build wins. Tells: `wi help`
   → `unknown command` (exit 64) while the envelope advertises the `help-json` capability (violating
   PLAN line 108 "capabilities ⇒ backing command"); the `contract.Error` `Help`/`DidYouMean` fields and
-  the `cli`/`text` plumbing exist but **nothing ever populated them**. **Now closing the gap, one unit
+  the `cli`/`text` plumbing exist but **nothing ever populated them**. **Gap now CLOSED IN CODE, one unit
   per firing:** ✅ `internal/suggest` (did-you-mean Levenshtein engine, guard `SUGGEST-DIDYOUMEAN`,
-  commit `b043457`) and ✅ `internal/help` (progressive-disclosure help model + `next[]` rules, guard
-  `HELP-MODEL`) have both landed as pure packages. Remaining for true MVP: WIRE both into `dispatch`
-  (unknown command → populate `did_you_mean[]` via `suggest`; register a `help` command so
-  `wi help [topic]` → help model backs the `help-json` capability; + help↔registry sync fitness), then
-  re-verify M0–M3 end-to-end.
+  commit `b043457`), ✅ `internal/help` (progressive-disclosure help model + `next[]` rules, guard
+  `HELP-MODEL`, `56451d4`), ✅ dispatch wiring of `did_you_mean[]` + the `wi help` pointer on an unknown
+  command (guard `DISPATCH-DIDYOUMEAN`, `8a60fec`), ✅ the additive `help` block on the envelope
+  (decision #HB, `6e9e4ed`), ✅ the `wi help [topic]` command backing the `help-json` capability (guard
+  `CMD-HELP`, `cac244a`), and ✅ the **help↔registry sync fitness** (guard `HELP-REGISTRY-SYNC`, decision
+  #HR — this firing) which proves the help table can never drift from the live command surface. Both
+  `help` and `suggest` are now BUILT, WIRED, and GUARDED. **The ONLY remaining MVP work is the end-to-end
+  re-verification of M0–M3** (build/vet/test/gofmt + `goreleaser check` + a fuller binary smoke incl. `wi
+  help` and an unknown command/topic carrying `did_you_mean`); only when that passes is the STOP
+  condition genuinely real.
   Everything still builds/vets/tests green throughout. _What WAS genuinely done (six commands, cmd/wi,
   full release scaffolding incl. Node-24-current CI) stands; it just wasn't the whole of M3._
 
@@ -1066,16 +1071,23 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   0 with all 6 commands in the block; `wi help isolate new`→exit 0 (topic detail, table omitted); `wi
   help snc`→exit 3 not_found with `did_you_mean:["sync"]`. Two non-vacuity mutants demonstrated
   RED-then-reverted (see the `CMD-HELP` registry row).
-- **NEXT — help↔registry SYNC fitness**: a `cli`-layer test (it can import both `help` and the
-  registry without a cycle, since `help` stays pure) asserting `help.Commands()` names ==
-  `BuildRegistry` keys EXCEPT `"help"` itself, so the metadata table can never drift from the live
-  command surface ("help can never lie", DESIGN §3.1). **Decision needed (record when built):** `help`
-  is a meta-command deliberately ABSENT from the workflow table (the overview reads as the init→…→rm
-  runbook; you're already using help), so the fitness compares `help.Commands()` names against the
-  registry keys with `"help"` excluded — the two must be equal sets.
-- **THEN — re-verify M0–M3 end-to-end** (build/vet/test/gofmt + `goreleaser check` + binary smoke incl.
-  `wi help` exit 0 and an unknown command carrying `did_you_mean`). Only then is the MVP genuinely green
-  and the STOP condition real.
+- ✅ **DONE (this firing) — help↔registry SYNC fitness** (guard `HELP-REGISTRY-SYNC`, decision #HR).
+  `help_registry_sync_test.go` (`package cli_test`) is the one test that imports BOTH `internal/help`
+  and the registry — no cycle, because `help` is pure and the registry never imports it (the
+  help→contract projection lives in the cli layer). `TestHelpTableMatchesRegistry` asserts (1) `"help"`
+  IS a registry key (it backs the help-json capability), (2) `"help"` is NOT a `help.Commands()` row
+  (meta-command, decision #HR), and (3) `BuildRegistry(Deps{})` keys MINUS `"help"` == `help.Commands()`
+  names as EQUAL sets — so the metadata table can never drift from the live command surface ("help can
+  never lie", DESIGN §3.1; the promise help.go's own header makes is now enforced). Empty `Deps` suffices
+  — the key set (the command surface) is independent of the deps the factories close over. Non-vacuity
+  mutant demonstrated RED-then-reverted: added a bogus `"ghost"` registry key → the equal-sets assertion
+  RED with a clean diff (`registry (minus help) = [ghost init …]` vs `help table = [init …]`). Both
+  `help` AND `suggest` are now fully BUILT, WIRED, and GUARDED — the M3 gap ORIENT caught is closed in
+  code; only end-to-end re-verification remains.
+- **NEXT — re-verify M0–M3 end-to-end** (the STOP gate): build/vet/test/gofmt clean + `goreleaser check`
+  + a fuller built-binary smoke over the whole `init→repo add→sync→isolate new→resolve→isolate rm`
+  surface PLUS `wi help` (exit 0, 6 commands in the block) and an unknown command/topic carrying
+  `did_you_mean`. Only when that passes is the MVP genuinely green and the STOP condition real.
 
 M3 (DESIGN §3, IMPLEMENTATION_PLAN §M3 + Wave B) wires the green domain core through the uniform
 pipeline into the runnable `wi` binary: `internal/cli` (parse → dispatch → **one** envelope out →
@@ -1229,6 +1241,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | SUGGEST-DIDYOUMEAN | in `suggest.For` return `nil` regardless (the shipped test-first stub) → every typo/prefix case loses its suggestion → `TestForSuggestsClosest` RED on the `reslove`/`snc`/`re`/`RESLOVE` rows (got nil, want the match) while the `xyzzy`/empty rows stay GREEN (isolates the mutant to the match path); alternate: drop the threshold/prefix filter and `return candidates` unfiltered → the `xyzzy`/empty "nothing close → nil" rows RED (got the whole command set); alternate: remove the `input==""` guard → empty input prefix-matches everything → `empty input is never a suggestion` RED |
 | CMD-HELP | in `helpCmd.Run` drop the `!ok` not_found branch (`if false && !ok`) so an unknown topic maps the zero `help.Model` to a `Result` instead of refusing → `TestHelpUnknownTopicIsNotFound` RED (got a result, want `*cli.CommandError{not_found}`); or in `envelopeFor` drop the `env.Help = r.Help` success-branch threading → the help block never reaches the wire → `TestHelpEnvelopeCarriesBlockEndToEnd` RED (`env.Help` nil, the help-json capability has no payload). Overview/command-detail tests stay GREEN under either mutant, isolating each to its path |
 | HELP-MODEL | in `help.For` ignore the topic and always `return Model{Synopsis:overview, Commands:Commands(), Next:…}, true` → drilling into a command no longer yields its detail → `TestForCommandDetail` RED (Usage/Next mismatch, Commands non-nil) and `TestForUnknownTopic` RED (got ok=true for `frobnicate`); alternate: `return Model{}, true` for an unknown topic → `TestForUnknownTopic` RED (want ok=false); alternate: drop the `"wi "` prefix on a `table` row's `Next` (or the overview's) → `TestNextIsRunnable` RED (not a runnable `wi …` line); alternate: blank a row's `Usage`/`Synopsis` → `TestTableIsFullyPopulated` RED (help would lie about the surface). Overview/empty-topic rows stay GREEN under the first mutant, isolating it to the per-command path |
+| HELP-REGISTRY-SYNC | add a bogus key (e.g. `"ghost"`) to `BuildRegistry` → a registry command with no help row → `TestHelpTableMatchesRegistry` RED (equal-sets assertion: `registry (minus help) = [ghost init …]` ≠ `help table = [init …]`); alternate: drop a row (e.g. `isolate rm`) from `help.table` → a help row's command outlives… inverted: a registry command with no help row → same RED on the missing name; alternate: remove the `"help"` registry entry → `registry must contain the "help" command` RED. Pins that the help metadata table and the live dispatch surface can never drift (DESIGN §3.1 "help can never lie") |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
@@ -1260,6 +1273,21 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   `TestEnvelopeHelpBlockGolden` (frozen bytes + field order, help between next and error),
   `TestEnvelopeHelpOmittedWhenNil` (omitempty), `goldenHelp` added to `TestSchemaAcceptsGolden`, lock via
   `TestContractFrozen`.
+
+- **#HR `help` is a meta-command excluded from the help↔registry sync set — RESOLVED 2026-06-30** (not a
+  §7 ruling; forced by building the `HELP-REGISTRY-SYNC` fitness, which had to decide how `help` itself is
+  treated in the comparison). The fitness `TestHelpTableMatchesRegistry` proves the help metadata table
+  (`internal/help`, SOLE owner of the command surface) and the live dispatch registry describe the SAME
+  command set so `wi help` can never lie (DESIGN §3.1). But the surfaces are NOT identically sized: the
+  registry has 7 keys, `help.Commands()` lists 6. The seventh, **`help`, is a META-command** — a real
+  registered command (it backs the advertised `help-json` capability, so it MUST be in the registry) that
+  is DELIBERATELY ABSENT from the help table, because the table doubles as the help text and reads as the
+  init→repo add→sync→isolate new→resolve→isolate rm WORKFLOW RUNBOOK; `wi help` is the lens you read the
+  runbook THROUGH, not a step in it. Ruling: the fitness asserts (1) `"help"` IS a registry key, (2)
+  `"help"` is NOT a `help.Commands()` row, then (3) compares the registry keys MINUS `"help"` against the
+  help-table names as equal sets. This makes the exclusion principled (a checked invariant) rather than a
+  silent `delete`. Guard `HELP-REGISTRY-SYNC`; mutant = a bogus `"ghost"` registry key reddens the
+  equal-sets assertion.
 
 - **#HC Homebrew cask over formula — RESOLVED 2026-06-30** (overrides PLAN §6's "cask rejected" risk
   note; not a §7 ruling). goreleaser **hard-deprecated `brews` (formula) within the `~> v2` range** we
