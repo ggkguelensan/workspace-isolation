@@ -15,10 +15,12 @@ import (
 // trust and are //go:build unix, so the binary carries them on darwin/linux (wi's only
 // release targets) and BuildRegistry merges them in there. The sibling cmd_lock_other.go
 // stub contributes none on a non-unix build (DESIGN §6 portability; ruling in PROGRESS.md).
-// `lock ls` is the read-only inventory; `lock break` (the action) lands next.
+// `lock ls` is the read-only inventory; `lock break` is the action that displaces a stale
+// lock when (and only when) doing so is provably safe.
 func lockCommands(d Deps) Registry {
 	return Registry{
-		"lock ls": func(args []string) (Command, error) { return newLockLsCommand(d.Layout, args) },
+		"lock ls":    func(args []string) (Command, error) { return newLockLsCommand(d.Layout, args) },
+		"lock break": func(args []string) (Command, error) { return newLockBreakCommand(d.Layout, args) },
 	}
 }
 
@@ -55,16 +57,23 @@ func (c *lockLsCmd) Run(ctx context.Context) (*Result, error) {
 	return &Result{Action: contract.ActionRead, Locks: infos}, nil
 }
 
-// lockInfoOf projects one lock.LockStatus onto its contract.LockInfo wire row: the four
-// break-verdict booleans map across verbatim, Reason carries the human diagnostic, and the
-// holder identity is attached as a nested LockHolder EXACTLY when the holder is known. A
-// body-less / unparseable lock (HolderKnown=false) projects with a nil holder, never a
-// misleading zero-value one — it is conservatively never breakable, and the omitted holder
-// is the wire signal of that.
+// lockInfoOf projects one lock.LockStatus (the read-only inventory shape) onto its
+// contract.LockInfo wire row by delegating to lockInfoFrom over its key + decision.
 func lockInfoOf(s lock.LockStatus) contract.LockInfo {
-	d := s.Decision
+	return lockInfoFrom(s.Key.String(), s.Decision)
+}
+
+// lockInfoFrom projects a (key, break-verdict) pair onto its contract.LockInfo wire row:
+// the four break-verdict booleans map across verbatim, Reason carries the human
+// diagnostic, and the holder identity is attached as a nested LockHolder EXACTLY when the
+// holder is known. A body-less / unparseable lock (HolderKnown=false) projects with a nil
+// holder, never a misleading zero-value one — it is conservatively never breakable, and the
+// omitted holder is the wire signal of that. Both `lock ls` (over a LockStatus) and `lock
+// break` (over Break's returned BreakDecision) share this one projection so the verdict an
+// agent reads is identical whether it inspected the lock or acted on it.
+func lockInfoFrom(key string, d lock.BreakDecision) contract.LockInfo {
 	li := contract.LockInfo{
-		Key:           s.Key.String(),
+		Key:           key,
 		Safe:          d.Safe,
 		FSTrustworthy: d.FSTrustworthy,
 		HolderKnown:   d.HolderKnown,

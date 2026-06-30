@@ -33,9 +33,11 @@ type Result struct {
 //   - (result, nil)        success
 //   - (nil, *CommandError) a clean, classified failure (the error.kind selects the code)
 //   - (nil, plainError)    an unclassified failure → kind=internal (a bug, surfaced)
-//   - (result, *CommandError{Kind: partial})  a DURABLE PARTIAL: ok:false with a
-//     top-level error.kind=partial AND per-repo detail carried from the result
-//     (decision #D). This is the only case both returns are non-nil.
+//   - (result, *CommandError)  a FAILURE THAT CARRIES DETAIL — both returns non-nil. The
+//     error selects ok:false + the kind/exit; the result's additive blocks are threaded
+//     onto the failure envelope. Two shapes use this: a DURABLE PARTIAL (kind=partial with
+//     per-repo detail, decision #D) and a DIAGNOSTIC REFUSAL (e.g. kind=lock_held carrying
+//     the lock's verdict in the locks block so the agent sees WHY without re-querying).
 type Command interface {
 	Run(ctx context.Context) (*Result, error)
 }
@@ -130,9 +132,14 @@ func envelopeFor(m Meta, r *Result, err error) contract.Envelope {
 				Message: err.Error(),
 			})
 		}
-		// Durable partial: carry what completed alongside the top-level error.
+		// Failure carrying detail: a Result returned alongside the error threads its
+		// additive blocks onto the failure envelope so "what completed / why" survives.
+		// Two shapes use this: a durable partial (per-repo detail under kind=partial,
+		// decision #D) and a diagnostic refusal such as lock_held, which carries the
+		// lock's verdict in the locks block so the agent sees WHY without re-querying.
 		if r != nil {
 			env.Repos = r.Repos
+			env.Locks = r.Locks
 			env.Warnings = r.Warnings
 			env.Next = r.Next
 		}

@@ -237,14 +237,45 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   binary smoke: `wi lock ls` (empty) → exit 0, one envelope, `locks` block omitted (empty additive block,
   per the omitempty convention); `wi lock ls bogus` → usage/exit 64; `wi help` overview lists `lock ls` as
   the 7th command.
-  NEXT M4 unit — **`wi lock break <key>`** (the ACTION half, makes `lock ls`'s Next runnable and honest): a
-  factory taking exactly one `<key>` operand parsed via `lock.ParseKey` (junk → kind=usage), a handler
-  calling `lock.Break(layout.LocksDir(), key)` and mapping the verdict — `Safe` (proven-dead displaced) →
-  `Result{Action: removed}` + the broken lock's `LockInfo` row / exit 0; not-Safe (live / unknown / fs-
-  untrustworthy holder) → `*CommandError{Kind: KindLockHeld}` carrying the same `LockInfo` so the agent sees
-  WHY / exit 6. Register `"lock break"` in `lockCommands` (unix hook) — NO help-table row needed (its Next
-  is already authored as `lock ls`'s follow-up, and adding a second `lock *` table row is optional). The
-  contract does not move (the `locks` block already carries the break verdict).
+  (18) ✅ **this firing** — the **`wi lock break <key>` CLI handler** (guard `CMD-LOCK-BREAK`,
+  `internal/cli/cmd_lock_break_unix.go` + `_test`), the ACTION half of the lock-self-heal surface and the
+  only command that displaces a lock. Factory (`newLockBreakCommand`) takes EXACTLY one `<key>` operand
+  parsed via `lock.ParseKey`; zero/extra operands OR an unparseable key → kind=usage/exit 64 (never a
+  fabricated key). Handler (`lockBreakCmd.Run`) calls `lock.Break(LocksDir(), key)` — which runs the
+  read-only AssessBreak gate and unlinks ONLY a proven-dead holder's stale file — and translates the
+  returned `BreakDecision` onto the envelope: **Safe** (file displaced) → `Result{Action: removed}` + the
+  removed lock's `LockInfo` / exit 0; **not-Safe** (live / unknown / untrustworthy holder, file left
+  intact) → BOTH a `Result{Action: noop, Locks: [info]}` AND a `*CommandError{Kind: KindLockHeld}` / exit 6,
+  so the refusal carries the lock's verdict in the `locks` block (agent reads WHY without re-running
+  `lock ls`). Refactored the ls-unit's projection into a shared `lockInfoFrom(key, BreakDecision)` so both
+  commands emit an identical verdict shape (`lock ls` reads it, `lock break` acts on it). **WIRING RULING
+  (recorded):** to surface the verdict on a FAILURE envelope, extended `envelopeFor`'s failure arm to thread
+  `env.Locks = r.Locks` (it already threaded Repos/Warnings/Next) — generalizing the both-returns-non-nil
+  path from "durable partial only" to "failure that carries detail" (durable partial OR diagnostic refusal
+  like lock_held); the `Command` doc comment was corrected to match. **CORRECTION to the unit-17 NEXT
+  ruling:** a `lock break` help-table row IS required — `HELP-REGISTRY-SYNC` (`TestHelpTableMatchesRegistry`)
+  demands registry⇔table set-EQUALITY, so the new registry key reddened it until a `lock break` row was
+  added (Next = `wi lock ls`; the lock pair now cross-reference each other: inspect → break → re-inspect).
+  The contract did NOT move (the `locks` block already carried the verdict; SchemaVersion stays 1.1).
+  Test-first RED (`BuildRegistry has no "lock break" factory`) → GREEN: three tests driving the REAL pipeline
+  via `cli.Execute` — a proven-dead break (boot-mismatch holder on the trustworthy temp fs) → exit 0 / ok /
+  action=removed / `locks[0]` Safe+ProvenDead / file unlinked; a live holder (`lock.CurrentHolder`) → exit 6
+  / kind=lock_held / `locks[0]` not-Safe carried on the failure envelope / file intact; and the one-operand
+  factory rule (nil/extra/junk/empty → usage). Mutant = drop the `if !d.Safe { … KindLockHeld … }` branch so
+  every break maps to removed/exit 0 → `TestLockBreakLiveHolderRefusesWithLockHeld` RED (live holder exits 0,
+  no error); proven-dead test stays green (confirmed RED then reverted). Alternate mutant noted: drop
+  `env.Locks = r.Locks` from the failure arm → the refusal's "carries the verdict" assertion reddens.
+  `gofmt`/`go vet ./...`/`go build ./...`/`go test ./...` all GREEN (23 packages) + linux cross-compile
+  clean. Live binary smoke (real argv → 2-token Dispatch): proven-dead `lock break repo:api` → ok/removed/
+  exit 0 with full `locks` block + holder, file gone, follow-up `lock ls` empty; body-less
+  `lock break project-registry` → lock_held/exit 6 with the verdict carried, file intact; `lock break`
+  (no arg) and `lock break "not a key"` → usage/exit 64; `wi help` overview lists `lock break` as the 8th
+  command.
+  NEXT M4 unit — pick the next HEAL primitive. Candidates (per IMPLEMENTATION_PLAN M4 Wave C): `wi doctor`/
+  `check` (HEAL-8, §7.5 — a read-only aggregate health report; would consume `lock.List` like `lock ls`
+  does, plus isolate-drift + orphan checks as they land); the three-way isolate drift reconciler (HEAL-1,
+  `isolate repair`); evidence-positive gc (HEAL-2). `lock break` completes the lock-self-heal command pair;
+  `wi doctor` is the natural next read-only consumer of the same domain and a low-risk unit.
   AFTER that: wiring auto-break into `Acquire`'s `*HeldError` path is DEFERRED as a deliberate judgment call —
   on a trustworthy local fs an `EWOULDBLOCK` from `TryLock` means the holder's flock is LIVE (the kernel
   released it if the holder had died), so a silent auto-break there would risk stealing a live peer's lock;
@@ -1522,6 +1553,8 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | LOCK-PARSE-KEY (M4) | in `ParseKey` replace the `default` error branch with `return Repo(s)` (treat any unrecognized string as a repo key) → a junk filename with no recognized namespace prefix but an otherwise-valid segment (`"garbage"`, `"unknown:thing"`) parses successfully as a repo key → `TestParseKey` RED on exactly those rejection cases (`ParseKey("garbage") = nil error, want error`). Confirmed RED before green — the round-trip cases (ProjectRegistry/Repo/IsolateState) and the prefix-handled rejections (`"repo:"`,`"repo:bad/name"`,`"isolate-state:"` — caught by the repo/isolate branches' `ValidateSegment`) stayed green, isolating the namespace-gate. Alternate = drop the `"isolate-state:"` branch (fall to the default error) → the isolate-state round-trip reddens (`ParseKey("isolate-state:feature-x"): unexpected error`). Pins the inverse of the key namespace `lock ls` relies on: a stray, non-key file in the locks dir is rejected, never fabricated into a Key and assessed. Shared namespace consts make `String()` and ParseKey provably non-drifting (DESIGN §6.1 / §7.3) |
 | LOCK-LIST (M4) | in `List` drop the stray-skip — change `key, err := ParseKey(...)`/`if err != nil { continue }` to `key, _ := ParseKey(...)` and assess unconditionally → a `.lock` file whose stem is not a valid key (`notakey.lock`) yields the zero Key and is fabricated into a phantom LockStatus with an empty key → `TestList` RED on the exact sorted-key-set assertion (`List keys = [<empty> isolate-state:task1 project-registry repo:api], want [isolate-state:task1 …]`). Confirmed RED before green — the missing-dir and empty-dir subtests stayed green, isolating the stray-skip. Alternate = drop the `errors.Is(err, os.ErrNotExist)` special-case → a missing locksDir returns an error → the "missing dir is empty, not an error" subtest reddens. Pins that lock enumeration (the data half of `lock ls`) skips strays (a non-key file is NEVER fabricated into a lock), treats "no locks" as a valid empty result, and carries each lock's AssessBreak verdict (DESIGN §7.3 / §7.4) |
 | LOCK-BREAK (M4) | in `Break` drop the `if !d.Safe { return d, nil }` early return so it ALWAYS `os.Remove`s the lock file regardless of verdict → a refused break still destroys the file → `TestBreak` RED on BOTH the `live_holder_is_refused_and_left_intact` and `unknown_holder_(body-less)_is_refused_and_left_intact` subtests (`lock file removed …, want intact`), while `proven-dead … is broken` and `nothing to break is not an error` stay green — isolating the mutant to exactly the safe gate. Alternate = replace `os.Remove(...)` with a no-op → the proven-dead subtest reddens (`lock file still present after a safe break, want removed`). Pins the DESIGN §7.3 / HEAL-3 displacement action: a lock is unlinked ONLY when AssessBreak proves the holder dead on a trustworthy fs; unlinking a file a LIVE peer holds would break mutual exclusion (next Acquire O_CREATEs a new inode and flocks that), the exact data-loss path §7 forbids. Darwin host RED→GREEN; `//go:build unix` |
+| CMD-LOCK-LS (M4) | in the `LockStatus`→`LockInfo` projection (`lockInfoOf`/`lockInfoFrom`) drop the `if d.HolderKnown { li.Holder = … }` guard so Holder is left nil for every row → the proven-dead row (which HAS a known holder) loses its identity → `TestLockLsProjectsHolders` RED on the non-nil-holder assertion (`repo:api has a known holder; its nested holder identity must be projected, got nil`), while the body-less row (holder legitimately nil) stays green — isolating the holder projection. Alternate = swap two of the four bool fields in the projection → the per-field bool assertions redden. Pins the read-only `wi lock ls` CLI surface over `lock.List`: action=read, the four verdict bools land on the right contract fields, Reason is carried, and a holder identity rides the nested LockHolder EXACTLY when known (DESIGN §7.3/§7.4); `//go:build unix` |
+| CMD-LOCK-BREAK (M4) | in `lockBreakCmd.Run` drop the `if !d.Safe { return … &CommandError{Kind: KindLockHeld} … }` branch so every break maps to `Result{Action: removed}` / exit 0 regardless of verdict → a live holder is mis-reported as a successful break → `TestLockBreakLiveHolderRefusesWithLockHeld` RED (`exit = 0, want 6`; `got ok=true error=<nil>`), while `TestLockBreakProvenDeadRemovesAndExitsZero` stays green — isolating the verdict→envelope mapping. Alternate = drop `env.Locks = r.Locks` from `envelopeFor`'s failure arm → the refusal stops carrying its verdict → same test RED on the `locks[]`-on-failure-envelope assertion (`a lock_held refusal must carry the lock's verdict`). Both confirmed via `cli.Execute` (full pipeline) RED→GREEN. Pins the ACTION half of HEAL-3: a SAFE break → removed/exit 0 + the removed lock's verdict; a refused break → lock_held/exit 6 with the verdict carried so the agent sees WHY, file left intact; one-operand factory rule (DESIGN §7.3); `//go:build unix` |
 
 ## Decisions taken (from IMPLEMENTATION_PLAN.md §7 open decisions)
 
