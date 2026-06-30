@@ -30,6 +30,7 @@ type Envelope struct {
 	Resolve *ResolveBlock `json:"resolve,omitempty"`
 	Planned []PlanItem    `json:"planned,omitempty"`
 	Blocked []BlockItem   `json:"blocked,omitempty"`
+	Help    *HelpBlock    `json:"help,omitempty"`
 
 	// Error is null on success and MUST NOT carry omitempty — the null is contractual.
 	Error *Error `json:"error"`
@@ -112,6 +113,28 @@ type ResolveRepo struct {
 	Worktree string `json:"worktree"`
 	Mirror   string `json:"mirror"`
 	Branch   string `json:"branch"`
+}
+
+// HelpBlock is the self-description payload for `wi help [topic]` — the wire form of the
+// help-json capability (decision #HB). It is an additive, omitempty block: present only on
+// help envelopes. Synopsis is always set; Topic/Usage are empty for the top-level overview
+// (where Commands lists the whole surface) and set for a single command (where Commands is
+// nil). The descriptive content lives here; the runnable follow-ups ride the envelope's
+// top-level next[]. M5's agent-usability capstone enriches each command with self-describing
+// flags[]/exit codes/kinds — additive to this v0 shape.
+type HelpBlock struct {
+	Topic    string        `json:"topic,omitempty"`
+	Synopsis string        `json:"synopsis"`
+	Usage    string        `json:"usage,omitempty"`
+	Commands []HelpCommand `json:"commands,omitempty"`
+}
+
+// HelpCommand is one row of the command surface in a HelpBlock overview: the canonical
+// name, its one-line synopsis, and its usage string.
+type HelpCommand struct {
+	Name     string `json:"name"`
+	Synopsis string `json:"synopsis"`
+	Usage    string `json:"usage"`
 }
 
 // PlanItem is a single planned action surfaced under --dry-run.

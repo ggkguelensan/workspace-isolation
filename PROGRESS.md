@@ -1046,14 +1046,21 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   `error.did_you_mean[]` from `suggest.For(attempted, registeredNames(reg))` (sorted registry keys)
   and sets `error.help = "wi help"`, so an unknown/typo'd command self-corrects. `nil` suggestion →
   omitempty drops the field; the help pointer is always present.
+- ✅ **DONE (this firing) — contract `help` block** (decision #HB; guards via `TestEnvelopeHelpBlockGolden`
+  / `TestEnvelopeHelpOmittedWhenNil` / `goldenHelp` in `TestSchemaAcceptsGolden` / `TestContractFrozen`).
+  `contract.Envelope` gained an additive omitempty `Help *HelpBlock` (between `next` and `error`) +
+  the `HelpBlock`/`HelpCommand` wire types; mirrored in `schema/envelope.schema.json` ($defs +
+  top-level ref, not required); SHAPE-FINGERPRINT lock regenerated. This is the wire form the
+  `help-json` capability finally has a payload for — the `cmd_help.go` handler (NEXT) fills it.
 - **NEXT — register a `help` command**: a `cli` handler (`cmd_help.go` + a `"help"` `BuildRegistry`
-  entry) so `wi help [topic]` returns `help.For(topic)` as an envelope and the advertised `help-json`
-  capability finally has a backing command (closes the PLAN line 108 "capabilities ⇒ backing command"
-  violation). Needs a contract decision: how the help Model rides the envelope — a reserved additive
-  `help` block on `contract.Envelope` (contract is sole owner of the wire type) carrying
-  topic/synopsis/usage/commands, plus `Next` from the model. Topic resolution: no args → overview;
-  args joined (`help isolate new`) → that command; unknown topic → not_found + `did_you_mean` via
-  suggest. Test-first with its non-vacuity mutant.
+  entry) so `wi help [topic]` returns `help.For(topic)` mapped onto the now-existing `contract.HelpBlock`
+  (decision #HB resolved the wire shape). Needs: add a `Help *contract.HelpBlock` field to `cli.Result`
+  + thread it onto the success envelope in `envelopeFor` (it threads `Resolve/Planned/Blocked` but NOT
+  yet `Help`). The handler maps `help.Command`→`contract.HelpCommand` (contract does NOT import help;
+  help does NOT import contract) and sets the model's runnable lines onto `Result.Next`. Topic
+  resolution: no args → overview (`help.For("")`); args joined (`help isolate new`) → that command;
+  unknown topic → not_found + `did_you_mean` via `suggest.For` over `help.Commands()` names.
+  Test-first with its non-vacuity mutant.
 - **THEN — help↔registry SYNC fitness**: a `cli`-layer test (it can import both `help` and the
   registry without a cycle, since `help` stays pure) asserting `help.Commands()` names ==
   `BuildRegistry` keys, so the metadata table can never drift from the live command surface ("help can
@@ -1154,7 +1161,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | guard | mutant |
 |-------|--------|
 | SHAPE-ENUM-DOUBLE-ENTRY | add/reorder a value in any `All*()` without editing the `want*()` literal copy |
-| SHAPE-ENVELOPE-INVARIANTS | add `,omitempty` to `Envelope.Error`, or drop the nil→`[]` coercion for repos/capabilities/warnings/next in `MarshalJSON` |
+| SHAPE-ENVELOPE-INVARIANTS | add `,omitempty` to `Envelope.Error`, or drop the nil→`[]` coercion for repos/capabilities/warnings/next in `MarshalJSON`; **help block (decision #HB):** drop `,omitempty` from `Envelope.Help` → `"help":null` appears on every envelope → `TestEnvelopeHelpOmittedWhenNil` + the success/error goldens RED; reorder/rename a `HelpBlock` json tag or move the `Help` field → the frozen bytes drift → `TestEnvelopeHelpBlockGolden` RED |
 | SHAPE-SCHEMA | set top-level `additionalProperties:true` (or drop `error` from `required`, or widen a closed enum) in `schema/envelope.schema.json` → `TestSchemaRejectsInvalid` RED |
 | SHAPE-FINGERPRINT | rename/retype/reorder any `Envelope` (or nested) field, or edit the schema bytes, without regenerating `contract.lock.json` → `TestContractFrozen` RED |
 | INV-NO-LLM | introduce a denylisted LLM/agent-SDK module into `go.mod`/`go.sum` (or empty `llmDenylist`) → `TestNoLLMDependencies` / `TestNoLLMScannerIsNonVacuous` RED |
@@ -1225,6 +1232,25 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
   runes), NOT the `agnivade/levenshtein` dep PLAN line 37 floated — consistent with #F's zero-dep,
   hand-rolled-stdlib posture and DESIGN §2's minimal-surface invariant. Ordering (distance asc, name
   asc) and nil-on-no-match are wi additions for a deterministic, omitempty-friendly `did_you_mean[]`.
+
+- **#HB help model → envelope wire form = a top-level additive `help` block — RESOLVED 2026-06-30**
+  (settles the §7 "help/did_you_mean/next ownership" decision's help-payload half; the typo half is #S).
+  How does `help.Model` ride the one envelope? Ruling: a reserved additive block `help` on
+  `contract.Envelope` (contract stays SOLE owner of the wire type, DESIGN §3.1). `HelpBlock{topic,
+  synopsis, usage, commands[]}` + `HelpCommand{name, synopsis, usage}` carry the DESCRIPTIVE surface;
+  the model's RUNNABLE follow-ups ride the existing top-level `next[]` (not duplicated in the block).
+  `Synopsis` is always set; `topic`/`usage` are empty for the overview (where `commands[]` lists the
+  whole surface) and set for a single command (where `commands` is nil) — so `For("")` vs
+  `For("<cmd>")` map to two distinct, self-evident shapes. Declared in BOTH `schema/envelope.schema.json`
+  ($defs `helpBlock`/`helpCommand`, top-level `help` ref, NOT in `required`) AND the Go struct at
+  schema_version **"1.0"** with NO version bump — pre-release v0, exactly as `resolve`/`planned`/`blocked`
+  were added; the SHAPE-FINGERPRINT lock was regenerated (`WI_UPDATE_CONTRACT_LOCK=1`) to capture the new
+  shape + schema sha. The cli layer (NEXT unit) maps `help.Command`→`contract.HelpCommand` so contract
+  never imports help and help never imports contract. M5's agent-usability capstone enriches each command
+  with self-describing flags[]/exit-codes/kinds — additive to this v0 block, OUT of M3 scope. Guards:
+  `TestEnvelopeHelpBlockGolden` (frozen bytes + field order, help between next and error),
+  `TestEnvelopeHelpOmittedWhenNil` (omitempty), `goldenHelp` added to `TestSchemaAcceptsGolden`, lock via
+  `TestContractFrozen`.
 
 - **#HC Homebrew cask over formula — RESOLVED 2026-06-30** (overrides PLAN §6's "cask rejected" risk
   note; not a §7 ruling). goreleaser **hard-deprecated `brews` (formula) within the `~> v2` range** we

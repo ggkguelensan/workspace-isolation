@@ -62,7 +62,8 @@
     "blocked": {
       "type": "array",
       "items": { "$ref": "#/$defs/blockItem" }
-    }
+    },
+    "help": { "$ref": "#/$defs/helpBlock" }
   },
   "$defs": {
     "action": {
@@ -184,6 +185,30 @@
         "repo": { "type": "string" },
         "kind": { "$ref": "#/$defs/errorKind" },
         "reason": { "type": "string" }
+      }
+    },
+    "helpBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["synopsis"],
+      "properties": {
+        "topic": { "type": "string" },
+        "synopsis": { "type": "string" },
+        "usage": { "type": "string" },
+        "commands": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/helpCommand" }
+        }
+      }
+    },
+    "helpCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "synopsis", "usage"],
+      "properties": {
+        "name": { "type": "string" },
+        "synopsis": { "type": "string" },
+        "usage": { "type": "string" }
       }
     }
   }

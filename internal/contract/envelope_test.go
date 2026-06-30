@@ -22,6 +22,15 @@ const goldenSuccess = `{"schema_version":"1.0","capabilities":["help-json","reso
 
 const goldenError = `{"schema_version":"1.0","capabilities":["help-json"],"op_id":"op_test","command":"isolate new","ok":false,"action":"noop","dry_run":false,"repos":[],"warnings":[],"next":[],"error":{"kind":"already_exists","message":"isolate exists"}}`
 
+// goldenHelp is the `wi help sync` shape: a success envelope whose additive `help` block
+// (decision #HB) carries the topic/synopsis/usage, with the model's runnable follow-ups
+// riding the top-level next[]. It pins that `help` marshals between `next` and `error`
+// (struct declaration order) and that the help-json capability has a real wire payload.
+// The angle brackets in next[] marshal HTML-escaped (</>) — the same compact
+// json.Marshal path Emit uses — which JSON consumers unescape transparently; this golden
+// freezes that honest wire form.
+const goldenHelp = `{"schema_version":"1.0","capabilities":["help-json"],"op_id":"op_test","command":"help","ok":true,"action":"read","dry_run":false,"repos":[],"warnings":[],"next":["wi isolate new \u003ctask\u003e \u003crepo\u003e…"],"help":{"topic":"sync","synopsis":"fetch every registered repo into its local mirror","usage":"wi sync"},"error":null}`
+
 func successEnvelope() Envelope {
 	return Envelope{
 		SchemaVersion: SchemaVersion,
@@ -60,6 +69,53 @@ func TestEnvelopeGoldenError(t *testing.T) {
 	}
 	if got := string(b); got != goldenError {
 		t.Errorf("error envelope drift:\n got = %s\nwant = %s", got, goldenError)
+	}
+}
+
+// helpEnvelope is the typed source of goldenHelp.
+func helpEnvelope() Envelope {
+	return Envelope{
+		SchemaVersion: SchemaVersion,
+		Capabilities:  []Capability{CapHelpJSON},
+		OpID:          "op_test",
+		Command:       "help",
+		OK:            true,
+		Action:        ActionRead,
+		Next:          []string{"wi isolate new <task> <repo>…"},
+		Help: &HelpBlock{
+			Topic:    "sync",
+			Synopsis: "fetch every registered repo into its local mirror",
+			Usage:    "wi sync",
+		},
+	}
+}
+
+// TestEnvelopeHelpBlockGolden freezes the wire bytes of a help-bearing envelope: the
+// additive `help` block's field set/order and its position (between next and error).
+// Non-vacuity mutant: reorder/rename a HelpBlock json tag, or move the Help struct field,
+// and these bytes drift → RED.
+func TestEnvelopeHelpBlockGolden(t *testing.T) {
+	b, err := json.Marshal(helpEnvelope())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); got != goldenHelp {
+		t.Errorf("help envelope drift:\n got = %s\nwant = %s", got, goldenHelp)
+	}
+}
+
+// TestEnvelopeHelpOmittedWhenNil pins the additive invariant: the `help` block is
+// omitempty, so a non-help envelope (Help nil) carries NO "help" key — agents only see it
+// when there is help to show. Non-vacuity mutant: drop `,omitempty` from Envelope.Help →
+// "help":null appears on every envelope → this test (and the success/error goldens) RED.
+func TestEnvelopeHelpOmittedWhenNil(t *testing.T) {
+	b, _ := json.Marshal(successEnvelope()) // Help is nil
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["help"]; ok {
+		t.Errorf(`"help" key present on a non-help envelope; the block must be omitempty, got %s`, b)
 	}
 }
 

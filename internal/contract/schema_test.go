@@ -55,6 +55,7 @@ func TestSchemaAcceptsGolden(t *testing.T) {
 	for name, env := range map[string]string{
 		"success": goldenSuccess,
 		"error":   goldenError,
+		"help":    goldenHelp,
 	} {
 		if err := validateInstance(t, sch, env); err != nil {
 			t.Errorf("golden %s envelope must validate against the schema, got: %v", name, err)
