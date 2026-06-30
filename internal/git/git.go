@@ -369,6 +369,23 @@ func (e *NonFastForwardError) Error() string {
 		e.Base, e.Current, e.New)
 }
 
+// StaleBaseRefError reports that a RestoreBaseRef (the `land abort` rewind) was refused
+// because the base ref is no longer where the caller expected it — Current (the present
+// tip) does not equal Expected (the tip the land left, the value abort intends to undo).
+// The base ref was left untouched. This is the guard that keeps abort from discarding work
+// another op fast-forwarded onto the base since the land: abort restores a known anchor
+// only when nothing has moved on top of it.
+type StaleBaseRefError struct {
+	Base     string // base branch name (e.g. "main")
+	Current  string // SHA the base ref currently points at
+	Expected string // SHA the caller expected it to still be at
+}
+
+func (e *StaleBaseRefError) Error() string {
+	return fmt.Sprintf("git: refusing to restore %s: base is at %s, not the expected %s",
+		e.Base, e.Current, e.Expected)
+}
+
 // IsAncestor reports whether maybeAncestor is an ancestor of descendant in the repo
 // at dir — equivalently, whether advancing a ref from maybeAncestor to descendant
 // would be a fast-forward. A commit is its own ancestor (the reflexive case is true).
@@ -422,6 +439,49 @@ func (g *Git) FastForwardBaseRef(ctx context.Context, dir, base, newRev string) 
 	// ancestry check and here makes update-ref fail atomically rather than racing.
 	if _, err := g.r.Run(ctx, dir, "update-ref", baseRef, newSHA, current); err != nil {
 		return fmt.Errorf("git: update-ref %s -> %s in %s: %w", baseRef, newSHA, dir, err)
+	}
+	return nil
+}
+
+// RestoreBaseRef rewinds refs/heads/<base> in the repo at dir back to restoreTo (a
+// pre-land backup anchor), but ONLY if the base ref currently points at expectCurrent —
+// the tip the land left it at. It is the one sanctioned base-REWIND path, used by
+// `land abort` to undo a landed repo (DESIGN §7.2): the SSOT base normally moves only by
+// fast-forward (FastForwardBaseRef), but undoing a land means moving the base back to an
+// ANCESTOR, which is by definition not a fast-forward. Safety here is an exact-match guard
+// rather than ancestry: if the base is no longer at expectCurrent — e.g. another op
+// fast-forwarded more work on top since the land — the rewind is refused with
+// *StaleBaseRefError and the ref left untouched, so abort never silently discards work it
+// did not land. Like FastForwardBaseRef it does pure ref motion (update-ref, no checkout,
+// no merge, never `git reset --hard`), operating on the detached SSOT clone.
+//
+// The expectation is checked in Go AND asserted to git (update-ref's old-value), so the
+// read→write window is closed atomically: a concurrent change between the check and the
+// move makes the update-ref fail rather than race.
+func (g *Git) RestoreBaseRef(ctx context.Context, dir, base, expectCurrent, restoreTo string) error {
+	baseRef := "refs/heads/" + base
+	current, err := g.ResolveRef(ctx, dir, baseRef)
+	if err != nil {
+		return err
+	}
+	expected, err := g.ResolveRef(ctx, dir, expectCurrent)
+	if err != nil {
+		return err
+	}
+	target, err := g.ResolveRef(ctx, dir, restoreTo)
+	if err != nil {
+		return err
+	}
+
+	// Exact-match guard: only rewind if the base is still exactly where the land left it,
+	// so work fast-forwarded onto the base since is never clobbered.
+	if current != expected {
+		return &StaleBaseRefError{Base: base, Current: current, Expected: expected}
+	}
+
+	// CAS at the git layer too (old-value asserted), closing the read→update race.
+	if _, err := g.r.Run(ctx, dir, "update-ref", baseRef, target, expected); err != nil {
+		return fmt.Errorf("git: restore-ref %s -> %s in %s: %w", baseRef, target, dir, err)
 	}
 	return nil
 }

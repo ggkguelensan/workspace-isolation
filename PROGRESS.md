@@ -627,7 +627,51 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (55) ✅ **this firing** — **`wi land status <task>` — the read-only resume-inspection verb** (guard
+  (56) ✅ **this firing** — **`git.RestoreBaseRef` — the guarded base-REWIND primitive** (guard
+  `GIT-RESTORE-BASEREF`; `internal/git/git.go` + `git_test.go`), HEAL-5 **abort leaf 1**, decomposed
+  bottom-up exactly like land-atomic (git primitive → domain core → command). It is the ONE sanctioned
+  base-**rewind** path in the codebase, the deliberate counterpart to `FastForwardBaseRef` (the SOLE
+  forward path): `land abort` must move a base ref BACKWARD to a pre-land anchor (`BackupSHA`), which
+  `FastForwardBaseRef` correctly REFUSES (non-ff). **API:**
+  `RestoreBaseRef(ctx, dir, base, expectCurrent, restoreTo) error` — resolves `refs/heads/<base>`'s
+  current tip, the `expectCurrent` sha, and the `restoreTo` target, then enforces an **EXACT-MATCH guard**:
+  it rewinds only if the base is still EXACTLY where the land left it (`current == expected`), so work
+  fast-forwarded onto the base since the land is NEVER clobbered; a mismatch returns a typed
+  `*git.StaleBaseRefError{Base,Current,Expected}` with the base UNTOUCHED. The same guard is enforced a
+  SECOND time at the git layer via an `update-ref <ref> <target> <expected>` old-value CAS (closing the
+  read→update race) — mirroring `FastForwardBaseRef`'s read-then-CAS idiom. **Pure ref motion**: update-ref
+  only, no checkout, no `git reset --hard` (DESIGN §7.2). **Fitnesses** (real-git harness):
+  `TestRestoreBaseRefRewindsToAnchor` (main=C0 anchor → main=C1 landed child; `RestoreBaseRef(…, landed,
+  anchor)` rewinds `refs/heads/main` back to the anchor — a NON-ff move `FastForwardBaseRef` would refuse,
+  proving it genuinely rewinds), `TestRestoreBaseRefRefusesStaleExpectation` (base at landed C1, WRONG
+  `expectCurrent=anchor` → `errors.As(err, *StaleBaseRefError)` and base untouched at landed). **Registered
+  mutants** (both RED→revert→`(cached)` GREEN, byte-identity, two-sided — rewind test stays GREEN):
+  PRIMARY = neuter the Go guard (`if false && current != expected`) → the stale test no longer gets the
+  typed error (the git-layer CAS still rejects the clobber → err is a wrapped `exit 128`, not
+  `*StaleBaseRefError`) → RefusesStaleExpectation RED on the error-type assertion (@:~1007), base still
+  protected; ALTERNATE = neuter the Go guard AND drop the old-value from the CAS
+  (`update-ref baseRef target`) → BOTH guards gone → the unconditional update-ref SUCCEEDS (err=nil) and
+  clobbers the base → RED (err=nil, want `*StaleBaseRefError`). Full gate GREEN (28 pkgs ok + `? schema`)
+  + gofmt clean + linux cross-build/vet clean.
+  NEXT M4 unit — HEAL-5 abort **leaf 2**: build the `land.Abort` domain core, composing this primitive.
+  Sketch: load the parked record (`landstate.Load`); take the `isolate-state:<task>` lock (with
+  `held.Stamp(opID)`); for each `PhaseLanded` repo call `git.RestoreBaseRef` to rewind its base to
+  `BackupSHA`; flip phase (→ a rolled-back phase) and discard/rewrite the record. **OPEN sub-question to
+  resolve THERE** (not here — the primitive is correct regardless): what `expectCurrent` should be at abort
+  time. `landstate.RepoLand` stores `BackupSHA` but NOT the landed tip, so `land.Abort` cannot supply the
+  landed tip from the record alone — options are (a) add a `LandedSHA` field to `RepoLand` (the cleanest;
+  abort then asserts the base is still exactly at the value land left), or (b) live-read the current base
+  tip and pass it as both `expectCurrent` (a degenerate self-CAS) plus an ancestry sanity check that
+  `BackupSHA` is an ancestor of it. Recommend (a): it makes the exact-match guard meaningful (refuse abort
+  if someone fast-forwarded past the landed tip) rather than a no-op self-CAS. Then abort leaf 3 = a thin
+  `wi land abort <task>` command + `"land abort"` registry key + help row (HELP-REGISTRY-SYNC will force the
+  row). After abort: `land continue` (re-drives stop-at-first-block over still-pending/blocked repos, reuses
+  `land.RunJournaled`'s core). The `journal.KindLand` crash-roll-forward Finisher remains a SEPARATE later
+  leaf. (DEFERRED, unchanged: HEAL-GC-NO-LIVE-LOSS case (iii) #GC-AHEAD-V0 — needs a journaled discard verb,
+  do NOT fake with a vacuous test; `wi state get` — NOT in documented M4 scope; `wi doctor`/`check` +
+  bounded `--fix` — LAST.)
+
+  (55) ✅ **(prior firing)** — **`wi land status <task>` — the read-only resume-inspection verb** (guard
   `CMD-LAND-STATUS`; new `internal/cli/cmd_land_status.go` + `cmd_land_status_test.go`), the FIRST and
   smallest leaf of HEAL-5 (`land continue/abort/status`), decomposed bottom-up like land-atomic was. It
   establishes the **2-token `land <verb> <task>` routing** the mutating verbs (`continue`/`abort`) will
@@ -656,17 +700,11 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   RED (@:112) two-sided. (The originally-sketched "drop the branch entirely" alternate was rejected: it
   orphans the `errors`/`fmt` imports → a build failure, not a clean behavioral RED — the kind-swap is the
   honest compiling mutant.) Full gate GREEN (28 pkgs ok + `? schema`) + gofmt clean + linux cross-build/vet clean.
-  NEXT M4 unit — HEAL-5 continues bottom-up: the next leaf is the FIRST **mutating** resume verb. Recommend
-  `wi land abort <task>` before `land continue`: abort is the safety-critical one (it must restore each
-  landed repo from its `BackupSHA` via `git update-ref`, NEVER `git reset --hard`, DESIGN §7.2) and is
-  self-contained (no re-land orchestration), whereas `continue` re-drives the stop-at-first-block march over
-  the still-pending/blocked repos (reuses `land.RunJournaled`'s core, larger). Build a `land.Abort` domain
-  core first (load record → for each `PhaseLanded` repo restore base ref to `BackupSHA` under the
-  isolate-state:<task> lock → flip phase / discard record), then a thin `wi land abort` command + a
-  `"land abort"` registry key + help row. The `journal.KindLand` crash-roll-forward Finisher (recovery side)
-  remains a SEPARATE later leaf. (DEFERRED, unchanged: HEAL-GC-NO-LIVE-LOSS case (iii) #GC-AHEAD-V0 — needs a
-  journaled discard verb, do NOT fake with a vacuous test; `wi state get` — NOT in documented M4 scope, do
-  not build without owner direction; `wi doctor`/`check` + bounded `--fix` — LAST.)
+  NEXT M4 unit — PARTIALLY SATISFIED by unit (56): the recommended bottom-up `land abort` decomposition is
+  underway — abort leaf 1 (`git.RestoreBaseRef`, the guarded base-rewind primitive that restores a landed
+  repo to its `BackupSHA` via `update-ref`, never `git reset --hard`) is now built. The remaining work is
+  abort leaf 2 (`land.Abort` domain core) then leaf 3 (`wi land abort` command), as detailed in unit (56)'s
+  NEXT.
 
   (54) ✅ **(prior firing)** — **`wi land --atomic` — the all-or-nothing land flag** (guard
   `CMD-LAND-ATOMIC`; `internal/cli/cmd_land.go` + `cmd_land_test.go`), the THIRD and FINAL sub-unit of the
@@ -2735,6 +2773,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | LAND-PREFLIGHT (M4 land-atomic) | the non-mutating validate-all gate `land.Preflight(ctx, g, l, task, specs) (checks, ok, err)` (`internal/land/preflight.go`): for each repo resolve work tip (worktree HEAD) + base tip and call `git.IsAncestor(baseTip, workTip)` in the SSOT clone (shared object store, DESIGN §1); `ok=true` IFF EVERY repo would fast-forward; writes no backup, advances no base, persists no landstate, takes no lock — a pure read for `wi land --atomic`'s pre-flight (sub-unit 3). Does NOT short-circuit (reports the full blocker set); an unresolvable ref is a Go error, a clean non-ff is `WouldLand=false` (not an error). Primary mutant = drop the `if !ff { ok = false }` accumulation (ok stays true) → `TestPreflightRefusesWhenAnyRepoBlocks` RED (`ok=true, want false`, preflight_test.go:135); `TestPreflightAllReposWouldLand` stays GREEN (two-sided). Alternate mutant = hardcode `WouldLand:true` in the per-repo cell → same test RED on `api WouldLand = true, want false` (preflight_test.go:143), isolating the per-repo verdict from aggregate `ok`. Both tests also assert `assertNothingMoved` (bases untouched / no backup anchor / no landstate record) — the atomic purity property, sharpened by ordering the landable repo FIRST and the blocker SECOND (a sequential land would have advanced the first base). Hermetic real-git harness (isolate.New stands up worktrees), no build tag. Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | CMD-LAND-ATOMIC (M4 land-atomic) | the `wi land --atomic <task> <repo>…` flag (`cmd_land.go`): `newLandCommand` parses an optional `--atomic` boolean out of `args` (accepted in any position; an unknown `--flag` → usage; `<task>` traversal + `≥1 <repo>` positional contract preserved), and `landCmd.Run`, when set, calls `land.Preflight` BEFORE any pointer move — if ANY repo would not fast-forward it refuses the WHOLE op with `*CommandError{conflict, noop}` (blockers ride `repos[]` as per-repo `non_fast_forward` via `projectPreflight`, same wire shape as a parked `projectLandOutcome` block) having advanced NO base; else it falls through to the unchanged `land.RunJournaled` (decision #ATOMIC-1: pre-flight-then-normal-Run, the check→land window covered by RunJournaled's own isolate-state lock + LandRepo's ff-refusal under a race). Primary mutant = neuter the pre-flight branch (`if false && c.atomic`) → `--atomic` degrades to plain stop-at-first-block land → `TestLandCommandAtomicRefusesAndMovesNothing` RED on all 3 atomic-property assertions (Kind partial not conflict @cmd_land_test.go:253, api base advanced @:259, api backup anchored @:265) while `TestLandCommandAtomicLandsAllWhenClean` + `TestLandCommandAtomicFlagParsing` stay GREEN (two-sided). Alternate mutant = parse `--atomic` but never bind it (`atomic: false` in the factory) → identical RED. A SECOND coupled change — lighting `CapLandAtomic` in `contract.Capabilities()` (after `land`, before `state-kv`) — is guarded by the byte-exact `goldenSuccess` (`TestEnvelopeGoldenSuccess`): adding it reddened the golden showing `,"land-atomic"` appended; updated to the honest wire form → RED→GREEN, exactly as CMD-LAND/CMD-STATE-CAS. End-to-end real-git harness through the registry factory + `cmd.Run(WithOpID(...))`, no build tag. Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | CMD-LAND-STATUS (M4 HEAL-5) | the read-only `wi land status <task>` verb (`internal/cli/cmd_land_status.go`): `newLandStatusCommand(l, args)` takes exactly one safe `<task>` (traversal → usage; NO git dep), and `landStatusCmd.Run` does `landstate.Load(l.LandDir(), task)` → projects each `RepoLand` onto `repos[]` via `projectLandStatus` (every cell `action=read`, `stage` = the landstate phase, a landed repo surfacing `BackupSHA` as `SHA`); `ErrNoRecord` → `not_found` (not internal); no lock (Store renames atomically). The `"land status"` registry key routes via Dispatch longest-match (2-token beats bare `"land"`). Primary mutant = in `projectLandStatus` hardcode `Stage: string(landstate.PhaseLanded)` instead of `string(rl.Phase)` → blocked/pending repos report the wrong stage → `TestLandStatusReportsParkedPhases` RED (@:80) while `TestLandStatusNoRecordIsNotFound` + `TestLandStatusFactoryValidatesArgs` stay GREEN (two-sided). Alternate mutant = classify the `ErrNoRecord` branch `KindInternal` instead of `KindNotFound` → `TestLandStatusNoRecordIsNotFound` RED (@:112) two-sided. (The sketched "drop the branch" alternate was rejected — it orphans the `errors`/`fmt` imports → build failure, not a clean behavioral RED.) A coupled change FORCED by HELP-REGISTRY-SYNC: the new registry key reddened `TestHelpTableMatchesRegistry` until a `land status` row was added to `internal/help`'s table (RED→GREEN, exactly as the surface invariant intends). Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
+| GIT-RESTORE-BASEREF (M4 HEAL-5 abort leaf 1) | the guarded base-REWIND primitive `(*Git).RestoreBaseRef(ctx, dir, base, expectCurrent, restoreTo) error` (`internal/git/git.go`) — the ONE sanctioned backward base-ref move (the counterpart to `FastForwardBaseRef`'s SOLE forward move), the foundation `land abort` will compose to restore a landed repo to its `BackupSHA`. Resolves `refs/heads/<base>` + `expectCurrent` + `restoreTo`, enforces an EXACT-MATCH guard (rewind only if `current == expected`, else typed `*git.StaleBaseRefError{Base,Current,Expected}` with the base UNTOUCHED — so work fast-forwarded onto the base since the land is never clobbered), then a SECOND defense at the git layer via `update-ref <ref> <target> <expected>` old-value CAS (closes the read→update race; mirrors `FastForwardBaseRef`'s read-then-CAS). Pure ref motion — no checkout, no `git reset --hard` (DESIGN §7.2). Primary mutant = neuter the Go guard (`if false && current != expected`) → the stale test no longer receives the typed error (the git-layer CAS still rejects the clobber → a wrapped `exit 128`, not `*StaleBaseRefError`) → `TestRestoreBaseRefRefusesStaleExpectation` RED on the `errors.As` type assertion, base still protected. Alternate mutant = neuter the Go guard AND drop the old-value from the CAS (`update-ref baseRef target`) → BOTH guards gone → the unconditional update-ref SUCCEEDS (err=nil) and clobbers the base → RED (err=nil, want `*StaleBaseRefError`). Both leave `TestRestoreBaseRefRewindsToAnchor` GREEN (two-sided). Hermetic real-git harness, no build tag. Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |

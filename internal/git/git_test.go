@@ -932,3 +932,86 @@ func TestListOwnedRefsScopedToOwnedNamespace(t *testing.T) {
 		t.Fatalf("ListOwnedRefs = %+v, want only the owned marker %+v (backup ref / branch must be excluded)", refs, want)
 	}
 }
+
+// Guard GIT-RESTORE-BASEREF — the abort rewind primitive (DESIGN §7.2).
+//
+// RestoreBaseRef is the inverse-direction sibling of FastForwardBaseRef: where land
+// advances refs/heads/<base> by fast-forward only, `land abort` must REWIND that base
+// back to the pre-land anchor it captured under refs/wi/backup (the BackupSHA), which is
+// by definition NOT a fast-forward (the anchor is an ANCESTOR of the landed tip). So this
+// is the one sanctioned base-rewind path — still pure ref motion (update-ref, no checkout,
+// no `git reset --hard`, DESIGN §7.2) — and its safety comes not from ff but from an
+// EXACT-MATCH guard: it rewinds only if the base is STILL exactly where the land left it
+// (expectCurrent), so work another op fast-forwarded on top since is never silently
+// discarded. A stale expectation is refused with the base left untouched.
+//
+// Non-vacuity mutant (registered, primary): drop the `current != expected` guard → on a
+// stale expectation the code falls through to the git CAS, which fails (exit 128) and
+// returns a plain wrapped error, NOT *StaleBaseRefError → TestRestoreBaseRefRefusesStaleExpectation
+// RED on the error-type assertion (the base stays put because the git-layer CAS still
+// holds). Alternate mutant: drop the guard AND the old-value from the update-ref CAS
+// (unconditional `update-ref <ref> <target>`) → the stale rewind CLOBBERS the base → that
+// test RED on BOTH the missing typed error and the moved ref (the safety property). Both
+// leave TestRestoreBaseRefRewindsToAnchor GREEN (two-sided).
+
+func TestRestoreBaseRefRewindsToAnchor(t *testing.T) {
+	env := testenv.New(t)
+	dir := newSSOT(t, env)
+
+	anchor := writeCommit(t, env, dir, "a.txt", "c0", "c0") // main = C0 (the pre-land backup anchor)
+	landed := writeCommit(t, env, dir, "b.txt", "c1", "c1") // main = C1 (the landed work tip, child of C0)
+	env.Git(t, dir, "switch", "--detach")                   // SSOT posture: no branch checked out
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	// C1 -> C0 is a REWIND (C0 is an ancestor of C1): FastForwardBaseRef would refuse it;
+	// RestoreBaseRef must perform it, because the expectation matches the current tip.
+	if err := g.RestoreBaseRef(ctx, dir, testenv.DefaultBranch, landed, anchor); err != nil {
+		t.Fatalf("RestoreBaseRef (exact-match rewind): %v", err)
+	}
+	got, err := g.ResolveRef(ctx, dir, "refs/heads/"+testenv.DefaultBranch)
+	if err != nil {
+		t.Fatalf("ResolveRef: %v", err)
+	}
+	if got != anchor {
+		t.Errorf("base ref = %s, want rewound to anchor %s", got, anchor)
+	}
+}
+
+func TestRestoreBaseRefRefusesStaleExpectation(t *testing.T) {
+	env := testenv.New(t)
+	dir := newSSOT(t, env)
+
+	anchor := writeCommit(t, env, dir, "a.txt", "c0", "c0") // main = C0 (anchor)
+	landed := writeCommit(t, env, dir, "b.txt", "c1", "c1") // main = C1 (where the base actually is)
+	env.Git(t, dir, "switch", "--detach")
+
+	g := git.New(gitexec.NewWithEnv("git", env.GitEnv()))
+	ctx := context.Background()
+
+	before, err := g.ResolveRef(ctx, dir, "refs/heads/"+testenv.DefaultBranch)
+	if err != nil {
+		t.Fatalf("ResolveRef before: %v", err)
+	}
+	if before != landed {
+		t.Fatalf("precondition: base ref = %s, want %s", before, landed)
+	}
+
+	// Expect the base at the ANCHOR (wrong — it is actually at the landed tip): the base
+	// moved relative to what abort thinks it landed, so the rewind must be REFUSED rather
+	// than clobber whatever is really there now.
+	err = g.RestoreBaseRef(ctx, dir, testenv.DefaultBranch, anchor, anchor)
+	var se *git.StaleBaseRefError
+	if !errors.As(err, &se) {
+		t.Fatalf("err = %v (%T), want *git.StaleBaseRefError", err, err)
+	}
+
+	after, err := g.ResolveRef(ctx, dir, "refs/heads/"+testenv.DefaultBranch)
+	if err != nil {
+		t.Fatalf("ResolveRef after: %v", err)
+	}
+	if after != before {
+		t.Errorf("base ref moved to %s on a refused stale restore; must stay %s", after, before)
+	}
+}
