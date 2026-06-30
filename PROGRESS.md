@@ -627,7 +627,51 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (52) ✅ **this firing** — **`git.IsAncestor` — the non-mutating fast-forward predicate** (guard
+  (53) ✅ **this firing** — **`land.Preflight` — the non-mutating validate-all gate** (guard
+  `LAND-PREFLIGHT`; `internal/land/preflight.go` + `preflight_test.go`), the SECOND sub-unit of the
+  `land-atomic` capability, composing unit (52)'s `git.IsAncestor`. **API:**
+  `land.Preflight(ctx, g, l, task, specs) (checks []RepoPreflight, ok bool, err error)` — for each repo
+  it resolves the work tip (worktree HEAD) + base tip and calls `git.IsAncestor(baseTip, workTip)` in
+  the SSOT clone (whose object store the worktree shares, DESIGN §1, so both tips are reachable — the
+  SAME dir `FastForwardBaseRef` resolves the work tip in, so the gate and the advance agree by
+  construction). `ok=true` IFF EVERY repo would fast-forward. It writes NO backup ref, advances NO base,
+  persists NO landstate record, and takes NO lock — a PURE READ the atomic orchestrator (sub-unit 3)
+  will run under its OWN already-held lock. It does NOT short-circuit on the first non-ff: every repo is
+  checked so the caller reports the FULL blocker set. A genuine infra fault (unresolvable ref/worktree)
+  is a Go error, distinct from a clean would-not-fast-forward (`WouldLand=false`, not an error) — the
+  same refusal/fault split `LandRepo` draws. `RepoPreflight{Repo, Base, BaseTip, WorkTip, WouldLand}`
+  carries the resolved shas so the caller can report exactly what it inspected. **The property that makes
+  it worth having** (distinct from v0 `Run`'s stop-at-first-block): with a landable repo FIRST and a
+  blocker SECOND, a sequential land would advance the first repo's base BEFORE discovering the second
+  can't land (a partial); the all-or-nothing gate detects the blocker while STILL having moved nothing.
+  **Fitnesses** (hermetic real-git harness, `isolate.New` stands up the worktrees, no build tag):
+  `TestPreflightAllReposWouldLand` (2 clean repos → `ok=true`, both `WouldLand`, tips reported, and
+  `assertNothingMoved` — bases untouched / no backup anchor / no landstate record); and
+  `TestPreflightRefusesWhenAnyRepoBlocks` (web landable FIRST + api divergent SECOND → `ok=false`,
+  `web.WouldLand=true`, `api.WouldLand=false`, AND `assertNothingMoved` proves web's base is untouched —
+  the atomic property a sequential land would have violated). **Registered mutants** (both
+  RED→revert→`(cached)` GREEN, byte-identity): PRIMARY = drop the `if !ff { ok = false }` accumulation
+  (ok stays true always) → the block test RED on `ok=true, want false` (preflight_test.go:135) while the
+  all-land test stays GREEN (two-sided — fails exactly the blocking branch); ALTERNATE = hardcode
+  `WouldLand:true` in the per-repo cell (ignore the IsAncestor result) → the block test RED on
+  `api WouldLand = true, want false` (preflight_test.go:143), isolating the per-repo verdict from the
+  aggregate `ok`. Full gate GREEN (28 pkgs ok + `? schema`) + gofmt clean + linux cross-build/vet clean.
+  NEXT M4 unit — **sub-unit 3: the `wi land --atomic` flag** in `cmd_land.go` (the FIRST flag on `land`;
+  parse like `state cas` did — `parseGlobals` strips only `--dry-run`/`--format`, so `--atomic` arrives
+  in `args`). Atomic flow under the isolate-state:<task> lock: call `land.Preflight` FIRST; if `!ok`
+  refuse the WHOLE op with a `*CommandError` (likely `conflict`, the non-ff blockers riding `repos[]` as
+  per-repo `non_fast_forward` like CMD-LAND does) having moved nothing; if `ok` proceed to the existing
+  `land.RunJournaled`. THEN light `CapLandAtomic` in `contract.Capabilities()` (byte-exact `goldenSuccess`
+  drift → update golden, exactly as CMD-LAND/CMD-STATE-CAS). OPEN sub-question for sub-unit 3 (adopt at
+  build time, record then): whether `--atomic` lands all-or-nothing by *pre-flight then normal Run* (the
+  TOCTOU window between check and land is covered by the held lock vs. concurrent wi; an external git race
+  still gets caught by `LandRepo`'s own ff-refusal, parking that repo — acceptable, the base is never
+  forced) — RECOMMENDED — vs. a heavier two-phase prepare/commit (deferred, not needed for v1).
+  (DEFERRED, unchanged: `journal.KindLand` land-recovery Finisher (HEAL-5); HEAL-GC-NO-LIVE-LOSS case (iii)
+  #GC-AHEAD-V0 — needs a journaled discard verb, do NOT fake with a vacuous test; `wi state get` — NOT in
+  documented M4 scope, do not build without owner direction.)
+
+  (52) ✅ **(prior firing)** — **`git.IsAncestor` — the non-mutating fast-forward predicate** (guard
   `GIT-IS-ANCESTOR`; `internal/git/git.go` + `git_test.go`), the FIRST sub-unit of the `land-atomic`
   capability. **API:** `(*Git).IsAncestor(ctx, dir, maybeAncestor, descendant) (bool, error)` — runs
   `git merge-base --is-ancestor`, mapping exit 0 → `(true,nil)`, exit 1 → `(false,nil)` (a genuine
@@ -650,15 +694,9 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   (4 failures, git_test.go:167/:174); ALTERNATE (documented) = collapse the "other exit code = error"
   branch into the false branch → the nonexistent-rev case RED. Full gate GREEN (28 pkgs ok + `? schema`)
   + gofmt clean + linux cross-build/vet clean.
-  NEXT M4 unit — **the `internal/land` non-mutating validate-all pre-flight** (sub-unit 2 of `land-atomic`):
-  for each repo spec resolve the work tip (worktree HEAD) + base tip and call `IsAncestor(baseTip, workTip)`;
-  ALL-pass → proceed to land, ANY-fail → refuse the WHOLE op moving nothing (an all-or-nothing gate, vs.
-  v0 land's stop-at-first-block which may have already advanced earlier repos). THEN sub-unit 3 — the
-  `wi land --atomic` flag in `cmd_land.go` (the first flag on `land`; parse like `state cas` did) + light
-  `CapLandAtomic` in `contract.Capabilities()` (byte-exact `goldenSuccess` drift → update golden, exactly
-  as CMD-LAND/CMD-STATE-CAS). (DEFERRED, unchanged: `journal.KindLand` land-recovery Finisher (HEAL-5);
-  HEAL-GC-NO-LIVE-LOSS case (iii) #GC-AHEAD-V0 — needs a journaled discard verb, do NOT fake with a vacuous
-  test; `wi state get` — NOT in documented M4 scope, do not build without owner direction.)
+  NEXT [SATISFIED by unit (53) — `land.Preflight` shipped]: the `internal/land` non-mutating validate-all
+  pre-flight (sub-unit 2 of `land-atomic`). Sub-unit 3 (the `wi land --atomic` flag + `CapLandAtomic`) is
+  now the NEXT pointer, carried by unit (53) above.
 
   (51) ✅ **(prior firing)** — **the `wi state cas` CLI command + lit `CapStateKV`** (guard `CMD-STATE-CAS`;
   `internal/cli/cmd_state_cas.go` + `cmd_state_cas_test.go`, package `cli_test`), sub-unit **(3)** of `state cas`
@@ -2629,6 +2667,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | STATE-KV-CAS (M4 state cas) | the `internal/state` namespaced compare-and-swap core (`KVCompareAndSwap`/`KVGet`, `internal/state/kv.go`): a CAS sets `ns/key` to newval IFF the current value equals `expected` (with `AbsentSentinel == "__ABSENT__"` meaning "iff absent"), serializing the load-compare-store on `lock.StateKV(ns)` taken from `l.LocksDir()` — owns the lock end-to-end + `Stamp(opID)`s it, symmetric with `isolate.New` (decision #SKV-2). A mismatch returns `(false, nil)` writing nothing; a contended namespace surfaces `*lock.HeldError` → exit 6. Store = `.wi/state/kv/<ns>.json` (`map[string]string`, atomic write, `kv/` lazily made + skipped by `state.List`). Primary mutant = drop the compare and store newval unconditionally → `TestKVCompareAndSwap` RED at the mismatch case (`swapped=true, want false`, kv_test.go:52). Alternate mutant = acquire `lock.Workspace()` instead of `lock.StateKV(ns)` (lock the wrong key) → `TestKVCompareAndSwapSerializesOnLock` RED (with `state-kv:ports` held externally the CAS no longer sees `*lock.HeldError`, kv_test.go:111). Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | CMD-STATE-CAS (M4 state cas) | the `wi state cas <ns> <key> --expected <v\|__ABSENT__> --new <v>` handler (`cmd_state_cas.go`): the FIRST command with its own flags (`parseStateCasArgs` handles `--flag value` + `--flag=value`, both required, exactly two positionals, non-empty key, namespace traversal-checked at the factory → usage exit 64). `stateCasCmd.Run` maps `state.KVCompareAndSwap`: won → `*Result{action=created}` (exit 0); lost (`!swapped`) → `*CommandError{conflict, noop}` (exit 4, a TYPED refusal not an infra error); `*lock.HeldError` → `*CommandError{lock_held}` (exit 6); `--dry-run` → `*Result{action=noop}` no write (exit 0). Primary mutant = map the lost CAS to a `created` success instead of the conflict → `TestStateCasCompareMiss` RED (`err=<nil>, want *cli.CommandError`, cmd_state_cas_test.go:100 — a lost race mis-reported as a win). Alternate mutant = drop the `DryRunFrom(ctx)` guard so `--dry-run` executes the swap → `TestStateCasDryRunNoWrite` RED (the value it must NOT have written is present). A SECOND coupled change — lighting `CapStateKV` in `contract.Capabilities()` — is guarded by the byte-exact `goldenSuccess` (`TestEnvelopeGoldenSuccess`): adding it reddened the golden showing `,"state-kv"` appended; updated to the honest wire form → RED→GREEN. End-to-end through the registry factory + `cmd.Run(WithOpID(...))`, no build tag. Both Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | GIT-IS-ANCESTOR (M4 land-atomic) | the non-mutating fast-forward predicate `(*Git).IsAncestor(ctx, dir, maybeAncestor, descendant)` (`internal/git/git.go`): runs `git merge-base --is-ancestor`, exit 0 → `(true,nil)`, exit 1 → `(false,nil)`, any other code → a real error (never silent false). `FastForwardBaseRef` was refactored to reuse it, so the SSOT base advance (DESIGN §5) and `wi land --atomic`'s pre-flight share one predicate. Primary mutant = ignore the exit code, return `(true,nil)` always → `TestIsAncestor` RED on rewind + both-diverged + nonexistent-rev (4 failures, git_test.go:167/:174) — pins that a non-ancestor is reported false, not true. Alternate mutant = collapse the "other exit code = error" branch into the false branch (`return false, nil` for any error) → ONLY the nonexistent-rev case RED (a missing rev must error, not read as "not an ancestor"). Hermetic real-git harness over a 3-commit DAG, no build tag. Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
+| LAND-PREFLIGHT (M4 land-atomic) | the non-mutating validate-all gate `land.Preflight(ctx, g, l, task, specs) (checks, ok, err)` (`internal/land/preflight.go`): for each repo resolve work tip (worktree HEAD) + base tip and call `git.IsAncestor(baseTip, workTip)` in the SSOT clone (shared object store, DESIGN §1); `ok=true` IFF EVERY repo would fast-forward; writes no backup, advances no base, persists no landstate, takes no lock — a pure read for `wi land --atomic`'s pre-flight (sub-unit 3). Does NOT short-circuit (reports the full blocker set); an unresolvable ref is a Go error, a clean non-ff is `WouldLand=false` (not an error). Primary mutant = drop the `if !ff { ok = false }` accumulation (ok stays true) → `TestPreflightRefusesWhenAnyRepoBlocks` RED (`ok=true, want false`, preflight_test.go:135); `TestPreflightAllReposWouldLand` stays GREEN (two-sided). Alternate mutant = hardcode `WouldLand:true` in the per-repo cell → same test RED on `api WouldLand = true, want false` (preflight_test.go:143), isolating the per-repo verdict from aggregate `ok`. Both tests also assert `assertNothingMoved` (bases untouched / no backup anchor / no landstate record) — the atomic purity property, sharpened by ordering the landable repo FIRST and the blocker SECOND (a sequential land would have advanced the first base). Hermetic real-git harness (isolate.New stands up worktrees), no build tag. Darwin RED→revert→`(cached)` GREEN (byte-identity) + gofmt clean + linux cross-build/vet clean |
 | MIRROR-FETCH | make `Refresh` skip the `g.Fetch` dial (classify against the stale remote-tracking ref) → behind stays 0, origin_base == local_base, not stale → `TestRefreshFetchesAndClassifies` RED |
 | MIRROR-FRESHNESS | hardcode `Stale:false` (or `true`) in `Snapshot.Freshness()`, ignoring the behind count → `TestFreshnessClassifiesStaleByBehindCount` RED (two-sided: a constant fails one branch) |
 | MIRROR-PERSIST | make `Store` divert/skip the write (e.g. write `p+".mutant"`) so `Load` can't find it → `TestSnapshotRoundTrips` RED; or drop the `layout.ValidateSegment` call in `metaPath` → `TestStoreRejectsUnsafeRepoName` RED |
