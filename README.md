@@ -244,4 +244,4 @@ plan lives in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
 ## License
 
-Not yet chosen — add a `LICENSE` before publishing (MIT or Apache-2.0 recommended).
+[MIT](LICENSE) © 2026 ggkguelensan
