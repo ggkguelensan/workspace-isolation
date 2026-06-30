@@ -2,10 +2,12 @@ package isolate
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/ggkguelensan/workspace-isolation/internal/git"
 	"github.com/ggkguelensan/workspace-isolation/internal/layout"
+	"github.com/ggkguelensan/workspace-isolation/internal/lock"
 	"github.com/ggkguelensan/workspace-isolation/internal/state"
 )
 
@@ -216,4 +218,170 @@ func PlanAction(c Cell) RepairAction {
 	default: // ClassReclaimed
 		return RepairDropRecord
 	}
+}
+
+// RepairStatus is the overall outcome of a Repair run.
+type RepairStatus string
+
+const (
+	// RepairComplete: every cell was brought to consistency (or already was) — no
+	// orphan hard block and no per-cell error. The isolate now matches its evidence.
+	RepairComplete RepairStatus = "complete"
+	// RepairBlocked: at least one cell could not be reconciled — an OrphanWorktree hard
+	// block (orphan_unexplained, never auto-removed — §7.1) or a per-cell git/IO fault
+	// during the action. The reconcilable cells were still reconciled (best-effort-all,
+	// like Remove): a blocked cell never aborts the others.
+	RepairBlocked RepairStatus = "blocked"
+)
+
+// RepairOutcome is one cell's result within a Repair run, in record order. Class is what
+// was observed; Action is what PlanAction decided. Exactly one of three terminal states
+// holds: Done (the action succeeded, or was none/drop_record — nothing destructive to
+// fail); a HARD BLOCK (Done=false, Reason set, Err=nil — an OrphanWorktree surfaced
+// loudly per §7.1, left intact on disk and in the registry); or a per-cell error
+// (Done=false, Err set — a git/IO fault while re-materializing or observing).
+type RepairOutcome struct {
+	Repo   string
+	Class  Classification
+	Action RepairAction
+	Done   bool
+	Reason string // orphan_unexplained sub-reason when Action==RepairBlockOrphan (Err==nil)
+	Err    error  // a hard per-cell failure (Reason=="")
+}
+
+// RepairResult is the outcome of a Repair run: the task identity, the overall Status,
+// and a per-cell outcome in record order. The CLI projects this onto the envelope's
+// repos[]/blocked[] and the exit code.
+type RepairResult struct {
+	Task   string
+	Status RepairStatus
+	Repos  []RepairOutcome
+}
+
+// Repair is the three-way drift reconciler's ACTION half (HEAL-1, DESIGN §7.4): under
+// the isolate-state:<task> lock it observes every recorded cell (the same read Inspect
+// performs), decides each cell's action with PlanAction, and carries it out — healing a
+// lagging stage, re-materializing a MissingWorktree at its owned marker sha, dropping a
+// Reclaimed cell's stale tombstone, and HARD-BLOCKING an OrphanWorktree. It is
+// best-effort-all (like Remove): a blocked or errored cell is recorded and the rest are
+// still reconciled. All registry mutations are accumulated on one in-memory record and
+// persisted with a single atomic Store at the end (or a Delete when the isolate no
+// longer has any recorded cell), so the reconcile is itself crash-tolerant — a re-run
+// re-observes the new physical state and converges.
+//
+// It honors every reclamation invariant: an OrphanWorktree is NEVER auto-removed (§7.1,
+// surfaced as orphan_unexplained), a Reclaimed cell is dropped but NEVER recreated (no
+// resurrection — §7.4), re-materialization re-adds at the EXACT owned commit (the marker
+// sha, not a newer base) and does NOT re-create the already-present marker, and it moves
+// no base ref and dials no network. A held lock returns *lock.HeldError (exit 6); a task
+// with no record returns state.ErrNoRecord (the isolate does not exist).
+func Repair(ctx context.Context, l layout.Layout, g *git.Git, task, opID string) (RepairResult, error) {
+	key, err := lock.IsolateState(task)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	held, err := lock.Acquire(l.LocksDir(), key)
+	if err != nil {
+		return RepairResult{}, err // *lock.HeldError → exit 6 (DESIGN §6.1)
+	}
+	defer func() { _ = held.Release() }()
+	_ = held.Stamp(opID) // best-effort holder metadata (see New/Remove)
+
+	stateDir := l.StateDir()
+	rec, err := state.Load(stateDir, task)
+	if err != nil {
+		return RepairResult{}, err // state.ErrNoRecord → not_found; else a read fault
+	}
+
+	// The isolas/<task>/ parent must exist before re-materializing a worktree leaf into
+	// it (it normally does; recreate defensively, idempotently, like New).
+	if taskDir, derr := l.TaskDir(task); derr == nil {
+		_ = os.MkdirAll(taskDir, 0o755)
+	}
+
+	res := RepairResult{Task: task, Status: RepairComplete}
+	outcomes := make([]RepairOutcome, 0, len(rec.Repos))
+	drop := make(map[string]bool)
+	for i := range rec.Repos {
+		repo := rec.Repos[i].Repo
+		cell, oerr := observeCell(ctx, l, g, task, repo, rec.Repos[i].Stage)
+		if oerr != nil {
+			outcomes = append(outcomes, RepairOutcome{Repo: repo, Err: oerr})
+			res.Status = RepairBlocked
+			continue
+		}
+		oc := RepairOutcome{Repo: repo, Class: cell.Class, Action: PlanAction(cell)}
+		switch oc.Action {
+		case RepairNone:
+			oc.Done = true
+		case RepairHealStage:
+			rec.Repos[i].Stage = state.StageCreated // in-memory; persisted once below
+			oc.Done = true
+		case RepairRematerialize:
+			if rerr := rematerializeCell(ctx, g, l, task, repo, cell.MarkerSHA); rerr != nil {
+				oc.Err = rerr
+				res.Status = RepairBlocked
+			} else {
+				rec.Repos[i].Stage = state.StageCreated
+				oc.Done = true
+			}
+		case RepairDropRecord:
+			drop[repo] = true
+			oc.Done = true
+		case RepairBlockOrphan:
+			oc.Reason = "orphan_unexplained: worktree present but no wi ownership marker refs/wi/owned/" + task + "/" + repo
+			res.Status = RepairBlocked
+		}
+		outcomes = append(outcomes, oc)
+	}
+	res.Repos = outcomes
+
+	// Persist: drop the reclaimed tombstones, keep the rest with their (possibly healed)
+	// stages. When no recorded cell remains the isolate no longer exists — delete the
+	// record and best-effort remove the now-empty task dir, exactly as Remove does.
+	if len(drop) > 0 {
+		kept := rec.Repos[:0]
+		for _, rr := range rec.Repos {
+			if !drop[rr.Repo] {
+				kept = append(kept, rr)
+			}
+		}
+		rec.Repos = kept
+	}
+	if len(rec.Repos) == 0 {
+		if err := state.Delete(stateDir, task); err != nil {
+			return res, fmt.Errorf("isolate: delete record for %q after full reclaim: %w", task, err)
+		}
+		if taskDir, derr := l.TaskDir(task); derr == nil {
+			_ = os.Remove(taskDir) // best-effort: succeeds only if now empty
+		}
+	} else if err := state.Store(stateDir, rec); err != nil {
+		return res, fmt.Errorf("isolate: update record for %q after reconcile: %w", task, err)
+	}
+	return res, nil
+}
+
+// rematerializeCell re-adds a MissingWorktree cell's worktree at the EXACT sha its
+// surviving marker records (markerSHA) — the owned commit, never a newer base. It clears
+// any stale worktree-admin entry first (PruneWorktrees), since the dir was removed
+// out-of-band and git would otherwise refuse the re-add as "missing but already
+// registered". It does NOT re-create the marker: the marker already exists (its survival
+// is precisely why the cell is a re-materialize candidate, not a resurrection). It moves
+// no base ref and dials no network.
+func rematerializeCell(ctx context.Context, g *git.Git, l layout.Layout, task, repo, markerSHA string) error {
+	ssot, err := l.Repo(repo)
+	if err != nil {
+		return err
+	}
+	wt, err := l.Isolate(task, repo)
+	if err != nil {
+		return err
+	}
+	if err := g.PruneWorktrees(ctx, ssot); err != nil {
+		return err
+	}
+	if err := g.AddWorktree(ctx, ssot, wt, markerSHA); err != nil {
+		return err
+	}
+	return nil
 }

@@ -221,3 +221,149 @@ func TestPlanActionNeverAutoRemovesOrphan(t *testing.T) {
 		}
 	}
 }
+
+// TestRepairReconcilesAllDriftStates drives the HEAL-1 executor isolate.Repair over a
+// real isolate exhibiting ALL FIVE reconcile actions at once, proving it dispatches
+// each cell on PlanAction and carries the action out under the isolate-state lock:
+//
+//	api   — left intact                         Consistent+created   → none          (untouched)
+//	auth  — recorded stage forced to pending     Consistent+pending   → heal_stage    (stage → created)
+//	web   — worktree dir removed (marker kept)    MissingWorktree      → rematerialize (re-added at marker sha)
+//	db    — marker deleted (worktree kept)        OrphanWorktree       → block_orphan  (HARD BLOCK, left intact)
+//	cache — both removed                          Reclaimed            → drop_record   (stale entry dropped)
+//
+// The two §7 safety guarantees are asserted physically: the orphan (db) is NEVER
+// removed (worktree still on disk, still in the record — §7.1), and the reclaimed cell
+// (cache) is dropped but NEVER recreated (no resurrection — §7.4). The re-materialized
+// web worktree must come back detached at the EXACT marker sha (the owned commit), not
+// an arbitrary newer base. One orphan present ⇒ overall RepairBlocked.
+func TestRepairReconcilesAllDriftStates(t *testing.T) {
+	env, l, g, ctx := setup(t)
+	names := []string{"api", "auth", "web", "db", "cache"}
+	for _, n := range names {
+		cloneSSOT(t, env, l, g, ctx, n)
+	}
+	const task = "feat"
+	if _, err := isolate.New(ctx, l, g, task, "op_new", specs(names...)); err != nil {
+		t.Fatalf("isolate.New: %v", err)
+	}
+
+	// Capture web's marker sha (the re-materialize source) before disturbing it.
+	webSSOT, _ := l.Repo("web")
+	webMarker, ok, err := g.OwnedRefSHA(ctx, webSSOT, task, "web")
+	if err != nil || !ok {
+		t.Fatalf("read web marker: sha=%q ok=%v err=%v", webMarker, ok, err)
+	}
+
+	// auth → Consistent+pending: force the recorded stage back to pending, leaving the
+	// marker and worktree intact (a crash-after-materialize-before-stage-flip).
+	rec, err := state.Load(l.StateDir(), task)
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	for i := range rec.Repos {
+		if rec.Repos[i].Repo == "auth" {
+			rec.Repos[i].Stage = state.StagePending
+		}
+	}
+	if err := state.Store(l.StateDir(), rec); err != nil {
+		t.Fatalf("state.Store (force auth pending): %v", err)
+	}
+
+	// web → MissingWorktree: remove the worktree dir, keep the marker.
+	webWT, _ := l.Isolate(task, "web")
+	if err := os.RemoveAll(webWT); err != nil {
+		t.Fatalf("RemoveAll(web): %v", err)
+	}
+	// db → OrphanWorktree: delete the marker, keep the worktree.
+	dbSSOT, _ := l.Repo("db")
+	if err := g.DeleteOwnedRef(ctx, dbSSOT, task, "db"); err != nil {
+		t.Fatalf("DeleteOwnedRef(db): %v", err)
+	}
+	// cache → Reclaimed: remove both worktree and marker.
+	cacheWT, _ := l.Isolate(task, "cache")
+	if err := os.RemoveAll(cacheWT); err != nil {
+		t.Fatalf("RemoveAll(cache): %v", err)
+	}
+	cacheSSOT, _ := l.Repo("cache")
+	if err := g.DeleteOwnedRef(ctx, cacheSSOT, task, "cache"); err != nil {
+		t.Fatalf("DeleteOwnedRef(cache): %v", err)
+	}
+
+	res, err := isolate.Repair(ctx, l, g, task, "op_repair")
+	if err != nil {
+		t.Fatalf("isolate.Repair: %v", err)
+	}
+
+	// One orphan ⇒ the whole run is blocked.
+	if res.Status != isolate.RepairBlocked {
+		t.Errorf("Repair status = %q, want %q (db is an orphan hard block)", res.Status, isolate.RepairBlocked)
+	}
+
+	wantAction := map[string]isolate.RepairAction{
+		"api":   isolate.RepairNone,
+		"auth":  isolate.RepairHealStage,
+		"web":   isolate.RepairRematerialize,
+		"db":    isolate.RepairBlockOrphan,
+		"cache": isolate.RepairDropRecord,
+	}
+	if len(res.Repos) != len(names) {
+		t.Fatalf("Repair returned %d outcomes, want %d", len(res.Repos), len(names))
+	}
+	for i, oc := range res.Repos {
+		if oc.Repo != names[i] {
+			t.Errorf("outcome[%d].Repo = %q, want %q (record order)", i, oc.Repo, names[i])
+		}
+		if oc.Action != wantAction[oc.Repo] {
+			t.Errorf("%s action = %q, want %q", oc.Repo, oc.Action, wantAction[oc.Repo])
+		}
+		switch oc.Repo {
+		case "db":
+			if oc.Done {
+				t.Errorf("db (orphan) must NOT be marked done")
+			}
+			if oc.Reason == "" {
+				t.Errorf("db (orphan) must carry an orphan_unexplained reason, got empty")
+			}
+		default:
+			if !oc.Done {
+				t.Errorf("%s should be done (action %q), got Done=false err=%v", oc.Repo, oc.Action, oc.Err)
+			}
+		}
+	}
+
+	// web re-materialized: worktree back on disk, detached at the EXACT marker sha.
+	if _, err := os.Stat(webWT); err != nil {
+		t.Errorf("web worktree not re-materialized: %v", err)
+	}
+	if head, herr := g.ResolveRef(ctx, webWT, "HEAD"); herr != nil || head != webMarker {
+		t.Errorf("re-materialized web HEAD = %q (err %v), want the owned marker sha %q", head, herr, webMarker)
+	}
+	// db orphan worktree LEFT INTACT — §7.1 never auto-prunes an orphan.
+	dbWT, _ := l.Isolate(task, "db")
+	if _, err := os.Stat(dbWT); err != nil {
+		t.Errorf("db orphan worktree must be left intact, but it is gone: %v", err)
+	}
+
+	// Record after reconcile: cache dropped (no resurrection); the rest kept with
+	// healed stages.
+	rec2, err := state.Load(l.StateDir(), task)
+	if err != nil {
+		t.Fatalf("state.Load after Repair: %v", err)
+	}
+	stageOf := map[string]state.Stage{}
+	for _, rr := range rec2.Repos {
+		stageOf[rr.Repo] = rr.Stage
+	}
+	if _, present := stageOf["cache"]; present {
+		t.Errorf("cache (reclaimed) must be dropped from the record, but it is still present")
+	}
+	for _, n := range []string{"api", "auth", "web", "db"} {
+		if _, present := stageOf[n]; !present {
+			t.Errorf("%s must remain in the record, but it is gone", n)
+		}
+	}
+	if stageOf["auth"] != state.StageCreated {
+		t.Errorf("auth stage = %q after heal, want %q", stageOf["auth"], state.StageCreated)
+	}
+}
