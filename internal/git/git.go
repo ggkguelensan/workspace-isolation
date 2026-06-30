@@ -22,9 +22,9 @@ import (
 )
 
 // Git runs typed git verbs through a gitexec.Runner. Almost every verb is local
-// and uses the offline Runner.Run path; the two network-permitted verbs —
-// EnsureClone and Fetch — are the sole verbs that route through RunNetwork and
-// dial (DESIGN §2 #3, §5).
+// and uses the offline Runner.Run path; the three network-permitted verbs —
+// EnsureClone, Fetch, and FirstExistingRemoteHead — are the sole verbs that route
+// through RunNetwork and dial (DESIGN §2 #3, §5).
 type Git struct {
 	r *gitexec.Runner
 }
@@ -70,7 +70,7 @@ func (g *Git) EnsureClone(ctx context.Context, dir, originURL, base string) erro
 }
 
 // Fetch updates dir's remote-tracking refs (refs/remotes/<remote>/*) from the
-// network. With clone it is one of only two network-permitted verbs in wi, so it
+// network. With clone it is one of only three network-permitted verbs in wi, so it
 // routes through gitexec.RunNetwork. Fetch never moves a local branch ref and
 // never touches the working tree — advancing the SSOT base is FastForwardBaseRef's
 // exclusive job on the sync path (DESIGN §5). remote is wi-internal (always
@@ -80,6 +80,64 @@ func (g *Git) Fetch(ctx context.Context, dir, remote string) error {
 		return fmt.Errorf("git: fetch %s in %s: %w", remote, dir, err)
 	}
 	return nil
+}
+
+// FirstExistingBase returns the first candidate (in the caller's preference order)
+// that exists as a LOCAL branch refs/heads/<candidate> in the repo at dir, plus the
+// sha it points at. It is the mirror-side resolver for a base declared as an ordered
+// candidate list — defaults.base / repo.base = ["dev","main"] meaning "prefer dev,
+// fall back to main" (DESIGN §1). Once a single-branch SSOT mirror exists it tracks
+// exactly one base branch (EnsureClone clones --branch <base>), so reading the
+// candidate list back against the mirror deterministically yields that one branch;
+// the genuine candidate-vs-origin choice happens once, at first sync, via
+// FirstExistingRemoteHead. It is a local, read-only operation mirroring OwnedRefSHA's
+// `rev-parse --verify --quiet` contract: a ref that resolves (exit 0, sha emitted) is
+// the answer; a valid-but-absent ref (exit 1, no output) falls through to the next
+// candidate; any other failure is a real error. found=false with a nil error means
+// none of the candidates exist locally.
+func (g *Git) FirstExistingBase(ctx context.Context, dir string, candidates []string) (branch, sha string, found bool, err error) {
+	for _, c := range candidates {
+		ref := "refs/heads/" + c
+		res, runErr := g.r.Run(ctx, dir, "rev-parse", "--verify", "--quiet", "--end-of-options", ref)
+		if runErr != nil {
+			var ee *gitexec.ExitError
+			if errors.As(runErr, &ee) && ee.Result.ExitCode == 1 {
+				continue // valid-but-absent ref: try the next candidate
+			}
+			return "", "", false, fmt.Errorf("git: resolve base candidate %s in %s: %w", ref, dir, runErr)
+		}
+		return c, strings.TrimSpace(res.Stdout), true, nil
+	}
+	return "", "", false, nil
+}
+
+// FirstExistingRemoteHead returns the first candidate (in the caller's preference
+// order) that exists as a head refs/heads/<candidate> on the remote at originURL,
+// discovered with `git ls-remote --heads`. It is the origin-side resolver for an
+// ordered base candidate list, used exactly once per repo: at FIRST sync, BEFORE the
+// single-branch SSOT mirror is cloned, when there is no local mirror to read the
+// candidates against (the mirror, cloned --branch <base>, only ever tracks that one
+// branch). It is wi's THIRD and final network-permitted verb (with EnsureClone and
+// Fetch), so it routes through gitexec.RunNetwork; the offline belt refuses it.
+// found=false with a nil error means none of the candidates exist on the remote.
+func (g *Git) FirstExistingRemoteHead(ctx context.Context, originURL string, candidates []string) (branch string, found bool, err error) {
+	res, err := g.r.RunNetwork(ctx, "", "ls-remote", "--heads", "--end-of-options", originURL)
+	if err != nil {
+		return "", false, fmt.Errorf("git: ls-remote heads from %s: %w", originURL, err)
+	}
+	// Each non-empty line is "<sha>\trefs/heads/<name>"; collect the head refs.
+	present := make(map[string]bool)
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		if fields := strings.Fields(line); len(fields) == 2 {
+			present[fields[1]] = true
+		}
+	}
+	for _, c := range candidates {
+		if present["refs/heads/"+c] {
+			return c, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // DivergedCounts reports how many commits local is ahead of and behind remote,
