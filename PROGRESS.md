@@ -627,7 +627,38 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   roll-forward; HEAL-6 mirror-stale refusal; HEAL-7 atomic `.wi/` writes; HEAL-8 `wi doctor`/`check` + bounded
   `--fix` (LAST — composes the safe heals repair+gc).
 
-  (42) ✅ **this firing** — **HEAL-4 sub-unit 3d-iv-b: wire `recovery.Run` into the production startup path —
+  (43) ✅ **this firing** — **the `internal/landstate` keystone: the durable `.wi/land/<task>.json` parked-land
+  record + phase vocabulary + codec** (guards `LANDSTATE-PERSIST` + `LANDSTATE-WIRE`; `internal/landstate/
+  landstate.go` + `_test.go`, package `landstate_test`). This is the foundation the whole `land` domain stands
+  on — the executor (rebase-onto-mirror + freshness-guarded update-ref) writes it, and HEAL-5's `land continue/
+  abort/status` resume from it. It mirrors `internal/state` exactly (the established durable-state keystone
+  pattern: a pure record + codec, no Runner, dials nothing, atomic via `lockfs.WriteFileAtomic`, task name
+  through `layout.ValidateSegment`): `ErrNoRecord`, `type Phase string` with `PhasePending|PhaseLanded|
+  PhaseBlocked`, `RepoLand{Repo, Phase, BackupSHA \`json:"backup_sha,omitempty"\`}`, `TaskLand{Task, OpID,
+  Repos}`, `NewTaskLand` (all-pending origin in one place), `recordPath`, `Load`, `Store`. **Decision #S
+  precedent applied:** `Phase` is an INTERNAL durable-state vocabulary owned by `landstate`, NOT a closed
+  contract wire enum — `state.go` line 21 explicitly defers `pending|landed|blocked` here as "a SEPARATE
+  landstate concern in v1". Scope kept tight: only the record + codec are built (no `List`/`Delete`/
+  `UpdatePhase` — those land test-first with their HEAL-5 consumers; no speculative untested code).
+  **Non-vacuity (the LOCK-HOLDER lesson applied up front):** a round-trip-only test is VACUOUS against a
+  json-tag rename (Marshal+Unmarshal share the tag, staying symmetric), so `TestStoredWireIsStable` asserts
+  the CONCRETE durable wire bytes — the literal keys `"task"`/`"op_id"`/`"repo"`/`"phase"`/`"backup_sha"`, the
+  value `"blocked"`, and the backup sha. Registered mutant = rename the `backup_sha` json tag (→ `backupSha`):
+  `TestTaskLandRoundTrips` STAYS GREEN (symmetric), `TestStoredWireIsStable` RED on the absent `"backup_sha"`
+  literal — confirmed RED→revert→`(cached)` GREEN (byte-identity). Full gate GREEN (only `? schema` non-ok) +
+  gofmt clean + linux cross-build/vet clean.
+  **OPEN-DECISION RULING recorded this firing (case (iii)):** the previously-pointed-at **HEAL-GC-NO-LIVE-LOSS
+  case (iii)** ("HEAL-4-reset + gc composition cannot prune a discarded sha") is **correctly DEFERRED, not
+  built** — and the NEXT pointer below is corrected to stop aiming at it. Trusting the build over the prior
+  pointer: the journal has NO reset/discard `Kind` (kinds are `isolate_new`/`isolate_rm`/`land`; confirmed in
+  `internal/journal/journal.go`), so there is no journaled "discarded sha" signal a gc negative-fitness could
+  key on. Building it now would require either inventing a discard-journaling verb (out of current scope) or
+  faking the test with a vacuous assertion — and decision #GC-AHEAD-V0 already warns against the latter. Case
+  (iii) stays deferred until a real discard/reset op exists in the command surface. This also re-established
+  that the entire `land` domain (`internal/land`, `internal/landstate`, `cmd_land*`) was UNBUILT — making this
+  keystone the genuine next M4 unit.
+
+  (42) ✅ **(prior firing)** — **HEAL-4 sub-unit 3d-iv-b: wire `recovery.Run` into the production startup path —
   HEAL-4 is now COMPLETE** (guard `CMD-MAIN`, recovery limb; `cmd/wi/main.go` + `cmd/wi/main_test.go`). `run`
   now performs ONE offline roll-forward recovery pass (`recovery.Run(ctx, root, deps.Git)`) AFTER building
   `Deps` and BEFORE `cli.Dispatch`, gated on `workspaceInitialized(root)` (an `os.Stat` of `.wi/` that is a
@@ -662,14 +693,21 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   genuinely-stuck (failed) op still surfaces (its journal survives), so doctor's value holds, but if HEAL-8 wants
   doctor to observe PRE-recovery pending ops it must add a no-recovery path; revisit at HEAL-8. Full gate GREEN
   (only `? schema` non-ok) + gofmt clean + linux cross-build/vet clean.
-  NEXT M4 unit — **HEAL-4 is COMPLETE** (3a classifier → 3b scan → 3c executor → 3d-i write-side → 3d-ii finisher
-  → 3d-iii dispatcher → 3d-iv-a pass → 3d-iv-b wiring). Next: the now-unblocked **HEAL-GC-NO-LIVE-LOSS case (iii)**
-  — the HEAL-4-reset + HEAL-6-gc COMPOSITION must not prune a discarded sha (a focused `internal/gc` negative
-  fitness; was deferred "until HEAL-4 lands the op journal" — it now has). THEN past HEAL-2/HEAL-4: **HEAL-5**
-  `land continue/abort/status` (parked-land resume/abort with backup-ref safety, §7.2); **HEAL-6** mirror-stale
-  refusal at land (exit 6, never auto-rebase); **HEAL-7** atomic `.wi/` writes (largely done via lockfs — audit);
-  **HEAL-8** `wi doctor`/`check` + bounded `--fix` (LAST — composes the safe heals, and resolves the recovery-vs-
-  read-only tension recorded above).
+  NEXT M4 unit — **the `land` domain build-out** (the major unbuilt M4 deliverable; keystone `internal/landstate`
+  is DONE as of unit 43). Build order: (a) the **`internal/land` executor** — rebase the isolate's per-repo work
+  onto the mirror base, write a **backup ref BEFORE any pointer move** (DESIGN §7.2; never `git reset --hard`),
+  advance the base via the freshness-guarded `git.FastForwardBaseRef` (SSOT detached-HEAD + update-ref ONLY,
+  DESIGN §2), and persist each repo's phase through `landstate.Store` (PhasePending → PhaseLanded / PhaseBlocked);
+  a refusal parks the record for resume. Build it test-first over the hermetic real-git harness, one repo-cell
+  unit at a time. THEN (b) the **`land` CLI command** + (c) the **`state cas`** command (DESIGN §8: ownership =
+  `internal/state`, land consumes; `--expected __ABSENT__` sentinel frozen). THEN: **HEAL-5** `land continue/
+  abort/status` (parked-land resume/abort restoring `BackupSHA`, §7.2 — consumes this keystone); **HEAL-6**
+  mirror-stale refusal at land (exit 6, never auto-rebase; offline reconciliation NEVER flips a phase to
+  `landed`); **HEAL-7** atomic `.wi/` writes (largely done via lockfs — audit); **HEAL-8** `wi doctor`/`check` +
+  bounded `--fix` (LAST — composes the safe heals, and resolves the recovery-vs-read-only tension recorded above).
+  **DEFERRED (not next):** HEAL-GC-NO-LIVE-LOSS **case (iii)** — needs a journaled discard/reset verb that does
+  not exist in the current command surface (journal kinds = `isolate_new`/`isolate_rm`/`land`); revisit only when
+  such a verb is built. Do NOT fake it with a vacuous test (decision #GC-AHEAD-V0).
 
   (41) ✅ **(prior firing)** — **HEAL-4 sub-unit 3d-iv-a: `recovery.Run` — the offline startup recovery PASS under
   the workspace lock** (guard `HEAL-CRASH-RECOVER`, startup-pass limb; `internal/recovery/run.go` +
@@ -2279,6 +2317,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CONFIG-PARSE | make `stripJSONC` a no-op (`return src`) → the golden manifest's comments become JSON syntax errors → `TestParseAcceptsGolden` RED; drop `dec.DisallowUnknownFields()` → the 3 unknown-key cases parse cleanly → `TestParseRejectsInvalid` RED |
 | STATE-PERSIST | make `Store` divert the write (`p+".mutant"`) so `Load` can't find it → `TestRecordRoundTrips` RED; or make `UpdateRepoStage` skip its unknown-repo error (`found := true`) so flipping a non-existent repo wrongly succeeds → `TestUpdateRepoStageFlipsOneRepo` RED |
 | STATE-DURABLE | replace `lockfs.WriteFileAtomic` with `os.WriteFile` in `Store` (keep `lockfs` referenced so the assertion, not the compiler, reddens) → the injected `WI_FAULT=lockfs.before_rename` no longer aborts so the interrupted flip lands → `TestDurablePartialSuccess` RED |
+| LANDSTATE-PERSIST + LANDSTATE-WIRE (M4 land keystone) | the durable `.wi/land/<task>.json` parked-land record + codec (`internal/landstate`, mirror of `state`). Registered mutant = rename the `backup_sha` json tag on `RepoLand` (→ `backupSha`): `TestTaskLandRoundTrips` STAYS GREEN (Marshal+Unmarshal share the tag, staying symmetric — a round-trip is VACUOUS against a tag rename, the LOCK-HOLDER lesson), while `TestStoredWireIsStable` RED on the absent literal `"backup_sha"` in the stored bytes — it pins the CONCRETE durable wire (the literal keys `"task"`/`"op_id"`/`"repo"`/`"phase"`/`"backup_sha"`, the value `"blocked"`, the backup sha) one wi build must read back from another. Alternate: change `PhaseBlocked`'s value (`"blocked"`→`"blocked-MUT"`) → `TestStoredWireIsStable` RED on the absent `"blocked"` literal. Confirmed RED→revert→`(cached)` GREEN (byte-identity). Pure local persistence, no build tag. Darwin RED→GREEN + gofmt clean + linux cross-build/vet clean |
 | ISOLATE-NEW | drop the stop-on-first-fail `return` in `isolate.New` (turn it into `continue`) → the loop materializes the repo AFTER the failed one → `TestNewStopsOnFirstFailWithDurablePartialSuccess` RED on the 3 "db not attempted" assertions (result stage, durable stage, on-disk worktree); or skip the upfront all-pending `state.Store` → the first repo's `UpdateRepoStage` finds no record (`state: no isolate record`) and no durable registry exists to resume from → both `TestNewMaterializesAllReposComplete` + `TestNewStopsOnFirstFail…` RED |
 | RESOLVE-BUNDLE | wire per-repo `mirror` to the worktree path (`mirror := worktree`) instead of `layout.Repo` in `resolve.Bundle` → the SSOT mirror equals the worktree, reddening both repos' `Mirror` assertions in `TestBundleProjectsRecordPaths` (proves Bundle distinguishes the `isolas/<task>/<repo>` worktree from the `repos/<repo>` SSOT clone); or `continue` on one repo (drop it from the loop) → the projected `Repos` count/second-repo assertions RED (proves every recorded repo is projected, in order) |
 | SHAPE-ONE-ENVELOPE | make `cli.Emit` write the envelope TWICE (a second `w.Write(b)`) → the stream carries two top-level JSON values → `TestEmitWritesExactlyOneEnvelope` RED (second `Decode` returns a document, not `io.EOF`); or drop the trailing `'\n'` (`w.Write` without `append(b,'\n')`) → `TestEmitTerminatesWithSingleNewline` RED |
