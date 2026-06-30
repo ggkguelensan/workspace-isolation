@@ -215,6 +215,13 @@ starts. Only `wi version` is wired (a stub proving the pipeline shape compiles).
    `HOST-BOOTID`. Supported platforms = linux + darwin (other unix deferred to M5's portability matrix).
 4. **isolate-remove recovery policy** — roll-forward (finish deletion) vs roll-back (restore);
    leaning roll-forward, but then an interrupted remove can't be undone by re-running. *Blocks: M2.*
+   **RESOLVED 2026-06-30: roll-FORWARD, decided per-op by the durable op journal's furthest-reached
+   phase (HEAL-4, `journal.Classify`).** An op that reached `committed` (crossed its point of no
+   return) is FINISHED on the next offline startup — an interrupted isolate-rm completes its deletion,
+   it is never restored (accepting that an interrupted remove cannot be undone by re-running, exactly
+   the documented trade-off). An op that only reached `intent` (crashed before commit) is ABANDONED:
+   recovery neither finishes it (nothing durably began) nor undoes it (there is no roll-back), leaving
+   any partial artifacts to the evidence-positive heals (isolate repair / gc). Guard `HEAL-CRASH-RECOVER`.
 5. **SIGINT / exit-130 coverage** — add an explicit per-long-running-command SIGINT row (clean
    partial-state flush + exit 130 + well-formed envelope) or accept the SIGKILL-sweep folding.
 6. **Go libs sign-off** — **RESOLVED 2026-06-30: zero new deps, both halves hand-rolled.**
