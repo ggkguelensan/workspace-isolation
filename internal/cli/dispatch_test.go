@@ -122,6 +122,54 @@ func TestDispatchRoutesUnknownToUsage(t *testing.T) {
 	}
 }
 
+// TestDispatchUnknownCommandSuggests pins the agent-recovery half of the unknown-command
+// path (DESIGN §3.1 / PLAN M3): the usage envelope's error.did_you_mean[] is populated
+// from suggest.For over the registered command names, and error.help points at `wi help`
+// so an agent can self-correct without a human. A near-miss yields the closest command; a
+// token with no near match yields no did_you_mean (omitempty disappears) but still the
+// help pointer.
+//
+// Non-vacuity mutant (registered): in the unknown-command path drop the suggest.For call
+// (leave DidYouMean nil) → the "innit"→[init] assertion RED; or blank error.help → the
+// help-pointer assertions RED on both the near-miss and no-match cases.
+func TestDispatchUnknownCommandSuggests(t *testing.T) {
+	var buf bytes.Buffer
+	last := map[string][]string{}
+	reg := recordingRegistry(t, last)
+
+	// "innit" is one edit from the registered "init".
+	code, err := cli.Dispatch(context.Background(), &buf, fakeClock(t), reg, []string{"innit"})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if code != contract.ExitUsage {
+		t.Errorf("unknown command exit = %d, want %d", code, contract.ExitUsage)
+	}
+	env := decodeOne(t, &buf)
+	if env.Error == nil {
+		t.Fatal("unknown command must be a failure envelope")
+	}
+	if got := env.Error.DidYouMean; len(got) != 1 || got[0] != "init" {
+		t.Errorf("did_you_mean = %#v, want [init]", got)
+	}
+	if env.Error.Help != "wi help" {
+		t.Errorf("error.help = %q, want \"wi help\"", env.Error.Help)
+	}
+
+	// A token with no near match: no did_you_mean, but still the help pointer.
+	var nbuf bytes.Buffer
+	if _, err := cli.Dispatch(context.Background(), &nbuf, fakeClock(t), reg, []string{"xyzzy"}); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	nenv := decodeOne(t, &nbuf)
+	if len(nenv.Error.DidYouMean) != 0 {
+		t.Errorf("no near match must yield no did_you_mean, got %#v", nenv.Error.DidYouMean)
+	}
+	if nenv.Error.Help != "wi help" {
+		t.Errorf("error.help = %q, want \"wi help\" even with no suggestion", nenv.Error.Help)
+	}
+}
+
 func TestDispatchFactoryErrorIsUsage(t *testing.T) {
 	var buf bytes.Buffer
 	last := map[string][]string{}

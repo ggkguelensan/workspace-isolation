@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/ggkguelensan/workspace-isolation/internal/cli/opid"
 	"github.com/ggkguelensan/workspace-isolation/internal/clock"
 	"github.com/ggkguelensan/workspace-isolation/internal/contract"
+	"github.com/ggkguelensan/workspace-isolation/internal/suggest"
 )
 
 // Registry maps a canonical command string (e.g. "init", "isolate new") to a factory
@@ -52,7 +54,7 @@ func Dispatch(ctx context.Context, w io.Writer, clk clock.Clock, reg Registry, a
 
 	name, rest, ok := resolveCommand(reg, positional)
 	if !ok {
-		return emit(w, usageEnvelope(m, "unknown command: "+bestEffortName(positional)), format)
+		return emit(w, unknownCommandEnvelope(m, reg, bestEffortName(positional)), format)
 	}
 	m.Command = name
 
@@ -147,6 +149,31 @@ func usageEnvelope(m Meta, msg string) contract.Envelope {
 		Kind:    contract.KindUsage,
 		Message: msg,
 	})
+}
+
+// unknownCommandEnvelope is the usage failure for an unresolved command, enriched with
+// the two agent-recovery hints the cli writer is the SOLE injector of (DESIGN §3.1 / §7):
+// error.did_you_mean[] is the closest registered command(s) per suggest.For (nil → the
+// omitempty field disappears), and error.help points at `wi help` so an agent can list
+// the real command surface without a human. attempted is the one/two tokens the user
+// typed (bestEffortName).
+func unknownCommandEnvelope(m Meta, reg Registry, attempted string) contract.Envelope {
+	env := usageEnvelope(m, "unknown command: "+attempted)
+	env.Error.DidYouMean = suggest.For(attempted, registeredNames(reg))
+	env.Error.Help = "wi help"
+	return env
+}
+
+// registeredNames returns the registry's canonical command names in sorted order — the
+// candidate set suggest.For ranks the typo against. Order does not affect the suggestion
+// (suggest.For sorts its own output), but a stable list keeps the function pure.
+func registeredNames(reg Registry) []string {
+	names := make([]string, 0, len(reg))
+	for name := range reg {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // emit renders env in the chosen format and returns its exit code — the same

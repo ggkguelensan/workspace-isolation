@@ -1041,15 +1041,23 @@ Branch: `build/wi` (never commit to `main`). Spec: `DESIGN.md`. Order: `IMPLEMEN
   ok=false (so the caller can refuse with a `did_you_mean` hint). Non-vacuity mutant: described
   source-edits (ignore the topic / ok=true on unknown / drop the `wi ` prefix / blank a row) — each
   reddens a distinct guard test. Pure, zero-dep, no contract/cli coupling yet.
-- **NEXT — wire suggest + help into `dispatch`** (the `cli` envelope writer is the sole injector,
-  DESIGN line 156 / §7): (1) on the unknown-command path (`dispatch.go:55`) populate the error
-  envelope's `did_you_mean[]` from `suggest.For(attempted, registeredNames)` and set `help` to the
-  relevant `wi help …` pointer; (2) register a `help` command so `wi help [topic]` returns the help
-  model and the advertised `help-json` capability actually has a backing command (closes the PLAN
-  line 108 "capabilities ⇒ backing command" violation); (3) add the help↔registry SYNC fitness — a
-  `cli`-layer test (it can import both `help` and the registry without a cycle, since `help` stays
-  pure) asserting `help.Commands()` names == `BuildRegistry` keys, so the metadata table can never
-  drift from the live command surface ("help can never lie", DESIGN §3.1).
+- ✅ **DONE (this firing) — unknown-command suggestion injection** (commit pending, guard
+  `DISPATCH-DIDYOUMEAN`): `cli.unknownCommandEnvelope` now populates the usage envelope's
+  `error.did_you_mean[]` from `suggest.For(attempted, registeredNames(reg))` (sorted registry keys)
+  and sets `error.help = "wi help"`, so an unknown/typo'd command self-corrects. `nil` suggestion →
+  omitempty drops the field; the help pointer is always present.
+- **NEXT — register a `help` command**: a `cli` handler (`cmd_help.go` + a `"help"` `BuildRegistry`
+  entry) so `wi help [topic]` returns `help.For(topic)` as an envelope and the advertised `help-json`
+  capability finally has a backing command (closes the PLAN line 108 "capabilities ⇒ backing command"
+  violation). Needs a contract decision: how the help Model rides the envelope — a reserved additive
+  `help` block on `contract.Envelope` (contract is sole owner of the wire type) carrying
+  topic/synopsis/usage/commands, plus `Next` from the model. Topic resolution: no args → overview;
+  args joined (`help isolate new`) → that command; unknown topic → not_found + `did_you_mean` via
+  suggest. Test-first with its non-vacuity mutant.
+- **THEN — help↔registry SYNC fitness**: a `cli`-layer test (it can import both `help` and the
+  registry without a cycle, since `help` stays pure) asserting `help.Commands()` names ==
+  `BuildRegistry` keys, so the metadata table can never drift from the live command surface ("help can
+  never lie", DESIGN §3.1).
 - **THEN — re-verify M0–M3 end-to-end** (build/vet/test/gofmt + `goreleaser check` + binary smoke incl.
   `wi help` exit 0 and an unknown command carrying `did_you_mean`). Only then is the MVP genuinely green
   and the STOP condition real.
@@ -1191,6 +1199,7 @@ real domain work into that pipeline, then the `cmd/wi` main, then CI/release.
 | CMD-INIT | in `initCmd.Run` open the manifest with `O_TRUNC` instead of `O_EXCL` (clobber-on-reinit) → a re-init silently rewrites the manifest and returns `ActionCreated` (no `fs.ErrExist`→`already_exists`) → `TestInitOnExistingProjectIsAlreadyExists` RED (got a result + nil error, want `*cli.CommandError{already_exists}`, and the manifest is no longer preserved); or make `newInitCommand` accept any arg count (skip `len(args)!=0`) → `TestInitFactoryRejectsArgs` RED |
 | CTX-OPID | in `Execute` drop the `ctx = WithOpID(ctx, m.OpID)` injection (`if false {…}`) → the Command observes `""` from `OpIDFrom(ctx)` instead of the minted op_id → `TestExecuteInjectsOpIDIntoContext` RED (saw `""`, want the `Meta.OpID`) |
 | DISPATCH-ROUTES | in `cli.resolveCommand` ignore the parsed name and always return a fixed real command (`return "init", positional, true`) → an unknown name wrongly runs a real command (exit 0 not 64) → `TestDispatchRoutesUnknownToUsage` RED, and the 2-token name is mis-stamped with its args dropped → `TestDispatchRoutesTwoTokenCommand` RED; or skip the `op_id` mint (leave `Meta.OpID` empty) → `TestDispatchMintsOpID` RED (`opid.Valid("")` fails on both the success and usage paths) |
+| DISPATCH-DIDYOUMEAN | in `cli.unknownCommandEnvelope` drop the `suggest.For` call (leave `env.Error.DidYouMean` nil) → a near-miss no longer self-corrects → `TestDispatchUnknownCommandSuggests` RED (`innit` got nil, want `[init]`); or blank `env.Error.Help` (`env.Error.Help = ""`) → the `wi help` pointer assertions RED on both the near-miss and the no-match (`xyzzy`) cases; the no-match case stays GREEN on the did_you_mean check under the first mutant (suggest already returns nil there), isolating the mutant to the suggestion-injection path |
 | RUN-PIPELINE | in `cli.envelopeFor` drop the durable-partial result-merge (`if false && r != nil { env.Repos = r.Repos … }`) → a partial no longer carries its per-repo detail → `TestExecutePartialCarriesReposAndExitsTwo` RED ("got 0 repos"); or make `Execute` ignore `ExitFor` and `return contract.ExitOK` → every non-zero-exit assertion (CommandError→3, partial→2, internal→70) RED |
 | CMD-ISOLATE-NEW | in `isolateNewCmd.Run`, on `res.Status == isolate.StatusPartial` return `(result, nil)` instead of `(result, *CommandError{Kind:partial})` → a partial is mis-reported as a clean success (no error, exit 0) → `TestIsolateNewDurablePartial` RED (`want *cli.CommandError, got <nil>`); or drop the unknown-repo `!ok` not_found branch (skip the `cfg.Lookup` check) → `TestIsolateNewUnknownRepoIsNotFound` RED (no error / wrong kind) |
 | SYNC-RUN | drop the `g.FastForwardBaseRef` call in `syncOne` (`if false {…}`, keep the snapshot built from `originSHA`) → after the origin advances the on-disk base ref is never moved → `TestSyncFastForwardsToNewOriginTip` RED (on-disk base frozen at the seed tip, not the new origin tip), while the fresh-materialize + continue-on-fail tests stay GREEN (isolates the mutant to the advance path); secondary: turn the per-repo loop's continue-on-fail into break/return-on-first-error → `TestSyncContinuesOnFailureAndReportsPartial` RED (the reachable repo after the failed one is never synced) |
